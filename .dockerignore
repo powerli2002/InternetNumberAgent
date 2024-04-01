@@ -1,0 +1,7 @@
+Dockerfile
+*.md
+*git*
+test
+script
+data
+logs

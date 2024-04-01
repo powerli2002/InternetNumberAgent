@@ -1,0 +1,12 @@
+pandas
+psycopg2
+pytricia
+PyYAML
+jsoncomment
+fastapi[all]
+uvicorn
+tqdm
+tld
+IPy
+apscheduler
+paramiko

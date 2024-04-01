@@ -1,0 +1,38 @@
+test/data/
+test/logs/
+temp/
+setup_test.py
+data/raw
+*.ipynb
+# 忽略所有 .log 文件
+*.log
+# 忽略所有 .json 文件
+*.json
+*.jsonl
+# 忽略所有 .csv 文件
+*.csv
+# 忽略所有 .txt 文件
+*.txt
+# 忽略所有 .data 文件
+*.data
+# 忽略所有 .gz 压缩文件
+*.gz
+# 忽略所有 .bz2 压缩文件
+*.bz2
+# 忽略所有 .pyc 文件，这种文件是 Python 的运行缓存文件
+*.pyc
+# 不忽略 requirements.txt 文件
+!requirements.txt
+!data/static/*.csv
+!data/static/*.json
+!data/static/*.txt
+!data/utils/*.csv
+
+# 忽略 jebrain 系列 IDE 的配置文件
+.idea
+# 忽略 vscode 的配置文件
+.vscode
+# 忽略缓存文件
+.DS_Store
+# 忽略缓存文件
+__pycache__/
