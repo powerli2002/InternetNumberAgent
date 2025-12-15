@@ -60,8 +60,8 @@ def parseData(source_bgp_file: str, target_dir: str, target_file_name: str = Non
 
 def get_ripe_bgp_data():
 
-    ripe_dir = os.path.join(BGP_DATA_PATH, 'ripe')
-    subprocess_dict = {}
+    ripe_dir = os.path.join(BGP_DATA_PATH, 'ripe') # rrc00 - rrc24
+    subprocess_dict = {}  # 存储子进程
 
     l = []
     for dirpath, dirnames, filenames in os.walk(ripe_dir):
@@ -71,8 +71,9 @@ def get_ripe_bgp_data():
     if len(l) < 2:
         return ''
 
-    date = l[-2]
+    date = l[-2]   # 避免下载未完成的最新文件
     logger.info(f'最新 BGP 数据日期 {date}')
+    # 找所有日期为最新的rrc记录，合并到rib格式data文件中。
     for dirpath, dirnames, filenames in os.walk(ripe_dir):
         for filename in [f for f in filenames if f.startswith('bview') and f.endswith('gz')]:
             if date in filename:
@@ -93,6 +94,7 @@ def get_ripe_bgp_data():
                         subprocess_dict[target] = p
                         break
     '''
+    # 等待所有rrc*目录下的最新文件下载完成
     for target, p in subprocess_dict.items():
         logger.info(f'正在解析 {target} ...')
         p.wait()

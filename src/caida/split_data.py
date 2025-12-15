@@ -25,14 +25,14 @@ def append_country_cn_in_df(data: pd.DataFrame, country_map: dict) -> pd.DataFra
     return data
 
 
-df = pd.read_csv('/home/lgh/fusionprocessing/data/format/as_entity_base.csv', usecols=['asn', 'source', 'descr', 'registration_date', 'last_change_date',
+df = pd.read_csv('/home/back_data/fusionprocessing/data/format/as_entity_base.csv', usecols=['asn', 'source', 'descr', 'registration_date', 'last_change_date',
                  'as_rank', 'as_longitude', 'as_latitude', 'as_country', 'as_country_cn', 'aut_name'])
 df.dropna(subset=['descr', 'aut_name'], inplace=True, how='all')
-# df = pd.read_csv('/home/lgh/fusionprocessing/src/caida/data/org_data.csv')
+# df = pd.read_csv('/home/back_data/fusionprocessing/src/caida/data/org_data.csv')
 # df.rename(columns={'orgName': 'org_name', 'country.name': 'country_en'}, inplace=True)
 # print(df.shape)
 
-df_country_code = pd.read_csv('/home/lgh/fusionprocessing/data/utils/iso3166.csv', na_filter=False)
+df_country_code = pd.read_csv('/home/back_data/fusionprocessing/data/utils/iso3166.csv', na_filter=False)
 country_code_map = dict(zip(df_country_code['ISO_2'].values, df_country_code['ZH'].values))
 
 if 'country.iso' in df.columns and 'country' not in df.columns:

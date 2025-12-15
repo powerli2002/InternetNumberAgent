@@ -1,6 +1,6 @@
 import pandas as pd
 
-df_opq_group = pd.read_csv('/home/lgh/fusionprocessing/data/org_entity/as_org_mapping.csv', dtype={'asn': str},
+df_opq_group = pd.read_csv('/home/back_data/fusionprocessing/data/org_entity/as_org_mapping.csv', dtype={'asn': str},
                            usecols=['org_name', 'sibling', 'uuid', 'org_name_cn', 'asn'])
 
 

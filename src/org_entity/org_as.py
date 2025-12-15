@@ -273,9 +273,9 @@ class OrgAS(BaseEntity):
             tech_email = [i.lower() for i in row.tech_email_key] if isinstance(row.tech_email_key, list) else []
             admin_email = [i.lower() for i in row.admin_email_key] if isinstance(row.admin_email_key, list) else []
             tech_email_set = set(tech_email)
-            admin_email_set = set(admin_email)
-            # tech 更能代表 AS 的归属方
-            # 但存在拥有非常多 tech 的 AS 的情况（mail key阈值 5），此时 admin 则更有代表性
+            admin_email_set = set(admin_email) 
+            # tech 更能代表 AS 的归属方 技术联系人
+            # 但存在拥有非常多 tech 的 AS 的情况（mail key阈值 5），此时 admin 则更有代表性  管理员联系人
             if len(tech_email_set) > 0 and len(tech_email_set) < 5:
                 mixed_mail_set = tech_email_set
             else:

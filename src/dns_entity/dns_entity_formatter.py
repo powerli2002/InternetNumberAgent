@@ -299,7 +299,6 @@ class DNSEntityFormatter(BaseEntity):
     def match_industry(self) -> None:
         """
         处理网站实体中的'industry'字段，根据输入的网站归属行业数据匹配网站归属行业。
-
         """
 
         start_time = time.time()

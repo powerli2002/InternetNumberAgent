@@ -53,7 +53,7 @@ class OrgEntityFormatter(BaseEntity):
         获取组织机构信息
 
         '''
-        df_org_group = self.df_as_info.groupby('uuid').agg(  # 按 uuid 分组
+        df_org_group = self.df_as_info.groupby('uuid').agg(  # 按 uuid 分组 组织机构的id
             {
                 'as_country': lambda x: x.mode()[0],
                 'as_country_cn': lambda x: x.mode()[0],

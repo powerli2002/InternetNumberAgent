@@ -310,6 +310,7 @@ class ASWithMailKey(BaseEntity):
         return result
 
     def run(self, handle_as=True):
+        #　过滤出状态为 'allocated' 或 'assigned' 的记录，并根据不同的RIR（如'arin'、'apnic'等），读取相应的RDAP信息文件
         result_dict = self.grouped_csv(handle_as)
 
         for rir in self.rir_list:
@@ -327,7 +328,7 @@ class ASWithMailKey(BaseEntity):
 
             for c in ['org_email', 'admin_email', 'tech_email', 'abuse_email']:
                 df[c] = df[c].apply(lambda x: literal_eval(x) if isinstance(x, str) else x)
-                df[f'{c}_key'] = df[c].apply(lambda x: list(mail_set(x, self.tld_set)) if isinstance(x, list) else None)
+                df[f'{c}_key'] = df[c].apply(lambda x: list(mail_set(x, self.tld_set)) if isinstance(x, list) else None) # mail是列表，则返回检查过的邮件列表
 
             if handle_as:
                 target_str = 'as'

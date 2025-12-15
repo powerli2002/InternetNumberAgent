@@ -2,7 +2,7 @@ import pandas as pd
 import json
 import os
 
-df = pd.read_csv('/home/lgh/fusionprocessing/data/format/as_entity_2023-10-17.csv', dtype={'asn': int}, usecols=['asn', 'source', 'status', 'descr', 'as_rank', 'org_id', 'org_country', 'org_country_cn',
+df = pd.read_csv('/home/back_data/fusionprocessing/data/format/as_entity_2023-10-17.csv', dtype={'asn': int}, usecols=['asn', 'source', 'status', 'descr', 'as_rank', 'org_id', 'org_country', 'org_country_cn',
                  'org_name', 'org_name_cn', 'type', 'as_country', 'as_country_cn', 'aut_name', ], keep_default_na=False)
 
 # org_name = 'China Education and Research Network (CERNET)'

@@ -3,7 +3,7 @@ import ast
 import subprocess
 import time
 
-df_caida_org = pd.read_csv('/home/lgh/fusionprocessing/src/caida/data/org_data.csv', dtype={'orgId': str})
+df_caida_org = pd.read_csv('/home/back_data/fusionprocessing/src/caida/data/org_data.csv', dtype={'orgId': str})
 df_caida_org = df_caida_org[df_caida_org['orgId'] == '1191b749c0']
 data_asns = df_caida_org['members.asns.edges'].values[0]
 # print(type(data_asns))
@@ -12,7 +12,7 @@ data_asns = ast.literal_eval(data_asns)
 list_asns = [int(x['node']['asn']) for x in data_asns]
 print(list_asns)
 
-df_source = pd.read_csv('/home/lgh/rirdata/data/format/2023-07-06/asn.csv', dtype={'asn': int})
+df_source = pd.read_csv('/home/back_data/rirdata/data/format/2023-07-06/asn.csv', dtype={'asn': int})
 df_source = df_source[df_source['asn'].isin(list_asns)]
 df_source.sort_values(by=['opq_id'], inplace=True, axis=0)
 print(df_source)

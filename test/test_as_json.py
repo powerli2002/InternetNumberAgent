@@ -3,7 +3,7 @@ import os
 from ast import literal_eval
 
 
-rir_data_dir = '/home/lgh/rirdata/data/format/2023-04-26'
+rir_data_dir = '/home/back_data/rirdata/data/format/2023-04-26'
 
 df_as_dict = pd.read_csv('../data/format/as_dict_old.csv',
                          usecols=['asn', 'region', 'as_name', 'descr', 'is_ddos_provider', 'org_name', 'admin', 'tech', 'abuse', 'sibling_as', 'v6Upstream', 'v6Peer', 'v6Propagation', 'v6Prefixes', 'v4Upstream', 'v4Peer', 'v4Propagation', 'v4Prefixes'])

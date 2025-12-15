@@ -10,7 +10,7 @@ def solve_members(x):
         return []
 
 
-# df_caida = pd.read_csv('/home/lgh/fusionprocessing/src/caida/data/org_data.csv',
+# df_caida = pd.read_csv('/home/back_data/fusionprocessing/src/caida/data/org_data.csv',
 #                        usecols=['orgId', 'orgName', 'rank', 'country.iso', 'members.asns.edges'])
 # df_caida.rename(columns={'orgId': 'org_id', 'orgName': 'org_name', 'country.iso': 'country',
 #                 'rank': 'org_rank',  'members.asns.edges': 'sibling_as'}, inplace=True)
@@ -22,7 +22,7 @@ def solve_members(x):
 df_caida = pd.read_csv('data/caida_org_explode.csv',
                        dtype={'asn': int}, usecols=['asn', 'org_id', 'org_name', 'org_rank'])
 
-df_source = pd.read_csv('/home/lgh/rirdata/data/format/2023-07-06/asn.csv', dtype={'asn': int})
+df_source = pd.read_csv('/home/back_data/rirdata/data/format/2023-07-06/asn.csv', dtype={'asn': int})
 
 df = pd.merge(df_source, df_caida, on='asn', how='left')
 df['country'] = df['country'].fillna('ZZ')

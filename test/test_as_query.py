@@ -1,36 +1,36 @@
 import pandas as pd
 import os
 
-df_source = pd.read_csv('/home/lgh/rirdata/data/format/2023-07-18/asn.csv',
+df_source = pd.read_csv('/home/back_data/rirdata/data/format/2023-07-18/asn.csv',
                         usecols=['asn', 'opq_id'], dtype={'asn': int})
 # len_group = len(df_source.groupby('opq_id'))
 # print(len_group)
 # df_source = df_source[df_source['opq_id'] == 'A914EAE4']
 
-df = pd.read_csv('/home/lgh/fusionprocessing/data/format/as_entity_2023-07-06.csv', usecols=[
+df = pd.read_csv('/home/back_data/fusionprocessing/data/format/as_entity_2023-07-06.csv', usecols=[
                  'asn', 'aut_name', 'descr', 'as_country', 'as_country_cn', 'as_rank', 'org_id', 'org_name', 'org_rank'], dtype={'asn': int, 'org_id': str})
 
 df = pd.merge(df, df_source, on='asn', how='left')
 
 xiaoniu_df_list = []
-for f in os.listdir('/home/lgh/fusionprocessing/test/data/result/国家AS信息/'):
+for f in os.listdir('/home/back_data/fusionprocessing/test/data/result/国家AS信息/'):
     df_temp = pd.read_csv(
-        f'/home/lgh/fusionprocessing/test/data/result/国家AS信息/{f}', usecols=['asn', 'descr_xiaoniu'], dtype={'asn': int})
+        f'/home/back_data/fusionprocessing/test/data/result/国家AS信息/{f}', usecols=['asn', 'descr_xiaoniu'], dtype={'asn': int})
     xiaoniu_df_list.append(df_temp)
 df_xiaoniu_as = pd.concat(xiaoniu_df_list, ignore_index=True)
 
 df = pd.merge(df, df_xiaoniu_as, on='asn', how='left')
 
 xiaoniu_df_list = []
-for f in os.listdir('/home/lgh/fusionprocessing/test/data/result/国家组织机构信息/'):
+for f in os.listdir('/home/back_data/fusionprocessing/test/data/result/国家组织机构信息/'):
     df_temp = pd.read_csv(
-        f'/home/lgh/fusionprocessing/test/data/result/国家组织机构信息/{f}', usecols=['orgId', 'org_name_xiaoniu'], dtype={'asn': int, 'orgId': str})
+        f'/home/back_data/fusionprocessing/test/data/result/国家组织机构信息/{f}', usecols=['orgId', 'org_name_xiaoniu'], dtype={'asn': int, 'orgId': str})
     xiaoniu_df_list.append(df_temp)
 df_xiaoniu_org = pd.concat(xiaoniu_df_list, ignore_index=True)
 df_xiaoniu_org.rename(columns={'orgId': 'org_id'}, inplace=True)
 df = pd.merge(df, df_xiaoniu_org, on='org_id', how='left')
 
-df_web = pd.read_csv('/home/lgh/fusionprocessing/test/data/asn_website.csv', dtype={'asn': int})
+df_web = pd.read_csv('/home/back_data/fusionprocessing/test/data/asn_website.csv', dtype={'asn': int})
 df_web.rename(columns={'website': 'as_url'}, inplace=True)
 
 df = pd.merge(df, df_web, on='asn', how='left')

@@ -178,6 +178,7 @@ class ASEntityFormatter(BaseEntity):
                                 dtype={'asn': int}, keep_default_na=False)
         logger.info('AS 地理位置数据加载完成')
 
+        # 所有文件以asn为键
         df = pd.merge(self.df_delegate_asn, df_as_rdap, on='asn', how='left')
         df = pd.merge(df, df_ddos, on='asn', how='left')
         df = pd.merge(df, df_as_ciada, on='asn', how='left')

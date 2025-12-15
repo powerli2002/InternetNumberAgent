@@ -1,6 +1,6 @@
 import pandas as pd
 
-df = pd.read_csv('/home/lgh/fusionprocessing/data/format/country_entity_2023-07-06.csv')
+df = pd.read_csv('/home/back_data/fusionprocessing/data/format/country_entity_2023-07-06.csv')
 
 # USD_CNY_RATE = 7
 

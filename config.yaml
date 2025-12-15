@@ -8,8 +8,8 @@ caida_dir: "./src/caida/data/"
 postgresql_database: "fusionprocessing"
 postgresql_user: "admin"
 postgresql_password: "123456"
-postgresql_host: "10.3.242.223"
+postgresql_host: "127.0.0.1"
 postgresql_port: "5432"
 # The priority of the date configuration is: CLI > YAML > Today
 # Which means you don't have to set this value if you use CLI to set the date or just want to use today's date
-current_date: "2023-10-17"
+current_date: "2024-07-14"

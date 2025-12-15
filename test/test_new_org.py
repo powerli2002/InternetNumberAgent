@@ -13,9 +13,9 @@ def solve_members(x):
         return []
 
 
-df_classify = pd.read_csv('/home/lgh/fusionprocessing/data/format/opq_org_group_with_name_and_sibling.csv')
+df_classify = pd.read_csv('/home/back_data/fusionprocessing/data/format/opq_org_group_with_name_and_sibling.csv')
 df_classify['uuid'] = None
 df_classify['uuid'] = df_classify['org_name'].apply(lambda x: uuid.uuid5(uuid.NAMESPACE_DNS, str(x)).hex)
 # print(df_classify)
-df_classify.to_csv(os.path.join('/home/lgh/fusionprocessing/data/format/',
+df_classify.to_csv(os.path.join('/home/back_data/fusionprocessing/data/format/',
                    'opq_org_group_with_name_and_sibling.csv'), index=False)
