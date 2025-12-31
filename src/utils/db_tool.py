@@ -120,7 +120,8 @@ class DB_Tool():
         except (Exception, DatabaseError) as e:
             logger.error('PostgreSQL 检查表格 %s 是否存在失败：%s' % (table_name, e))
 
-    def df_to_DB(self, df: pd.DataFrame, table_name: str, primary: list = None, ctype: dict = None):
+    def df_to_DB(self, df: pd.DataFrame, table_name: str, primary: list = None, ctype: dict = None,
+                 truncate: bool = True):
         '''
         将 DataFrame 数据导入 PostgreSQL 数据库
 
@@ -133,6 +134,8 @@ class DB_Tool():
             ctype - 表格列数据类型，用于创建表，为 PostgreSQL 类型
 
             primary - 主键列表，支持联合主键
+
+            truncate - 是否在写入前迁移历史并清空表
 
         Returns:
 
@@ -147,7 +150,7 @@ class DB_Tool():
                 self.__creat_table(
                     conn, table_name=table_name, col_list=df.columns.to_list(), primary=primary, ctype=ctype)
 
-            self.__store_data(conn, df, table_name, primary=primary)
+            self.__store_data(conn, df, table_name, primary=primary, truncate=truncate)
 
     def query_by_sql(self, sql: str) -> pd.DataFrame:
         '''
@@ -262,7 +265,8 @@ class DB_Tool():
             logger.error('PostgreSQL 查询表格 %s 失败：%s' % (table_name, e))
             return None
 
-    def __store_data(self, conn: connection, df: pd.DataFrame, table_name: str, primary: list = None):
+    def __store_data(self, conn: connection, df: pd.DataFrame, table_name: str, primary: list = None,
+                     truncate: bool = True):
         '''
         将 DataFrame 数据存储到 PostgreSQL 数据库
 
@@ -295,20 +299,28 @@ class DB_Tool():
         data = [tuple(x) for x in df.values]
 
         col_list = ['\"'+x+'\"' for x in col_list]
+        col_list_sql = ','.join(col_list)
         excluded_str = ','.join(
             ['"'+x+'"'+'=excluded.'+'"'+x+'"' for x in non_primary])  # 用于 ON CONFLICT 语句
 
         try:
             logger.debug('写入 PostgreSQL 数据库表: %s' % table_name)
-            # 创建数据库游标，用 with 语句自动关闭游标
-            with conn.cursor() as cur:
-                # 将已有数据转移至历史表
-                cur.execute('INSERT INTO {0}_audit SELECT * FROM {0}; TRUNCATE {0};'.format(table_name))
-                conn.commit()
+            if truncate:
+                # 创建数据库游标，用 with 语句自动关闭游标
+                with conn.cursor() as cur:
+                    # 审计表不存在时仅清空主表
+                    audit_table = f'{table_name}_audit'
+                    if self.__check_table_exist(conn, audit_table):
+                        cur.execute(
+                            'INSERT INTO {0} ({1}) SELECT {1} FROM {2}; TRUNCATE {2};'.format(
+                                audit_table, col_list_sql, table_name))
+                    else:
+                        cur.execute('TRUNCATE {0};'.format(table_name))
+                    conn.commit()
             with conn.cursor() as cur:
                 # 插入新数据
-                execute_values(cur, 'INSERT INTO {0} VALUES %s ON CONFLICT ({1}) DO UPDATE SET {2};'.format(
-                    table_name, ','.join(f'"{p}"' for p in primary), excluded_str), data)
+                execute_values(cur, 'INSERT INTO {0} ({1}) VALUES %s ON CONFLICT ({2}) DO UPDATE SET {3};'.format(
+                    table_name, col_list_sql, ','.join(f'"{p}"' for p in primary), excluded_str), data)
                 # 提交事务
                 conn.commit()
             logger.debug('%s 数据写入成功' % table_name)

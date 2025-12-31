@@ -4,4 +4,6 @@ Dockerfile
 test
 script
 data
+bgp_data
 logs
+pgdata

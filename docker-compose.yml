@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: fusion-postgres
+    environment:
+      POSTGRES_DB: fusionprocessing
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: 123456
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d fusionprocessing"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  loader:
+    build:
+      context: .
+      dockerfile: Dockerfile.loader
+    container_name: fusion-csv-loader
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /work
+    environment:
+      PYTHONPATH: /work
+    volumes:
+      - .:/work
+    command: ["bash", "-lc", "python scripts/load_all_csv.py --config config.docker.yaml --root /work --date 2024-08-12 --ensure-core"]
+
+  neo4j:
+    image: neo4j:5
+    container_name: fusion-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/neo4j123
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ./neo4j/data:/data
+      - ./neo4j/logs:/logs
+      - ./neo4j/import:/import
+      - ./neo4j/plugins:/plugins

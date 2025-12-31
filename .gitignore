@@ -27,12 +27,6 @@ data/raw
 !data/static/*.json
 !data/static/*.txt
 !data/utils/*.csv
-
-# 忽略 jebrain 系列 IDE 的配置文件
-.idea
-# 忽略 vscode 的配置文件
-.vscode
-# 忽略缓存文件
-.DS_Store
-# 忽略缓存文件
-__pycache__/
+pgdata
+database/db
+neo4j

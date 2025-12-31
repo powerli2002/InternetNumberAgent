@@ -1,0 +1,12 @@
+rir_format_dir: "../rirdata/data/format/"
+logging_dir: "./logs/"
+output_dir: "./data/"
+rib_dir: "./bgp_data/data/"
+caida_dir: "./src/caida/data/"
+
+postgresql_database: "fusionprocessing"
+postgresql_user: "admin"
+postgresql_password: "123456"
+postgresql_host: "postgres"
+postgresql_port: "5432"
+current_date: "2024-08-12"
