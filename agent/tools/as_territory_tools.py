@@ -80,7 +80,8 @@ def main() -> None:
             logger.info("已忽略 --date=%s，自动使用最新日期 %s", args.date, latest_date)
         date = latest_date
     else:
-        logger.warning("未找到 ip_bgp_entity_*.csv，回退到日期 %s", date)
+        logger.error("未找到 ip_bgp_entity_*.csv，无法继续执行")
+        return
 
     ip_bgp_path = format_dir / f"ip_bgp_entity_{date}.csv"
     as_entity_path = format_dir / f"as_entity_{date}.csv"

@@ -1,5 +1,5 @@
 pandas
-psycopg2
+psycopg2-binary
 pytricia
 PyYAML
 jsoncomment
@@ -11,3 +11,13 @@ IPy
 apscheduler
 paramiko
 neo4j
+openai
+langchain
+llama-index
+llama-index-llms-openai
+sqlalchemy
+pymilvus
+python-dotenv
+tiktoken
+socksio
+langsmith
