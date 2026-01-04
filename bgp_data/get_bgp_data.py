@@ -116,7 +116,7 @@ if __name__ == '__main__':
             if date:
                 os.chdir('..')
                 logger.info('开始执行 RIBParser')
-                obj = RIBParser(datetime.datetime.strptime(date, '%Y%m%d').strftime('%Y-%m-%d'), 'config.yaml', False)
+                obj = RIBParser(datetime.datetime.strptime(date, '%Y%m%d').strftime('%Y-%m-%d'), 'conf/config.yaml', False)
                 obj.run()
         except KeyboardInterrupt:
             logger.info('KeyboardInterrupt, Exiting...')

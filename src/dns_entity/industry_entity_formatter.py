@@ -11,7 +11,7 @@ import pandas as pd
 
 
 class IndustryEntityFormatter(BaseEntity):
-    def __init__(self, date: str, config_path='config.yaml', enable_DB=True):
+    def __init__(self, date: str, config_path='conf/config.yaml', enable_DB=True):
         super().__init__(config_path, date, enable_DB)
     
     def run(self):

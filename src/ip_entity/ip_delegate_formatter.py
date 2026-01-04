@@ -7,7 +7,7 @@ import pandas as pd
 
 
 class IPDelegateFormatter(BaseEntity):
-    def __init__(self, date: str, config_path='config.yaml', enable_DB=True):
+    def __init__(self, date: str, config_path='conf/config.yaml', enable_DB=True):
         '''
         IP 地址前缀委托实体格式化工具
 

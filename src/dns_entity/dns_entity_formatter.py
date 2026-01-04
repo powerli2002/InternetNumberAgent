@@ -53,7 +53,7 @@ class DNSEntityFormatter(BaseEntity):
         ipv4_prefix_dir: str,
         output_dir="./data/format/",
         date="2023-07-20",
-        config_path="config.yaml",
+        config_path="conf/config.yaml",
         enable_DB=False,
     ) -> None:
         """

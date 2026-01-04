@@ -68,7 +68,7 @@ if __name__ == '__main__':
                                      'more configuration functions, such as database configuration, etc.',
                                      allow_abbrev=False)
     parser.add_argument('-c', '--conf', type=file_path,
-                        help='YAML configuration file path, default is ./config.yaml')
+                        help='YAML configuration file path, default is ./conf/config.yaml')
     parser.add_argument('-d', '--date', type=valid_date,
                         help='Date of the data to be crawled, format is `%%Y-%%m-%%d`, eg. `2023-01-01`,'
                         'default is today. The priority of the date configuration is: CLI > YAML > Today.')
@@ -158,7 +158,7 @@ if __name__ == '__main__':
                            help='Drop table from database', metavar='tablename')
 
     args = parser.parse_args()
-    config_path = args.conf if args.conf else './config.yaml'
+    config_path = args.conf if args.conf else './conf/config.yaml'
     date = 'latest'
     if args.date:
         date = args.date

@@ -10,7 +10,7 @@ import pandas as pd
 
 
 class ASEntityFormatter(BaseEntity):
-    def __init__(self,  date: str, config_path='config.yaml', enable_DB=True):
+    def __init__(self,  date: str, config_path='conf/config.yaml', enable_DB=True):
         '''
         AS 实体格式化工具
 

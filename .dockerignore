@@ -1,4 +1,3 @@
-Dockerfile
 *.md
 *git*
 test
@@ -7,3 +6,12 @@ data
 bgp_data
 logs
 pgdata
+milvus
+neo4j
+notes
+.venv
+agent-chat-ui
+node_modules
+__pycache__
+ref
+mount

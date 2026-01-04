@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 
 class OrgAS(BaseEntity):
-    def __init__(self, date: str, config_path='config.yaml', enable_DB=True):
+    def __init__(self, date: str, config_path='conf/config.yaml', enable_DB=True):
         super().__init__(config_path, date, enable_DB)
         self.target_dir = os.path.join(self.target_dir, 'format')
         self.org_entity_data_path = './data/org_entity/'

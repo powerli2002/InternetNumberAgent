@@ -31,6 +31,7 @@ CORE_TABLES = [
     "website_entity",
 ]
 CORE_TABLE_SET = set(CORE_TABLES)
+PROTECTED_TABLES = {"agent_threads", "agent_messages"}
 
 
 def load_config(config_path: Path) -> dict:
@@ -103,7 +104,7 @@ def list_public_tables(conn) -> list[str]:
 
 def drop_non_core_tables(conn) -> list[str]:
     existing = list_public_tables(conn)
-    to_drop = [t for t in existing if t not in CORE_TABLE_SET]
+    to_drop = [t for t in existing if t not in CORE_TABLE_SET and t not in PROTECTED_TABLES]
     if not to_drop:
         return []
     with conn.cursor() as cur:
@@ -139,7 +140,7 @@ def get_table_counts(conn, tables: list[str], existing: set[str]) -> dict[str, O
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Load core CSVs into PostgreSQL")
-    parser.add_argument("--config", default="config.docker.yaml", help="YAML config path")
+    parser.add_argument("--config", default="conf/config.docker.yaml", help="YAML config path")
     parser.add_argument("--root", default=".", help="Project root directory")
     parser.add_argument("--date", default=None, help="Date for entity persistence")
     parser.add_argument("--cleanup-only", action="store_true", help="Drop non-core tables and exit")

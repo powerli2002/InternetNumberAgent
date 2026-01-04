@@ -37,10 +37,17 @@ class DashScopeEmbedding(EmbeddingProvider):
         self.client = wrap_openai(OpenAI(api_key=api_key, base_url=base_url))
         self.model = model
         self._dim: Optional[int] = None
+        self._batch_size = 10
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        response = self.client.embeddings.create(model=self.model, input=texts)
-        vectors = [item.embedding for item in response.data]
+        if not texts:
+            return []
+        vectors: List[List[float]] = []
+        # 百炼 Embedding 接口限制批大小，按批切分避免 400 错误
+        for i in range(0, len(texts), self._batch_size):
+            payload = texts[i : i + self._batch_size]
+            response = self.client.embeddings.create(model=self.model, input=payload)
+            vectors.extend([item.embedding for item in response.data])
         if vectors and self._dim is None:
             self._dim = len(vectors[0])
         return vectors

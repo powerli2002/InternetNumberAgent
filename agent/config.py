@@ -47,12 +47,12 @@ class AgentConfig:
 
     @classmethod
     def load(cls, project_root: Optional[Path] = None) -> "AgentConfig":
-        """从 .env 与 config.yaml 加载配置。"""
+        """从 conf/.env 与 conf/config.yaml 加载配置。"""
         root = project_root or Path(__file__).resolve().parents[1]
         cfg = cls(project_root=root)
 
-        # 读取 .env
-        env_path = root / ".env"
+        # 读取 conf/.env
+        env_path = root / "conf" / ".env"
         if env_path.exists():
             cfg.env_path = env_path
             for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -62,8 +62,8 @@ class AgentConfig:
                 key, value = line.split("=", 1)
                 os.environ.setdefault(key.strip(), value.strip())
 
-        # 读取 config.yaml
-        config_yaml = root / "config.yaml"
+        # 读取 conf/config.yaml
+        config_yaml = root / "conf" / "config.yaml"
         if config_yaml.exists():
             cfg.config_yaml = config_yaml
             data = yaml.safe_load(config_yaml.read_text(encoding="utf-8")) or {}

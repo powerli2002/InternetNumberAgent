@@ -21,3 +21,4 @@ python-dotenv
 tiktoken
 socksio
 langsmith
+python-docx

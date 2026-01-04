@@ -52,7 +52,7 @@ def resolve_path(root_dir: Path, path_value: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AS 疆域分析工具（IPv4 前缀 → 国家）")
-    parser.add_argument("--config", default="config.docker.yaml", help="YAML 配置路径")
+    parser.add_argument("--config", default="conf/config.docker.yaml", help="YAML 配置路径")
     parser.add_argument("--root", default=".", help="项目根目录")
     parser.add_argument("--date", default=None, help="已弃用，脚本自动使用最新日期")
     parser.add_argument("--output-dir", default=None, help="输出目录（默认 data/output）")

@@ -10,7 +10,7 @@ from IPy import IP
 
 class RIBParser(BaseEntity):
 
-    def __init__(self,  date: str, config_path='config.yaml', enable_DB=True):
+    def __init__(self,  date: str, config_path='conf/config.yaml', enable_DB=True):
         '''
         RIB路由表数据提取类
 

@@ -8,7 +8,7 @@ import pandas as pd
 
 
 class CountryEntityFormatter(BaseEntity):
-    def __init__(self,  date: str, config_path='config.yaml', enable_DB=True):
+    def __init__(self,  date: str, config_path='conf/config.yaml', enable_DB=True):
         '''
         国家实体格式化工具
 

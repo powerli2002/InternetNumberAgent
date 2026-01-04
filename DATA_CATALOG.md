@@ -6,7 +6,7 @@
 
 ## 1. 数据在项目中的位置与总体规模
 
-项目的核心输出目录由 `config.yaml` 指定：
+项目的核心输出目录由 `conf/config.yaml` 指定：
 
 - `output_dir: "./data/"`：融合后的实体数据输出根目录
 - `rib_dir: "./bgp_data/data/"`：BGP RIB（经 `bgpdump` 解码后的 `|` 分隔文本）输入目录

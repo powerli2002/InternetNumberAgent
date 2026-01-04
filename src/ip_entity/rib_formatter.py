@@ -10,7 +10,7 @@ from IPy import IP
 
 
 class RIBFormatter(BaseEntity):
-    def __init__(self, date: str, config_path='config.yaml', enable_DB=False):
+    def __init__(self, date: str, config_path='conf/config.yaml', enable_DB=False):
         '''
         RIB 路由表数据提取，生成包含 IPv4 路由前缀与路由归属 AS 的数据文件
 
