@@ -17,9 +17,11 @@ class EmbeddingProvider:
     """嵌入模型接口。"""
 
     def embed(self, texts: List[str]) -> List[List[float]]:
+        # 输入批量文本，返回批量向量
         raise NotImplementedError
 
     def dimension(self) -> int:
+        # 返回向量维度（用于建表）
         raise NotImplementedError
 
 
@@ -53,6 +55,7 @@ class DashScopeEmbedding(EmbeddingProvider):
         return vectors
 
     def dimension(self) -> int:
+        # 首次调用时通过探测文本获取向量维度
         if self._dim is None:
             sample = self.embed(["dimension probe"])
             self._dim = len(sample[0]) if sample else 0
@@ -82,6 +85,7 @@ class RAGTool:
         except Exception as exc:
             raise RuntimeError("未安装 pymilvus，无法连接 Milvus。") from exc
 
+        # 建立与 Milvus 的连接，并确保 Collection 已加载
         connections.connect(host=self.host, port=str(self.port))
 
         if utility.has_collection(self.collection_name):
@@ -92,6 +96,7 @@ class RAGTool:
         if not self.dim:
             raise RuntimeError("Embedding 维度为空，无法创建 Milvus Collection。")
 
+        # 若集合不存在，则创建 schema + 索引
         fields = [
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dim),
@@ -108,6 +113,7 @@ class RAGTool:
             return
         if self._collection is None:
             self._connect()
+        # 按文本批量生成向量，并写入 Milvus
         texts = [c.text for c in chunks]
         embeddings = self.embedding.embed(texts)
         sources = [c.source for c in chunks]
@@ -117,6 +123,7 @@ class RAGTool:
     def search(self, query: str, top_k: int = 5) -> List[DocumentChunk]:
         if self._collection is None:
             self._connect()
+        # 查询向量化后进行近邻检索
         embeddings = self.embedding.embed([query])
         results = self._collection.search(
             data=embeddings,

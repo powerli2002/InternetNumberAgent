@@ -23,6 +23,7 @@ class ContextBuilder:
         max_tokens: int = 4096,
         token_counter: Optional[Callable[[str], int]] = None,
     ) -> None:
+        # max_tokens 控制上下文长度，token_counter 可自定义估算方式
         self.max_tokens = max_tokens
         self.token_counter = token_counter or self._default_token_counter
 
@@ -36,11 +37,13 @@ class ContextBuilder:
         notes: List[str],
     ) -> List[ContextChunk]:
         """Gather：收集系统、历史、记忆、证据、笔记。"""
+        # 先把系统指令与用户问题放在上下文最高优先级
         chunks = [
             ContextChunk(title="Role & Policy", content=system_prompt.strip(), score=1.0),
             ContextChunk(title="Task", content=user_query.strip(), score=1.0),
         ]
 
+        # 历史对话作为辅助上下文，分数较低
         for turn in history[-8:]:
             chunks.append(
                 ContextChunk(
@@ -50,6 +53,7 @@ class ContextBuilder:
                 )
             )
 
+        # 记忆与证据提供事实支撑，分数高于历史
         for mem in memories:
             chunks.append(
                 ContextChunk(
@@ -68,6 +72,7 @@ class ContextBuilder:
                 )
             )
 
+        # 便签作为轻量补充
         for note in notes:
             chunks.append(ContextChunk(title="Note", content=note, score=0.5))
 
@@ -75,10 +80,12 @@ class ContextBuilder:
 
     def select(self, chunks: List[ContextChunk]) -> List[ContextChunk]:
         """Select：按评分排序，保留高价值片段。"""
+        # 分数高的片段排在前面，后续结构化时优先保留
         return sorted(chunks, key=lambda x: x.score, reverse=True)
 
     def structure(self, chunks: List[ContextChunk]) -> str:
         """Structure：按模板组织上下文。"""
+        # 将片段按角色/任务/证据/背景分类，减少 LLM 误读
         sections = {
             "Role & Policy": [],
             "Task": [],
@@ -107,6 +114,7 @@ class ContextBuilder:
         """Compress：超过 token 限制时进行截断。"""
         if self.token_counter(context) <= self.max_tokens:
             return context
+        # 简单保留头尾：头部常含系统/任务，尾部保留部分证据
         # 简化策略：保留开头与结尾
         head = context[: max(0, len(context) // 2)]
         tail = context[-max(0, len(context) // 4) :]
@@ -123,6 +131,11 @@ class ContextBuilder:
         notes: List[str],
     ) -> str:
         """完整流水线：Gather -> Select -> Structure -> Compress。"""
+        # GSSC 流水线说明：
+        # 1) Gather：收集系统/任务/历史/记忆/证据/笔记
+        # 2) Select：按评分排序，优先保留高价值片段
+        # 3) Structure：分区组织，减少模型上下文混乱
+        # 4) Compress：超长时裁剪，确保不超过 token 限制
         chunks = self.gather(system_prompt, user_query, history, memories, evidences, notes)
         selected = self.select(chunks)
         structured = self.structure(selected)
@@ -133,5 +146,6 @@ class ContextBuilder:
         """粗略 token 估算：按中文/英文字符长度估算。"""
         import tiktoken  # type: ignore
 
+        # 仅用于粗略估算，不保证与模型精确一致
         enc = tiktoken.get_encoding("cl100k_base")
         return len(enc.encode(text))

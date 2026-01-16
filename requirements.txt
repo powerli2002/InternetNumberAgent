@@ -13,6 +13,9 @@ paramiko
 neo4j
 openai
 langchain
+langchain-openai
+langgraph
+langgraph-cli
 llama-index
 llama-index-llms-openai
 sqlalchemy

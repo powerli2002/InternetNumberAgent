@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from agent.config import AgentConfig
 from agent.context import ContextBuilder
@@ -19,14 +19,18 @@ class FusionAgent:
     """融合 NL2SQL、RAG、记忆与上下文工程的主代理。"""
 
     def __init__(self, config: Optional[AgentConfig] = None) -> None:
+        # 加载配置（包含模型、数据库、向量库等连接信息）
         self.config = config or AgentConfig.load()
+        # 初始化 LLM 客户端，统一用于生成与规划
         self.llm = LLMClient(
             api_key=self.config.dashscope_api_key,
             base_url=self.config.dashscope_base_url,
             model=self.config.dashscope_model,
         )
+        # 上下文组装器：负责将系统/历史/证据整理为模型上下文
         self.context_builder = ContextBuilder(max_tokens=self.config.max_context_tokens)
 
+        # 统一记忆管理：工作记忆（短期）、情景记忆（对话）、语义记忆（图谱）
         memory_dir = self.config.project_root / "agent" / "memory_store"
         self.memory_manager = MemoryManager(
             working_memory=WorkingMemory(capacity=self.config.working_memory_size),
@@ -38,6 +42,7 @@ class FusionAgent:
             ),
         )
 
+        # 工具：便签、待办、追踪、NL2SQL、RAG、任务执行
         self.note_tool = NoteTool(self.config.notes_dir)
         self.todo_tool = TodoTool(self.config.project_root / "agent" / "todo.json")
         self.tracer = LangSmithTracer()
@@ -63,6 +68,7 @@ class FusionAgent:
     def respond(self, user_message: str, history: Optional[List[ConversationTurn]] = None) -> Tuple[str, dict]:
         """主入口：处理用户问题，返回回复与元数据。"""
         history = history or []
+        # 若开启 LangSmith 追踪，则将一次问答作为完整链路记录
         if self.tracer.enabled:
             with self.tracer.start_run(
                 name="fusion_agent",
@@ -75,15 +81,93 @@ class FusionAgent:
 
         return self._respond_core(user_message, history, None)
 
+    def stream_response(
+        self, user_message: str, history: Optional[List[ConversationTurn]] = None
+    ) -> Tuple[Iterable[str], dict]:
+        """流式返回 LLM 输出，用于前端 SSE。"""
+        history = history or []
+        # 与非流式一致，区别在于逐步返回 delta
+        if self.tracer.enabled:
+            with self.tracer.start_run(
+                name="fusion_agent",
+                run_type="chain",
+                inputs={"question": user_message},
+                tags=["fusion", "qa"],
+                metadata={"question_type": self._classify_question(user_message)},
+            ) as root_run:
+                return self._stream_core(user_message, history, root_run)
+        return self._stream_core(user_message, history, None)
+
     def _respond_core(self, user_message: str, history: List[ConversationTurn], root_run) -> Tuple[str, dict]:
+        # 1) 准备上下文（证据/记忆/笔记） 2) 调用 LLM 生成 3) 写入记忆
+        context, sources, question_type = self._prepare_context(user_message, history, root_run)
+
+        messages = [
+            LLMMessage(role="system", content=SYSTEM_PROMPT),
+            LLMMessage(role="user", content=context),
+        ]
+        if root_run:
+            with self.tracer.start_run(
+                name="llm_generate",
+                run_type="llm",
+                inputs={"prompt": context},
+                tags=["llm"],
+                metadata={"question_type": question_type},
+                parent=root_run,
+            ) as run:
+                answer = self.llm.chat(messages)
+                run.add_outputs({"answer": answer})
+        else:
+            answer = self.llm.chat(messages)
+
+        self._write_final_answer(user_message, answer, root_run)
+        return answer, {"sources": list(dict.fromkeys(sources))}
+
+    def _stream_core(self, user_message: str, history: List[ConversationTurn], root_run) -> Tuple[Iterable[str], dict]:
+        # 与 _respond_core 相同流程，但以流式输出答案片段
+        context, sources, question_type = self._prepare_context(user_message, history, root_run)
+        messages = [
+            LLMMessage(role="system", content=SYSTEM_PROMPT),
+            LLMMessage(role="user", content=context),
+        ]
+
+        def _generator() -> Iterable[str]:
+            answer_parts: List[str] = []
+            if root_run:
+                with self.tracer.start_run(
+                    name="llm_generate",
+                    run_type="llm",
+                    inputs={"prompt": context},
+                    tags=["llm"],
+                    metadata={"question_type": question_type},
+                    parent=root_run,
+                ) as run:
+                    for delta in self.llm.chat_stream(messages):
+                        answer_parts.append(delta)
+                        yield delta
+                    run.add_outputs({"answer": "".join(answer_parts)})
+            else:
+                for delta in self.llm.chat_stream(messages):
+                    answer_parts.append(delta)
+                    yield delta
+            answer = "".join(answer_parts)
+            self._write_final_answer(user_message, answer, root_run)
+
+        return _generator(), {"sources": list(dict.fromkeys(sources))}
+
+    def _prepare_context(
+        self, user_message: str, history: List[ConversationTurn], root_run
+    ) -> Tuple[str, List[str], str]:
         evidences: List[EvidenceItem] = []
         sources: List[str] = []
 
+        # 通过轻量规则判断是否走 NL2SQL / RAG / 规划
         use_nl2sql = self._should_use_nl2sql(user_message)
         use_rag = self._should_use_rag(user_message)
         question_type = self._classify_question(user_message)
 
         if use_nl2sql:
+            # NL2SQL：生成 SQL 并执行，结果作为证据
             if root_run:
                 with self.tracer.start_run(
                     name="nl2sql_query",
@@ -105,6 +189,7 @@ class FusionAgent:
                     score=1.0,
                 )
             )
+            # 将查询过程写入情景记忆，便于后续追溯
             if root_run:
                 with self.tracer.start_run(
                     name="memory_write",
@@ -133,6 +218,7 @@ class FusionAgent:
             sources.append("nl2sql")
 
         if use_rag:
+            # RAG：向量检索文档片段作为解释性证据
             if root_run:
                 with self.tracer.start_run(
                     name="vector_search",
@@ -155,6 +241,7 @@ class FusionAgent:
                         score=0.8,
                     )
                 )
+                # 检索结果写入工作记忆，保留短期上下文
                 if root_run:
                     with self.tracer.start_run(
                         name="memory_write",
@@ -183,6 +270,7 @@ class FusionAgent:
                 sources.append(chunk.source)
 
         if self._should_plan(user_message):
+            # 任务规划：长问题拆解为待办项并执行子任务
             if root_run:
                 with self.tracer.start_run(
                     name="todo_plan",
@@ -234,6 +322,7 @@ class FusionAgent:
                     )
                 sources.extend(result.sources)
 
+        # 统一从三类记忆中检索高相关内容补充上下文
         if root_run:
             with self.tracer.start_run(
                 name="memory_lookup",
@@ -249,6 +338,7 @@ class FusionAgent:
             memories = self.memory_manager.search(user_message, top_k=5)
         notes = self.note_tool.search(user_message, limit=3)
 
+        # GSSC：Gather/Select/Structure/Compress 组装上下文
         context = self.context_builder.build(
             system_prompt=SYSTEM_PROMPT,
             user_query=user_message,
@@ -258,24 +348,10 @@ class FusionAgent:
             notes=notes,
         )
 
-        messages = [
-            LLMMessage(role="system", content=SYSTEM_PROMPT),
-            LLMMessage(role="user", content=context),
-        ]
-        if root_run:
-            with self.tracer.start_run(
-                name="llm_generate",
-                run_type="llm",
-                inputs={"prompt": context},
-                tags=["llm"],
-                metadata={"question_type": question_type},
-                parent=root_run,
-            ) as run:
-                answer = self.llm.chat(messages)
-                run.add_outputs({"answer": answer})
-        else:
-            answer = self.llm.chat(messages)
+        return context, sources, question_type
 
+    def _write_final_answer(self, user_message: str, answer: str, root_run) -> None:
+        # 最终回答写入工作记忆，便于后续对话引用
         if root_run:
             with self.tracer.start_run(
                 name="memory_write",
@@ -302,22 +378,24 @@ class FusionAgent:
                 )
             )
 
-        return answer, {"sources": list(dict.fromkeys(sources))}
-
     def _should_use_nl2sql(self, text: str) -> bool:
+        # 简易关键词 + 实体抽取启发式判断是否需要结构化查询
         keywords = ["IP", "ASN", "AS", "前缀", "归属", "国家", "排行", "数量", "bgp", "route"]
         if any(k.lower() in text.lower() for k in keywords):
             return True
         return bool(self._extract_ip(text) or self._extract_asn(text))
 
     def _should_use_rag(self, text: str) -> bool:
+        # 解释性问题优先走 RAG；否则默认也可补充说明
         keywords = ["是什么", "定义", "背景", "原理", "说明", "解释", "如何"]
         return any(k in text for k in keywords) or not self._should_use_nl2sql(text)
 
     def _should_plan(self, text: str) -> bool:
+        # 简单规则：显式“计划/步骤”或长问题触发分解
         return "计划" in text or "步骤" in text or len(text) > 200
 
     def _classify_question(self, text: str) -> str:
+        # 用于埋点统计与策略参考的粗分类
         lowered = text.lower()
         if "ip" in lowered or "ipv4" in lowered or "ipv6" in lowered:
             return "ip_query"
@@ -331,6 +409,7 @@ class FusionAgent:
 
     def _plan_todos(self, text: str) -> List[TodoItem]:
         """使用 LLM 生成待办列表。"""
+        # 期望模型输出 JSON 数组：[{title, intent}, ...]
         prompt = [
             LLMMessage(role="system", content=TODO_PLANNER_PROMPT),
             LLMMessage(role="user", content=text),
@@ -351,6 +430,7 @@ class FusionAgent:
     def _extract_ip(text: str) -> Optional[str]:
         import re
 
+        # IPv4 简单匹配，用于触发 NL2SQL
         match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", text)
         return match.group(1) if match else None
 
@@ -358,6 +438,7 @@ class FusionAgent:
     def _extract_asn(text: str) -> Optional[str]:
         import re
 
+        # ASN 形如 AS123 或 ASN123 的提取
         match = re.search(r"AS\s*(\d+)|ASN\s*(\d+)", text, re.IGNORECASE)
         if not match:
             return None

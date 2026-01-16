@@ -202,6 +202,35 @@ class ThreadStore:
             )
             return int(row[0])
 
+    def update_message(self, message_id: int, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        metadata = metadata or {}
+        with self._engine.begin() as conn:
+            conn.execute(
+                self._text(
+                    """
+                    UPDATE agent_messages
+                    SET content = :content,
+                        metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:metadata AS jsonb)
+                    WHERE id = :message_id
+                    """
+                ),
+                {
+                    "content": content,
+                    "metadata": json.dumps(metadata),
+                    "message_id": message_id,
+                },
+            )
+            conn.execute(
+                self._text(
+                    """
+                    UPDATE agent_threads
+                    SET updated_at = NOW(), status = 'idle'
+                    WHERE thread_id = (SELECT thread_id FROM agent_messages WHERE id = :message_id)
+                    """
+                ),
+                {"message_id": message_id},
+            )
+
     def get_messages(self, thread_id: str) -> List[Dict[str, Any]]:
         with self._engine.begin() as conn:
             rows = conn.execute(
@@ -322,6 +351,18 @@ async def health() -> Dict[str, Any]:
     return {"status": "ok", "time": _now_iso()}
 
 
+@app.get("/info")
+async def info() -> Dict[str, Any]:
+    """LangGraph 兼容信息接口，用于前端连通性检查。"""
+    return {
+        "status": "ok",
+        "assistant_id": "fusion-agent",
+        "graph_id": "fusion-agent",
+        "version": "local",
+        "time": _now_iso(),
+    }
+
+
 @app.post("/threads")
 async def create_thread(payload: ThreadCreateRequest) -> Dict[str, Any]:
     """创建线程。"""
@@ -383,9 +424,9 @@ async def run_thread_stream(thread_id: str, payload: RunStreamRequest, request: 
     store.update_metadata(thread_id, {"assistant_id": assistant_id, "graph_id": assistant_id})
     user_message = _extract_user_message(payload.input)
     history = _build_history(thread_id)
-    answer, metadata = agent.respond(user_message, history=history)
+    stream_iter, metadata = agent.stream_response(user_message, history=history)
     user_msg_id = store.add_message(thread_id, "user", user_message)
-    assistant_msg_id = store.add_message(thread_id, "assistant", answer, metadata or {})
+    assistant_msg_id = store.add_message(thread_id, "assistant", "", {"status": "streaming"})
     message_id = f"msg-{assistant_msg_id}"
 
     stream_modes = payload.stream_mode or "messages"
@@ -400,20 +441,21 @@ async def run_thread_stream(thread_id: str, payload: RunStreamRequest, request: 
         yield _sse(event_id, "metadata", {"run_id": str(uuid.uuid4()), "thread_id": thread_id})
         event_id += 1
 
-        if "messages" in stream_modes or "messages-tuple" in stream_modes:
-            for chunk in _chunk_text(answer):
-                yield _sse(
-                    event_id,
-                    "messages/partial",
-                    [{"id": message_id, "content": chunk, "type": "ai"}],
-                )
+        answer_parts: List[str] = []
+        for chunk in stream_iter:
+            answer_parts.append(chunk)
+            if "messages" in stream_modes or "messages-tuple" in stream_modes:
+                serialized = {
+                    "id": message_id,
+                    "type": "ai",
+                    "content": chunk,
+                }
+                chunk_meta = {"role": "assistant", "chunk": True}
+                yield _sse(event_id, "messages", [serialized, chunk_meta])
                 event_id += 1
-            yield _sse(
-                event_id,
-                "messages/complete",
-                [{"id": message_id, "content": answer, "type": "ai"}],
-            )
-            event_id += 1
+
+        answer = "".join(answer_parts)
+        store.update_message(assistant_msg_id, answer, metadata or {})
 
         if "values" in stream_modes:
             values = {

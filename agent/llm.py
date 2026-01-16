@@ -45,6 +45,29 @@ class LLMClient:
         )
         return response.choices[0].message.content or ""
 
+    def chat_stream(self, messages: List[LLMMessage], temperature: float = 0.2):
+        """流式输出对话内容（逐段返回）。"""
+        try:
+            from openai import OpenAI  # type: ignore
+            from langsmith.wrappers import wrap_openai  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("未安装 openai/langsmith SDK，无法调用百炼兼容接口。") from exc
+
+        if not self.api_key:
+            raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用百炼模型。")
+
+        client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
+        stream = client.chat.completions.create(
+            model=self.model,
+            messages=[message.__dict__ for message in messages],
+            temperature=temperature,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield delta
+
     def structured_chat(self, messages: List[LLMMessage], schema: dict, temperature: float = 0.2) -> dict:
         """要求模型返回 JSON 结构化输出。"""
         content = self.chat(messages, temperature=temperature)

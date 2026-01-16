@@ -117,19 +117,3 @@ services:
       - ..:/work
     working_dir: /work
     command: ["bash", "-lc", "uvicorn agent.api_server:app --host 0.0.0.0 --port 2025"]
-
-  agent-ui:
-    image: node:20-bullseye
-    container_name: fusion-agent-ui
-    depends_on:
-      - agent-api
-    working_dir: /ui
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:2025
-      NEXT_PUBLIC_ASSISTANT_ID: fusion-agent
-      LANGGRAPH_API_URL: http://agent-api:2025
-    ports:
-      - "3011:3010"
-    volumes:
-      - ../agent-chat-ui:/ui
-    command: ["bash", "-lc", "corepack enable && pnpm install --frozen-lockfile --config.confirmModulesDir=false && pnpm exec next dev -H 0.0.0.0 -p 3010"]

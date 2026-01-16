@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fusion-agent"
+version = "0.1.0"
+description = "Fusion Agent package for LangGraph"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+package-dir = { "agent" = "." }
+packages = [
+  "agent",
+  "agent.context",
+  "agent.memory",
+  "agent.tools",
+]

@@ -160,3 +160,14 @@ TABLE_SCHEMA = {
     "org_entity": ["uuid", "org_country", "org_country_cn", "org_name", "org_name_cn", "sibling_as", "v4Prefixes", "v6Prefixes", "sibling_as_num", "v4Prefixes_num", "v6Prefixes_num"],
     "website_entity": ["url", "title", "key", "description", "industry", "ip", "ip_prefix", "auth_ip", "auth_ip_prefix"],
 }
+
+# NL2SQL 提示补充：字段语义与取值约定（避免国家字段误用）
+TABLE_CONTEXT_HINTS = {
+    "as_entity": "as_country 使用 ISO 3166-1 alpha-2 代码（如 CN），as_country_cn 为中文国家名（如 中国）。",
+    "asn_entity": "country 使用 ISO 3166-1 alpha-2 代码（如 CN）。",
+    "country_entity": "country 为 ISO 3166-1 alpha-2 代码，country_cn 为中文国家名。",
+    "ip_bgp_entity": "country 使用 ISO 3166-1 alpha-2 代码。",
+    "ipv4_entity": "country 使用 ISO 3166-1 alpha-2 代码。",
+    "ipv6_entity": "country 使用 ISO 3166-1 alpha-2 代码。",
+    "org_entity": "org_country 使用 ISO 3166-1 alpha-2 代码，org_country_cn 为中文国家名。",
+}
