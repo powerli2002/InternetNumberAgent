@@ -1,7 +1,33 @@
+"""
+NL2SQL 工具模块 - 自然语言到 SQL 的转换与执行
+
+核心功能：
+1. 基于 LlamaIndex 的 SQL 生成引擎
+2. 支持阿里云百炼嵌入模型进行表/列检索优化
+3. 向量索引缓存机制，提高查询性能
+4. PostgreSQL 数据库连接和安全查询执行
+5. 表结构和列值的向量化索引
+
+工作流程：
+1. 接收自然语言问题和可用表列表
+2. 使用向量检索找到相关的表和列
+3. 基于表结构上下文生成 SQL 语句
+4. 在 PostgreSQL 中执行 SQL 并返回结果
+5. 缓存索引以提升后续查询性能
+
+索引策略：
+- 表级索引：对表名和描述进行向量化，支持表相关性排序
+- 列级索引：对列名和示例值进行向量化，支持列值匹配
+- 缓存机制：支持增量更新，避免重复计算
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from llama_index.core.bridge.pydantic import PrivateAttr
@@ -10,9 +36,36 @@ from agent.schema import TABLE_CONTEXT_HINTS, TABLE_SCHEMA
 
 
 class DashScopeLlamaEmbedding:
-    """为 LlamaIndex 提供阿里云百炼嵌入模型适配。"""
+    """
+    阿里云百炼嵌入模型适配器
+
+    为 LlamaIndex 提供兼容的嵌入接口，封装阿里云百炼的 text-embedding-v3 模型。
+    支持批量嵌入生成，自动处理 API 限流和错误重试。
+
+    主要特性：
+    - 兼容 LlamaIndex BaseEmbedding 接口
+    - 支持批量处理（默认批大小 10）
+    - 自动错误处理和重试机制
+    - 与 OpenAI 兼容的 API 调用方式
+
+    使用场景：
+    - NL2SQL 中的表结构向量化
+    - 列值索引构建
+    - 文档相似度计算
+    """
 
     def __init__(self, api_key: str, base_url: str, model: str = "text-embedding-v3") -> None:
+        """
+        初始化嵌入模型适配器
+
+        Args:
+            api_key: 阿里云百炼 API 密钥
+            base_url: API 基础 URL
+            model: 嵌入模型名称，默认 text-embedding-v3
+
+        Raises:
+            RuntimeError: 当缺少依赖或 API 密钥时抛出
+        """
         try:
             from llama_index.core.base.embeddings.base import BaseEmbedding  # type: ignore
             from openai import OpenAI  # type: ignore
@@ -172,7 +225,25 @@ class DatabaseClient:
 
 
 class NL2SQLTool:
-    """自然语言转 SQL 并执行。"""
+    """
+    自然语言到 SQL 转换工具
+
+    基于 LlamaIndex 实现的 NL2SQL 引擎，整合向量检索和 LLM 生成能力。
+    支持表结构检索、列值索引和 SQL 执行，提供完整的查询链路。
+
+    核心特性：
+    - 向量化的表和列索引：提升查询相关性排序
+    - 上下文增强：注入表结构描述和业务含义
+    - 安全执行：支持表白名单和查询结果限制
+    - 缓存机制：索引缓存避免重复计算
+    - 错误处理：SQL 语法检查和执行异常处理
+
+    查询流程：
+    1. 表检索：基于问题匹配相关表
+    2. 列索引：检索相关列的值分布
+    3. SQL 生成：基于上下文生成查询语句
+    4. 执行验证：在数据库中执行并返回结果
+    """
 
     # 默认列索引配置：仅选择相对稳定、类别化程度高的字段
     COLUMN_INDEX_CONFIG: Dict[str, List[str]] = {
@@ -237,6 +308,10 @@ class NL2SQLTool:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: str = "qwen3-max-preview",
+        embedding_model: Optional[str] = None,
+        index_cache_dir: Optional[Path] = None,
+        enable_index_cache: bool = True,
+        force_rebuild_cache: bool = False,
         enable_table_retrieval: bool = True,
         enable_column_retrieval: bool = True,
         table_retriever_top_k: int = 4,
@@ -251,6 +326,10 @@ class NL2SQLTool:
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self.embedding_model = embedding_model or "text-embedding-v3"
+        self.index_cache_dir = Path(index_cache_dir) if index_cache_dir else None
+        self.enable_index_cache = enable_index_cache
+        self.force_rebuild_cache = force_rebuild_cache
         # 仅保留允许表的 schema，避免 NL2SQL 访问非核心表
         self.table_schema = {k: v for k, v in TABLE_SCHEMA.items() if not self.allowed_tables or k in self.allowed_tables}
         self.enable_table_retrieval = enable_table_retrieval
@@ -262,6 +341,9 @@ class NL2SQLTool:
         self.column_index_config = column_index_config or self.COLUMN_INDEX_CONFIG
         self._llm = None
         self._embed_model = None
+        self._table_retriever_cache = None
+        self._cols_retrievers_cache = None
+        self._cache_signature = None
 
     def query(self, question: str, tables: Optional[List[str]] = None) -> NL2SQLResult:
         """使用 LlamaIndex NL2SQL 生成查询并执行。"""
@@ -291,6 +373,7 @@ class NL2SQLTool:
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
         llm = self._get_llm()
         embed_model = self._get_embed_model()
+        self._apply_llamaindex_settings(llm=llm, embed_model=embed_model)
 
         # 为每张表构建上下文提示，帮助模型理解字段语义
         table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
@@ -301,27 +384,18 @@ class NL2SQLTool:
             )
             for table in table_names
         ]
-        # 基于表结构构建向量索引，支持“相关表”检索
+        # 基于表结构与列值构建/加载检索器，避免每次重建索引
         table_node_mapping = SQLTableNodeMapping(db)
-        table_index = ObjectIndex.from_objects(
-            table_schema,
-            table_node_mapping,
-            VectorStoreIndex,
-            embed_model=embed_model,
-        )
-        # 若显式关闭表检索，则回退到返回全部表，避免 SQL 引擎失去表上下文
         table_top_k = self.table_retriever_top_k if self.enable_table_retrieval else len(table_names)
-        table_retriever = table_index.as_retriever(similarity_top_k=table_top_k)
-
-        cols_retrievers = None
-        if self.enable_column_retrieval:
-            # 可选的列值检索：通过列的离散值帮助模型对齐实体
-            cols_retrievers = self._build_column_retrievers(
-                table_names=table_names,
-                embed_model=embed_model,
-                text_node_cls=TextNode,
-                vector_index_cls=VectorStoreIndex,
-            )
+        table_retriever, cols_retrievers = self._get_or_build_retrievers(
+            table_names=table_names,
+            table_schema=table_schema,
+            table_node_mapping=table_node_mapping,
+            table_top_k=table_top_k,
+            embed_model=embed_model,
+            text_node_cls=TextNode,
+            vector_index_cls=VectorStoreIndex,
+        )
 
         engine = SQLTableRetrieverQueryEngine(
             sql_database=db,
@@ -366,9 +440,299 @@ class NL2SQLTool:
             self._embed_model = DashScopeLlamaEmbedding(
                 api_key=self.api_key,
                 base_url=self.base_url or "",
-                model="text-embedding-v3",
+                model=self.embedding_model,
             ).embedding
         return self._embed_model
+
+    def _apply_llamaindex_settings(self, llm, embed_model) -> None:
+        """同步 LlamaIndex 全局设置，避免默认 OpenAIEmbedding 触发缺少 KEY 的异常。"""
+        try:
+            from llama_index.core import Settings  # type: ignore
+        except Exception:
+            return
+        Settings.llm = llm
+        Settings.embed_model = embed_model
+
+    def prepare_index_cache(
+        self,
+        table_names: Optional[List[str]] = None,
+        build_tables: bool = True,
+        build_columns: bool = True,
+        force: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """预构建 NL2SQL 的表/列检索索引，供服务启动前调用。"""
+        if not self.enable_index_cache or not self.index_cache_dir:
+            return {"status": "disabled"}
+        if not self.postgres_url:
+            raise RuntimeError("未配置 POSTGRES_URL，无法预构建索引。")
+        if not self.api_key:
+            raise RuntimeError("未配置 DASHSCOPE_API_KEY，无法预构建索引。")
+
+        table_names = table_names or self.allowed_tables
+        if not table_names:
+            raise RuntimeError("未提供可用表名，无法预构建索引。")
+
+        signature = self._compute_schema_signature(table_names)
+        force_rebuild = self.force_rebuild_cache if force is None else force
+        if not force_rebuild and self._is_cache_valid(signature) and self._cache_dirs_ready(build_tables, build_columns):
+            return {"status": "skipped", "signature": signature}
+
+        if force_rebuild:
+            self._clear_cache_dir()
+
+        try:
+            from llama_index.core import SQLDatabase, VectorStoreIndex  # type: ignore
+            from llama_index.core.objects import ObjectIndex, SQLTableNodeMapping, SQLTableSchema  # type: ignore
+            from llama_index.core.schema import TextNode  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("缺少 llama-index 依赖，无法预构建索引。") from exc
+
+        db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
+        embed_model = self._get_embed_model()
+        self._apply_llamaindex_settings(llm=self._get_llm(), embed_model=embed_model)
+
+        table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
+        table_schema = [
+            SQLTableSchema(
+                table_name=table,
+                context_str=table_context.get(table, ""),
+            )
+            for table in table_names
+        ]
+        table_node_mapping = SQLTableNodeMapping(db)
+
+        if build_tables:
+            self._build_table_retriever(
+                table_schema=table_schema,
+                table_node_mapping=table_node_mapping,
+                embed_model=embed_model,
+                vector_index_cls=VectorStoreIndex,
+                persist_dir=self._table_cache_dir(),
+                table_top_k=self.table_retriever_top_k,
+            )
+
+        if build_columns and self.enable_column_retrieval:
+            self._build_column_retrievers(
+                table_names=table_names,
+                embed_model=embed_model,
+                text_node_cls=TextNode,
+                vector_index_cls=VectorStoreIndex,
+                persist_dir=self._columns_cache_dir(),
+            )
+
+        self._write_index_manifest(signature, table_names, build_columns=build_columns and self.enable_column_retrieval)
+        return {"status": "built", "signature": signature}
+
+    def _get_or_build_retrievers(
+        self,
+        table_names: List[str],
+        table_schema,
+        table_node_mapping,
+        table_top_k: int,
+        embed_model,
+        text_node_cls,
+        vector_index_cls,
+    ):
+        """优先复用缓存索引，必要时重建。"""
+        signature = self._compute_schema_signature(table_names)
+        if self._cache_signature == signature and self._table_retriever_cache is not None:
+            return self._table_retriever_cache, self._cols_retrievers_cache
+
+        table_retriever = None
+        cols_retrievers = None
+        if self.enable_index_cache and self.index_cache_dir and not self.force_rebuild_cache:
+            if self._is_cache_valid(signature):
+                table_retriever = self._load_table_retriever_from_cache(table_node_mapping, table_top_k)
+                if self.enable_column_retrieval:
+                    cols_retrievers = self._load_column_retrievers_from_cache(table_names)
+                if table_retriever and (not self.enable_column_retrieval or cols_retrievers is not None):
+                    self._table_retriever_cache = table_retriever
+                    self._cols_retrievers_cache = cols_retrievers
+                    self._cache_signature = signature
+                    return table_retriever, cols_retrievers
+
+        if self.enable_index_cache and self.index_cache_dir and self.force_rebuild_cache:
+            self._clear_cache_dir()
+
+        table_retriever = self._build_table_retriever(
+            table_schema=table_schema,
+            table_node_mapping=table_node_mapping,
+            embed_model=embed_model,
+            vector_index_cls=vector_index_cls,
+            persist_dir=self._table_cache_dir() if self.enable_index_cache and self.index_cache_dir else None,
+            table_top_k=table_top_k,
+        )
+        cols_retrievers = None
+        if self.enable_column_retrieval:
+            cols_retrievers = self._build_column_retrievers(
+                table_names=table_names,
+                embed_model=embed_model,
+                text_node_cls=text_node_cls,
+                vector_index_cls=vector_index_cls,
+                persist_dir=self._columns_cache_dir() if self.enable_index_cache and self.index_cache_dir else None,
+            )
+
+        if self.enable_index_cache and self.index_cache_dir:
+            self._write_index_manifest(signature, table_names, build_columns=self.enable_column_retrieval)
+
+        self._table_retriever_cache = table_retriever
+        self._cols_retrievers_cache = cols_retrievers
+        self._cache_signature = signature
+        return table_retriever, cols_retrievers
+
+    def _build_table_retriever(
+        self,
+        table_schema,
+        table_node_mapping,
+        embed_model,
+        vector_index_cls,
+        persist_dir: Optional[Path],
+        table_top_k: int,
+    ):
+        # 基于表结构构建向量索引，支持“相关表”检索
+        from llama_index.core.objects import ObjectIndex  # type: ignore
+
+        table_index = ObjectIndex.from_objects(
+            table_schema,
+            table_node_mapping,
+            vector_index_cls,
+            embed_model=embed_model,
+        )
+        if persist_dir:
+            persist_dir.mkdir(parents=True, exist_ok=True)
+            table_index.persist(persist_dir=str(persist_dir))
+        return table_index.as_retriever(similarity_top_k=table_top_k)
+
+    def _load_table_retriever_from_cache(self, table_node_mapping, table_top_k: int):
+        if not self.index_cache_dir:
+            return None
+        table_dir = self._table_cache_dir()
+        if not table_dir or not table_dir.exists():
+            return None
+        try:
+            from llama_index.core.objects import ObjectIndex  # type: ignore
+            table_index = ObjectIndex.from_persist_dir(str(table_dir), object_node_mapping=table_node_mapping)
+            return table_index.as_retriever(similarity_top_k=table_top_k)
+        except Exception:
+            return None
+
+    def _load_column_retrievers_from_cache(self, table_names: List[str]) -> Optional[Dict[str, Dict[str, Any]]]:
+        if not self.index_cache_dir:
+            return None
+        columns_dir = self._columns_cache_dir()
+        if not columns_dir or not columns_dir.exists():
+            return None
+        try:
+            from llama_index.core import StorageContext, load_index_from_storage  # type: ignore
+        except Exception:
+            return None
+
+        cols_retrievers: Dict[str, Dict[str, Any]] = {}
+        for table_name in table_names:
+            column_names = self.column_index_config.get(table_name, [])
+            if not column_names:
+                continue
+            table_retrievers: Dict[str, Any] = {}
+            for column_name in column_names:
+                index_dir = columns_dir / table_name / column_name
+                if not index_dir.exists():
+                    return None
+                try:
+                    storage_context = StorageContext.from_defaults(persist_dir=str(index_dir))
+                    index = load_index_from_storage(storage_context)
+                    table_retrievers[column_name] = index.as_retriever(
+                        similarity_top_k=self.column_retriever_top_k
+                    )
+                except Exception:
+                    return None
+            if table_retrievers:
+                cols_retrievers[table_name] = table_retrievers
+
+        return cols_retrievers or None
+
+    def _compute_schema_signature(self, table_names: List[str]) -> str:
+        """基于表结构与列配置生成稳定签名。"""
+        tables = sorted(table_names)
+        payload = {
+            "tables": tables,
+            "schema": {t: self.table_schema.get(t, []) for t in tables},
+            "context": {t: TABLE_CONTEXT_HINTS.get(t, "") for t in tables},
+            "column_index_config": {t: self.column_index_config.get(t, []) for t in tables},
+            "column_index_max_values": self.column_index_max_values,
+            "column_index_max_value_length": self.column_index_max_value_length,
+            "embedding_model": self.embedding_model,
+        }
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    def _cache_dirs_ready(self, build_tables: bool, build_columns: bool) -> bool:
+        if not self.index_cache_dir:
+            return False
+        if build_tables and not self._table_cache_dir().exists():
+            return False
+        if build_columns and not self._columns_cache_dir().exists():
+            return False
+        return True
+
+    def _table_cache_dir(self) -> Optional[Path]:
+        if not self.index_cache_dir:
+            return None
+        return self.index_cache_dir / "tables"
+
+    def _columns_cache_dir(self) -> Optional[Path]:
+        if not self.index_cache_dir:
+            return None
+        return self.index_cache_dir / "columns"
+
+    def _manifest_path(self) -> Optional[Path]:
+        if not self.index_cache_dir:
+            return None
+        return self.index_cache_dir / "manifest.json"
+
+    def _load_index_manifest(self) -> Optional[Dict[str, Any]]:
+        manifest_path = self._manifest_path()
+        if not manifest_path or not manifest_path.exists():
+            return None
+        try:
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _write_index_manifest(self, signature: str, table_names: List[str], build_columns: bool) -> None:
+        if not self.index_cache_dir:
+            return
+        self.index_cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_signature": signature,
+            "tables": sorted(table_names),
+            "build_columns": build_columns,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        manifest_path = self._manifest_path()
+        if manifest_path:
+            manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _is_cache_valid(self, signature: str) -> bool:
+        manifest = self._load_index_manifest()
+        if not manifest:
+            return False
+        return manifest.get("schema_signature") == signature
+
+    def _clear_cache_dir(self) -> None:
+        if not self.index_cache_dir or not self.index_cache_dir.exists():
+            return
+        # 删除旧索引目录，避免混用不同版本
+        for item in self.index_cache_dir.iterdir():
+            if item.is_dir():
+                for child in item.rglob("*"):
+                    if child.is_file():
+                        child.unlink(missing_ok=True)
+                for child in sorted(item.rglob("*"), reverse=True):
+                    if child.is_dir():
+                        child.rmdir()
+                item.rmdir()
+            elif item.is_file():
+                item.unlink(missing_ok=True)
 
     def _build_column_retrievers(
         self,
@@ -376,6 +740,7 @@ class NL2SQLTool:
         embed_model,
         text_node_cls,
         vector_index_cls,
+        persist_dir: Optional[Path] = None,
     ) -> Optional[Dict[str, Dict[str, Any]]]:
         """构建列级检索器：按列索引去重后的离散取值。"""
         if not self.db:
@@ -413,6 +778,10 @@ class NL2SQLTool:
                 if not nodes:
                     continue
                 column_index = vector_index_cls(nodes, embed_model=embed_model)
+                if persist_dir:
+                    index_dir = persist_dir / table_name / column_name
+                    index_dir.mkdir(parents=True, exist_ok=True)
+                    column_index.storage_context.persist(persist_dir=str(index_dir))
                 table_retrievers[column_name] = column_index.as_retriever(
                     similarity_top_k=self.column_retriever_top_k
                 )

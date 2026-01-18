@@ -35,10 +35,10 @@ services:
     image: neo4j:5
     container_name: fusion-neo4j
     environment:
-      NEO4J_AUTH: neo4j/neo4j123
+      NEO4J_AUTH: neo4j/neo4j123 # 用户名/密码
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "7474:7474"  # 可视化界面
+      - "7687:7687"  # 连接端口
     volumes:
       - ../mount/neo4j/data:/data
       - ../mount/neo4j/logs:/logs

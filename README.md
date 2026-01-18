@@ -17,7 +17,12 @@
    docker compose -f docker/docker-compose.yml run --rm loader
    ```
 
-3. 启动 API（FusionAgent）
+3. （可选）预构建 NL2SQL 索引
+   ```bash
+   python scripts/build_nl2sql_indexes.py
+   ```
+
+4. 启动 API（FusionAgent）
    ```bash
    docker compose -f docker/docker-compose.yml up -d agent-api
    ```
@@ -31,6 +36,8 @@
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
+   # 可选：预构建 NL2SQL 索引
+   python scripts/build_nl2sql_indexes.py
    uvicorn agent.api_server:app --host 0.0.0.0 --port 2025
    ```
 
@@ -50,6 +57,13 @@
 - Neo4j：`7474/7687`
 - Milvus：`19530/9091`
 - Agent Chat UI：`3012`
+
+## 运行时表说明
+
+FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张核心实体表），用于对话与记忆持久化：
+
+- `agent_threads` / `agent_messages`：线程与消息记录
+- `agent_episodic_memory`：情景记忆条目
 
 ## 详细文档
 

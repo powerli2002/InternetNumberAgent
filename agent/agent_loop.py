@@ -1,3 +1,23 @@
+"""
+互联网号码资源问答系统 - 主智能体实现
+
+FusionAgent 是系统的核心组件，负责整合 NL2SQL、RAG、记忆与上下文工程，
+实现可解释的问答链路和可观测的运行过程。
+
+主要功能：
+1. 问题分类与路由：根据问题类型选择合适的工具组合
+2. 工具调度：协调 NL2SQL（结构化查询）、RAG（文档检索）、任务规划
+3. 上下文工程：基于 GSSC 流程组装证据、记忆与历史
+4. 记忆管理：写入工作/情景/语义记忆，支持长期学习
+5. 链路追踪：集成 LangSmith 实现端到端可观测性
+
+架构位置：
+- 数据层：连接 PostgreSQL（16 表）、Milvus（向量索引）、Neo4j（语义图谱）
+- 工具层：调度 NL2SQLTool、RAGTool、TaskTool 等专业工具
+- 记忆层：统一管理工作记忆（短期）、情景记忆（对话）、语义记忆（知识）
+- 上下文层：通过 ContextBuilder 实现证据驱动的上下文组装
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,8 +27,9 @@ from typing import Iterable, List, Optional, Tuple
 from agent.config import AgentConfig
 from agent.context import ContextBuilder
 from agent.llm import LLMClient, LLMMessage
+from agent.memory.semantic import SemanticRecord
 from agent.models import ConversationTurn, EvidenceItem, MemoryItem, TodoItem
-from agent.prompts import SYSTEM_PROMPT, TODO_PLANNER_PROMPT
+from agent.prompts import SEMANTIC_EXTRACT_PROMPT, SYSTEM_PROMPT, TODO_PLANNER_PROMPT
 from agent.memory import EpisodicMemory, MemoryManager, SemanticMemory, WorkingMemory
 from agent.tools import NL2SQLTool, NoteTool, RAGTool, TaskTool, TodoTool
 from agent.tools.rag_tool import DashScopeEmbedding
@@ -16,25 +37,69 @@ from agent.tracing import LangSmithTracer
 
 
 class FusionAgent:
-    """融合 NL2SQL、RAG、记忆与上下文工程的主代理。"""
+    """
+    融合智能体主类 - 互联网号码资源问答系统的核心控制器
+
+    实现基于工具调度的问答流程，整合多种检索与推理能力：
+    - NL2SQL：将自然语言转换为 SQL 查询，访问结构化数据
+    - RAG：检索增强生成，从文档向量中获取相关知识
+    - 记忆系统：管理工作记忆（对话上下文）、情景记忆（历史对话）、语义记忆（长期知识）
+    - 任务规划：复杂问题自动分解为子任务并执行
+    - 上下文工程：基于 GSSC 流程组织证据驱动的上下文
+
+    核心算法流程：
+    1. 问题分析：通过关键词和实体识别判断工具需求
+    2. 工具调度：并行调用 NL2SQL/RAG/规划工具获取证据
+    3. 上下文组装：按优先级整合系统提示、历史、证据、记忆
+    4. 回答生成：基于完整上下文生成可解释的回答
+    5. 记忆写入：将工具结果和最终回答写入相应记忆系统
+    6. 语义抽取：从对话中提取长期可用的概念和规则
+    """
 
     def __init__(self, config: Optional[AgentConfig] = None) -> None:
+        """
+        初始化融合智能体，加载配置并准备所有组件
+
+        初始化顺序：
+        1. 加载配置参数（数据库、模型、向量库连接等）
+        2. 初始化 LLM 客户端（用于问答生成和任务规划）
+        3. 设置上下文构建器（控制上下文长度和组织方式）
+        4. 初始化三类记忆系统（工作/情景/语义记忆）
+        5. 加载专业工具（NL2SQL、RAG、笔记、待办、任务执行）
+        6. 配置链路追踪器（LangSmith 集成）
+        """
         # 加载配置（包含模型、数据库、向量库等连接信息）
         self.config = config or AgentConfig.load()
+
         # 初始化 LLM 客户端，统一用于生成与规划
+        # 使用阿里云百炼兼容 OpenAI 接口，支持流式和结构化输出
         self.llm = LLMClient(
             api_key=self.config.dashscope_api_key,
             base_url=self.config.dashscope_base_url,
             model=self.config.dashscope_model,
         )
-        # 上下文组装器：负责将系统/历史/证据整理为模型上下文
+
+        # 上下文组装器：基于 GSSC 流程将系统/历史/证据整理为模型上下文
+        # 控制最大 token 数，避免超出模型限制
         self.context_builder = ContextBuilder(max_tokens=self.config.max_context_tokens)
 
-        # 统一记忆管理：工作记忆（短期）、情景记忆（对话）、语义记忆（图谱）
+        # 语义记忆相关配置：控制是否启用和抽取阈值
+        self.semantic_memory_enabled = self.config.semantic_memory_enabled
+        self.semantic_memory_max_items = self.config.semantic_memory_max_items
+        self.semantic_memory_min_importance = self.config.semantic_memory_min_importance
+
+        # 统一记忆管理：三类记忆系统协同工作
+        # - 工作记忆：短期对话上下文，容量较小但访问频繁
+        # - 情景记忆：优先使用 PostgreSQL 持久化（无 PG 时回退 SQLite），支持时间衰减
+        # - 语义记忆：Neo4j 图谱存储长期知识和概念关系
         memory_dir = self.config.project_root / "agent" / "memory_store"
         self.memory_manager = MemoryManager(
             working_memory=WorkingMemory(capacity=self.config.working_memory_size),
-            episodic_memory=EpisodicMemory(memory_dir / "episodic.sqlite", capacity=self.config.episodic_memory_size),
+            episodic_memory=EpisodicMemory(
+                sqlite_path=memory_dir / "episodic.sqlite",
+                capacity=self.config.episodic_memory_size,
+                postgres_url=self.config.postgres_url,
+            ),
             semantic_memory=SemanticMemory(
                 uri=self.config.neo4j_uri,
                 user=self.config.neo4j_user,
@@ -42,17 +107,32 @@ class FusionAgent:
             ),
         )
 
-        # 工具：便签、待办、追踪、NL2SQL、RAG、任务执行
+        # 初始化专业工具集合
+        # NoteTool：笔记管理，支持创建和搜索知识条目
         self.note_tool = NoteTool(self.config.notes_dir)
+
+        # TodoTool：任务规划管理，将复杂问题分解为可执行步骤
         self.todo_tool = TodoTool(self.config.project_root / "agent" / "todo.json")
+
+        # LangSmith 链路追踪器：记录 LLM 调用、工具执行、记忆写入等关键环节
         self.tracer = LangSmithTracer()
+
+        # NL2SQLTool：自然语言到 SQL 转换引擎
+        # 基于 LlamaIndex 实现，支持表/列检索优化和缓存
         self.nl2sql_tool = NL2SQLTool(
             postgres_url=self.config.postgres_url or "",
             allowed_tables=self.config.allowed_tables,
             api_key=self.config.dashscope_api_key,
             base_url=self.config.dashscope_base_url,
             model=self.config.dashscope_model,
+            embedding_model=self.config.dashscope_embedding_model,
+            index_cache_dir=self.config.nl2sql_index_cache_dir,
+            enable_index_cache=self.config.nl2sql_index_cache_enabled,
+            force_rebuild_cache=self.config.nl2sql_index_cache_force_rebuild,
         )
+
+        # RAGTool：文档向量检索工具
+        # 基于 Milvus 向量数据库，支持文档分块和相似度检索
         self.rag_tool = RAGTool(
             host=self.config.milvus_host,
             port=self.config.milvus_port,
@@ -63,19 +143,40 @@ class FusionAgent:
                 model=self.config.dashscope_embedding_model,
             ),
         )
+
+        # TaskTool：子任务执行器
+        # 支持复杂问题的自动分解和并行执行
         self.task_tool = TaskTool(agent_factory=lambda: FusionAgent(self.config))
 
     def respond(self, user_message: str, history: Optional[List[ConversationTurn]] = None) -> Tuple[str, dict]:
-        """主入口：处理用户问题，返回回复与元数据。"""
+        """
+        主入口方法：处理用户问题并返回完整回答
+
+        执行流程：
+        1. 问题分类：识别问题类型（IP查询、ASN查询、概念解释等）
+        2. 上下文准备：调用工具获取证据，检索记忆，组装上下文
+        3. 回答生成：基于完整上下文调用 LLM 生成回答
+        4. 记忆写入：将工具结果和最终回答写入相应记忆系统
+        5. 语义抽取：从对话中提取长期知识写入语义记忆
+
+        Args:
+            user_message: 用户输入的问题文本
+            history: 对话历史记录，用于提供上下文
+
+        Returns:
+            Tuple[str, dict]: (回答文本, 元数据字典包含来源信息)
+        """
         history = history or []
-        # 若开启 LangSmith 追踪，则将一次问答作为完整链路记录
+
+        # LangSmith 链路追踪：将完整的问答流程作为一次链路运行
+        # 记录输入问题、使用的工具、生成的回答等关键信息
         if self.tracer.enabled:
             with self.tracer.start_run(
-                name="fusion_agent",
-                run_type="chain",
-                inputs={"question": user_message},
-                tags=["fusion", "qa"],
-                metadata={"question_type": self._classify_question(user_message)},
+                name="fusion_agent",  # 链路名称
+                run_type="chain",     # 运行类型：完整链路
+                inputs={"question": user_message},  # 输入参数
+                tags=["fusion", "qa"],  # 标签用于分类和筛选
+                metadata={"question_type": self._classify_question(user_message)},  # 元数据
             ) as root_run:
                 return self._respond_core(user_message, history, root_run)
 
@@ -158,17 +259,51 @@ class FusionAgent:
     def _prepare_context(
         self, user_message: str, history: List[ConversationTurn], root_run
     ) -> Tuple[str, List[str], str]:
-        evidences: List[EvidenceItem] = []
-        sources: List[str] = []
+        """
+        上下文准备核心方法：根据问题类型调度工具并组装证据
 
-        # 通过轻量规则判断是否走 NL2SQL / RAG / 规划
+        执行策略：
+        1. 问题分析：通过关键词和实体识别判断需要哪些工具
+        2. 工具调度：根据判断结果调用 NL2SQL、RAG、任务规划工具
+        3. 证据收集：将工具执行结果转换为结构化证据项
+        4. 记忆检索：从三类记忆系统中搜索相关历史信息
+        5. 上下文组装：使用 GSSC 流程整合所有信息
+
+        工具选择逻辑：
+        - NL2SQL：包含 IP/ASN/前缀/归属等关键词，或能提取到实体
+        - RAG：解释性问题，或不适合 NL2SQL 的情况
+        - 任务规划：长文本（>200字符）或显式包含"计划"/"步骤"
+
+        Args:
+            user_message: 用户问题文本
+            history: 对话历史
+            root_run: LangSmith 根运行对象，用于子链路追踪
+
+        Returns:
+            Tuple[str, List[str], str]: (组装后的上下文, 来源列表, 问题类型)
+        """
+        evidences: List[EvidenceItem] = []  # 收集的证据项
+        sources: List[str] = []  # 证据来源，用于去重和溯源
+
+        # 问题分析阶段：通过轻量规则判断是否走 NL2SQL / RAG / 规划
+        # 基于关键词匹配和实体抽取，避免复杂 LLM 调用
         use_nl2sql = self._should_use_nl2sql(user_message)
         use_rag = self._should_use_rag(user_message)
         question_type = self._classify_question(user_message)
 
+        # NL2SQL 工具调度：处理结构化数据查询
         if use_nl2sql:
-            # NL2SQL：生成 SQL 并执行，结果作为证据
+            """
+            NL2SQL 执行流程：
+            1. 基于 LlamaIndex 调用阿里云百炼模型生成 SQL
+            2. 在 PostgreSQL 上执行生成的 SQL 语句
+            3. 将 SQL 和结果作为高优先级证据（score=1.0）
+            4. 写入情景记忆，支持时间衰减的长期保留
+
+            适用场景：IP 归属查询、ASN 统计、路由分析等需要精确数据的场景
+            """
             if root_run:
+                # LangSmith 子链路追踪：记录 NL2SQL 工具的完整执行过程
                 with self.tracer.start_run(
                     name="nl2sql_query",
                     run_type="tool",
@@ -181,15 +316,19 @@ class FusionAgent:
                     run.add_outputs({"sql": nl2sql_result.sql, "result": str(nl2sql_result.result)})
             else:
                 nl2sql_result = self.nl2sql_tool.query(user_message, tables=self.config.allowed_tables)
+
+            # 将 SQL 执行结果转换为结构化证据
             evidences.append(
                 EvidenceItem(
                     title="NL2SQL 结果",
                     content=f"SQL: {nl2sql_result.sql}\n结果: {nl2sql_result.result}",
                     source="nl2sql",
-                    score=1.0,
+                    score=1.0,  # 最高优先级：结构化数据结果最可靠
                 )
             )
-            # 将查询过程写入情景记忆，便于后续追溯
+
+            # 记忆写入：将查询过程写入情景记忆，便于后续追溯和学习
+            # 使用情景记忆而不是工作记忆，因为 SQL 查询结果具有长期价值
             if root_run:
                 with self.tracer.start_run(
                     name="memory_write",
@@ -202,7 +341,7 @@ class FusionAgent:
                     self.memory_manager.add_memory(
                         MemoryItem(
                             content=f"SQL: {nl2sql_result.sql}\n结果: {nl2sql_result.result}",
-                            memory_type="episodic",
+                            memory_type="episodic",  # 情景记忆：重要对话片段
                             metadata={"tool": "nl2sql"},
                         )
                     )
@@ -377,6 +516,82 @@ class FusionAgent:
                     metadata={"source": "chat"},
                 )
             )
+        # 语义记忆：抽取稳定知识/规则/偏好写入 Neo4j
+        self._maybe_write_semantic_memory(user_message, answer, root_run)
+
+    def _maybe_write_semantic_memory(self, user_message: str, answer: str, root_run) -> None:
+        if not self.semantic_memory_enabled:
+            return
+        if not answer.strip():
+            return
+        # 抽取语义记忆条目（失败时静默降级）
+        records = self._extract_semantic_records(user_message, answer)
+        if not records:
+            return
+        if root_run:
+            with self.tracer.start_run(
+                name="semantic_memory_write",
+                run_type="tool",
+                inputs={"count": len(records)},
+                tags=["memory", "semantic"],
+                metadata={"source": "semantic_extract"},
+                parent=root_run,
+            ) as run:
+                self._write_semantic_records(records)
+                run.add_outputs({"status": "ok", "count": len(records)})
+        else:
+            self._write_semantic_records(records)
+
+    def _extract_semantic_records(self, user_message: str, answer: str) -> List[SemanticRecord]:
+        """抽取语义记忆条目，失败返回空列表。"""
+        prompt = [
+            LLMMessage(role="system", content=SEMANTIC_EXTRACT_PROMPT),
+            LLMMessage(
+                role="user",
+                content=f"用户问题：{user_message}\n助手回答：{answer}\n请抽取语义记忆条目。",
+            ),
+        ]
+        try:
+            raw = self.llm.structured_chat(prompt, schema={"type": "array"})
+        except Exception:
+            return []
+        items = raw
+        if isinstance(raw, dict):
+            items = raw.get("items") or raw.get("concepts") or []
+        if not isinstance(items, list):
+            return []
+        records: List[SemanticRecord] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            concept = str(item.get("concept", "")).strip()
+            description = str(item.get("description", "")).strip()
+            if not concept or not description:
+                continue
+            try:
+                importance = float(item.get("importance", 0.0))
+            except (TypeError, ValueError):
+                importance = 0.0
+            if importance < self.semantic_memory_min_importance:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            category = str(item.get("category", "")).strip()
+            if category:
+                metadata.setdefault("category", category)
+            metadata.setdefault("source", "semantic_extract")
+            metadata.setdefault("importance", importance)
+            records.append(SemanticRecord(concept=concept, description=description, metadata=metadata))
+            if len(records) >= self.semantic_memory_max_items:
+                break
+        return records
+
+    def _write_semantic_records(self, records: List[SemanticRecord]) -> None:
+        """写入语义记忆，异常时忽略以避免影响主流程。"""
+        try:
+            for record in records:
+                self.memory_manager.semantic_memory.add_concept(record)
+        except Exception:
+            return
 
     def _should_use_nl2sql(self, text: str) -> bool:
         # 简易关键词 + 实体抽取启发式判断是否需要结构化查询
