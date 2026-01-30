@@ -65,6 +65,20 @@ FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张�
 - `agent_threads` / `agent_messages`：线程与消息记录
 - `agent_episodic_memory`：情景记忆条目
 
+## 日志
+
+后端 API 会使用统一 logger 记录请求与回复日志，默认写入：
+
+- `logs/YYYY-MM/DD/fusion-YYYY-MM-DD-<pid>.log`
+
+可通过环境变量控制：
+
+- `API_LOG_ENABLED`：是否开启请求/回复日志（默认 `true`）
+- `API_LOG_BODY_LIMIT`：日志中请求/回复体的最大长度（默认 `2000` 字节）
+- `MODULE_LOG_ENABLED`：是否记录模块输入/输出（默认 `true`）
+- `MODULE_LOG_BODY_LIMIT`：模块日志中单字段最大长度（默认 `2000` 字符）
+- `MODULE_LOG_MAX_ITEMS`：模块日志最多记录的返回项数量（默认 `5`）
+
 ## 详细文档
 
 - 项目目标与数据结构：`summary.md`

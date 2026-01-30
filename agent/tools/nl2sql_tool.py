@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,6 +35,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from llama_index.core.bridge.pydantic import PrivateAttr
 
 from agent.schema import TABLE_CONTEXT_HINTS, TABLE_SCHEMA
+from src.utils.logging_manager import logger
+
+
+NL2SQL_LOG_ENABLED = os.getenv("NL2SQL_LOG_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def _log_nl2sql(message: str, *args) -> None:
+    """统一 NL2SQL 日志开关，避免过量输出。"""
+    if NL2SQL_LOG_ENABLED:
+        logger.info(message, *args)
 
 
 class DashScopeLlamaEmbedding:
@@ -345,8 +357,14 @@ class NL2SQLTool:
         self._cols_retrievers_cache = None
         self._cache_signature = None
 
-    def query(self, question: str, tables: Optional[List[str]] = None) -> NL2SQLResult:
+    def query(
+        self,
+        question: str,
+        tables: Optional[List[str]] = None,
+        enable_column_retrieval: Optional[bool] = None,
+    ) -> NL2SQLResult:
         """使用 LlamaIndex NL2SQL 生成查询并执行。"""
+        start_time = time.monotonic()
         try:
             from llama_index.core import SQLDatabase  # type: ignore
             from llama_index.core import VectorStoreIndex  # type: ignore
@@ -369,13 +387,25 @@ class NL2SQLTool:
         table_names = tables or self.allowed_tables
         if not table_names:
             raise RuntimeError("未提供可用表名，无法执行 NL2SQL。")
+        use_columns = self.enable_column_retrieval if enable_column_retrieval is None else enable_column_retrieval
+        _log_nl2sql(
+            "NL2SQL开始 question=%s tables=%s enable_columns=%s",
+            question,
+            ",".join(table_names),
+            use_columns,
+        )
         # 连接数据库并准备 LLM/Embedding
+        step_time = time.monotonic()
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
+        _log_nl2sql("NL2SQL步骤 SQLDatabase初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        step_time = time.monotonic()
         llm = self._get_llm()
         embed_model = self._get_embed_model()
         self._apply_llamaindex_settings(llm=llm, embed_model=embed_model)
+        _log_nl2sql("NL2SQL步骤 模型与设置耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
         # 为每张表构建上下文提示，帮助模型理解字段语义
+        step_time = time.monotonic()
         table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
         table_schema = [
             SQLTableSchema(
@@ -384,9 +414,11 @@ class NL2SQLTool:
             )
             for table in table_names
         ]
+        _log_nl2sql("NL2SQL步骤 表上下文构建耗时=%dms", int((time.monotonic() - step_time) * 1000))
         # 基于表结构与列值构建/加载检索器，避免每次重建索引
         table_node_mapping = SQLTableNodeMapping(db)
         table_top_k = self.table_retriever_top_k if self.enable_table_retrieval else len(table_names)
+        step_time = time.monotonic()
         table_retriever, cols_retrievers = self._get_or_build_retrievers(
             table_names=table_names,
             table_schema=table_schema,
@@ -395,8 +427,11 @@ class NL2SQLTool:
             embed_model=embed_model,
             text_node_cls=TextNode,
             vector_index_cls=VectorStoreIndex,
+            enable_columns=use_columns,
         )
+        _log_nl2sql("NL2SQL步骤 检索器准备耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
+        step_time = time.monotonic()
         engine = SQLTableRetrieverQueryEngine(
             sql_database=db,
             table_retriever=table_retriever,
@@ -406,9 +441,68 @@ class NL2SQLTool:
             embed_model=embed_model,
             verbose=False,
         )
+        _log_nl2sql("NL2SQL步骤 引擎初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
+
         # 让引擎生成 SQL 并执行，返回结构化结果
+        step_time = time.monotonic()
         response = engine.query(question)
+        _log_nl2sql("NL2SQL步骤 查询执行耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        _log_nl2sql("NL2SQL完成 总耗时=%dms", int((time.monotonic() - start_time) * 1000))
         return NL2SQLResult(sql=str(response.metadata.get("sql_query", "")), result=str(response))
+
+    def warmup_retrievers(
+        self,
+        tables: Optional[List[str]] = None,
+        load_columns: bool = False,
+    ) -> Dict[str, Any]:
+        """预热 NL2SQL 检索器，提前加载/构建索引到内存，降低首次查询耗时。"""
+        start_time = time.monotonic()
+        try:
+            from llama_index.core import SQLDatabase  # type: ignore
+            from llama_index.core import VectorStoreIndex  # type: ignore
+            from llama_index.core.objects import SQLTableNodeMapping, SQLTableSchema  # type: ignore
+            from llama_index.core.schema import TextNode  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("缺少 llama-index 依赖，无法预热索引。") from exc
+
+        if not self.postgres_url:
+            raise RuntimeError("未配置 POSTGRES_URL，无法预热索引。")
+        if not self.api_key:
+            raise RuntimeError("未配置 DASHSCOPE_API_KEY，无法预热索引。")
+
+        table_names = tables or self.allowed_tables
+        if not table_names:
+            raise RuntimeError("未提供可用表名，无法预热索引。")
+
+        _log_nl2sql("NL2SQL预热开始 tables=%s load_columns=%s", ",".join(table_names), load_columns)
+        db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
+        llm = self._get_llm()
+        embed_model = self._get_embed_model()
+        self._apply_llamaindex_settings(llm=llm, embed_model=embed_model)
+
+        table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
+        table_schema = [
+            SQLTableSchema(
+                table_name=table,
+                context_str=table_context.get(table, ""),
+            )
+            for table in table_names
+        ]
+        table_node_mapping = SQLTableNodeMapping(db)
+        table_top_k = self.table_retriever_top_k if self.enable_table_retrieval else len(table_names)
+        self._get_or_build_retrievers(
+            table_names=table_names,
+            table_schema=table_schema,
+            table_node_mapping=table_node_mapping,
+            table_top_k=table_top_k,
+            embed_model=embed_model,
+            text_node_cls=TextNode,
+            vector_index_cls=VectorStoreIndex,
+            enable_columns=load_columns,
+        )
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        _log_nl2sql("NL2SQL预热完成 耗时=%dms", elapsed_ms)
+        return {"status": "ok", "tables": table_names, "elapsed_ms": elapsed_ms}
 
     def _execute(self, sql: str) -> List[Tuple]:
         if not self.db:
@@ -532,28 +626,36 @@ class NL2SQLTool:
         embed_model,
         text_node_cls,
         vector_index_cls,
+        enable_columns: bool,
     ):
         """优先复用缓存索引，必要时重建。"""
         signature = self._compute_schema_signature(table_names)
         if self._cache_signature == signature and self._table_retriever_cache is not None:
+            _log_nl2sql("NL2SQL检索器 命中内存缓存 signature=%s", signature)
             return self._table_retriever_cache, self._cols_retrievers_cache
 
         table_retriever = None
         cols_retrievers = None
         if self.enable_index_cache and self.index_cache_dir and not self.force_rebuild_cache:
             if self._is_cache_valid(signature):
+                _log_nl2sql("NL2SQL检索器 尝试加载磁盘缓存 signature=%s dir=%s", signature, self.index_cache_dir)
                 table_retriever = self._load_table_retriever_from_cache(table_node_mapping, table_top_k)
-                if self.enable_column_retrieval:
+                if enable_columns:
                     cols_retrievers = self._load_column_retrievers_from_cache(table_names)
-                if table_retriever and (not self.enable_column_retrieval or cols_retrievers is not None):
+                    if cols_retrievers is not None and not cols_retrievers:
+                        _log_nl2sql("NL2SQL检索器 列索引缓存为空，将仅使用表索引")
+                if table_retriever and (not enable_columns or cols_retrievers is not None):
+                    _log_nl2sql("NL2SQL检索器 磁盘缓存加载成功")
                     self._table_retriever_cache = table_retriever
                     self._cols_retrievers_cache = cols_retrievers
                     self._cache_signature = signature
                     return table_retriever, cols_retrievers
+                _log_nl2sql("NL2SQL检索器 磁盘缓存加载失败，准备重建")
 
         if self.enable_index_cache and self.index_cache_dir and self.force_rebuild_cache:
             self._clear_cache_dir()
 
+        build_time = time.monotonic()
         table_retriever = self._build_table_retriever(
             table_schema=table_schema,
             table_node_mapping=table_node_mapping,
@@ -562,8 +664,10 @@ class NL2SQLTool:
             persist_dir=self._table_cache_dir() if self.enable_index_cache and self.index_cache_dir else None,
             table_top_k=table_top_k,
         )
+        _log_nl2sql("NL2SQL检索器 表索引重建耗时=%dms", int((time.monotonic() - build_time) * 1000))
         cols_retrievers = None
-        if self.enable_column_retrieval:
+        if enable_columns:
+            build_time = time.monotonic()
             cols_retrievers = self._build_column_retrievers(
                 table_names=table_names,
                 embed_model=embed_model,
@@ -571,9 +675,10 @@ class NL2SQLTool:
                 vector_index_cls=vector_index_cls,
                 persist_dir=self._columns_cache_dir() if self.enable_index_cache and self.index_cache_dir else None,
             )
+            _log_nl2sql("NL2SQL检索器 列索引重建耗时=%dms", int((time.monotonic() - build_time) * 1000))
 
         if self.enable_index_cache and self.index_cache_dir:
-            self._write_index_manifest(signature, table_names, build_columns=self.enable_column_retrieval)
+            self._write_index_manifest(signature, table_names, build_columns=enable_columns)
 
         self._table_retriever_cache = table_retriever
         self._cols_retrievers_cache = cols_retrievers
@@ -582,17 +687,17 @@ class NL2SQLTool:
 
     def _build_table_retriever(
         self,
-        table_schema,
-        table_node_mapping,
-        embed_model,
-        vector_index_cls,
-        persist_dir: Optional[Path],
+        table_schema, # 表结构描述列表，每个表的结构信息，包括表名、字段列表和业务语义描述
+        table_node_mapping, # 表节点映射器， LlamaIndex的SQLTableNodeMapping，用于将表映射为节点
+        embed_model,  # 嵌入模型
+        vector_index_cls, # 向量索引类
+        persist_dir: Optional[Path], 
         table_top_k: int,
     ):
         # 基于表结构构建向量索引，支持“相关表”检索
         from llama_index.core.objects import ObjectIndex  # type: ignore
 
-        table_index = ObjectIndex.from_objects(
+        table_index = ObjectIndex.from_objects( 
             table_schema,
             table_node_mapping,
             vector_index_cls,
@@ -613,7 +718,8 @@ class NL2SQLTool:
             from llama_index.core.objects import ObjectIndex  # type: ignore
             table_index = ObjectIndex.from_persist_dir(str(table_dir), object_node_mapping=table_node_mapping)
             return table_index.as_retriever(similarity_top_k=table_top_k)
-        except Exception:
+        except Exception as exc:
+            _log_nl2sql("NL2SQL检索器 表索引缓存加载异常=%s", exc)
             return None
 
     def _load_column_retrievers_from_cache(self, table_names: List[str]) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -636,19 +742,21 @@ class NL2SQLTool:
             for column_name in column_names:
                 index_dir = columns_dir / table_name / column_name
                 if not index_dir.exists():
-                    return None
+                    _log_nl2sql("NL2SQL检索器 列索引目录缺失 table=%s column=%s", table_name, column_name)
+                    continue
                 try:
                     storage_context = StorageContext.from_defaults(persist_dir=str(index_dir))
                     index = load_index_from_storage(storage_context)
                     table_retrievers[column_name] = index.as_retriever(
                         similarity_top_k=self.column_retriever_top_k
                     )
-                except Exception:
-                    return None
+                except Exception as exc:
+                    _log_nl2sql("NL2SQL检索器 列索引加载异常 table=%s column=%s error=%s", table_name, column_name, exc)
+                    continue
             if table_retrievers:
                 cols_retrievers[table_name] = table_retrievers
 
-        return cols_retrievers or None
+        return cols_retrievers
 
     def _compute_schema_signature(self, table_names: List[str]) -> str:
         """基于表结构与列配置生成稳定签名。"""

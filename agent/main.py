@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # sys.path.append("../")
@@ -33,6 +34,14 @@ def _run_with_timeout(agent: FusionAgent, user_input: str, history: list[Convers
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(agent.respond, user_input, history=history)
         return future.result(timeout=timeout_seconds)
+
+
+def _parse_tables(raw: str | None) -> list[str] | None:
+    """解析逗号分隔的表名列表。"""
+    if not raw:
+        return None
+    tables = [item.strip() for item in raw.split(",") if item.strip()]
+    return tables or None
 
 
 def main() -> None:
@@ -52,11 +61,39 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description="互联网号码资源问答智能体 CLI")
     parser.add_argument("--once", default=None, help="单轮提问模式，处理单个问题后退出")
+    parser.add_argument("--build-index", action="store_true", help="手动构建 NL2SQL 索引后退出")
+    parser.add_argument("--preload-index", action="store_true", help="预热 NL2SQL 索引，进入交互前加载到内存")
+    parser.add_argument("--preload-columns", action="store_true", help="预热时同时加载列索引")
+    parser.add_argument("--index-tables", default=None, help="构建索引的表名，逗号分隔")
+    parser.add_argument("--skip-columns", action="store_true", help="仅构建表索引，不构建列索引")
+    parser.add_argument("--force-index", action="store_true", help="强制重建索引")
     args = parser.parse_args()
 
     # 加载配置并初始化智能体
     config = AgentConfig.load()
     agent = FusionAgent(config)
+
+    if args.build_index:
+        try:
+            table_names = _parse_tables(args.index_tables) or config.allowed_tables
+            result = agent.nl2sql_tool.prepare_index_cache(
+                table_names=table_names,
+                build_tables=True,
+                build_columns=not args.skip_columns,
+                force=args.force_index,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            print(f"构建索引失败: {exc}")
+        return
+
+    if args.preload_index:
+        try:
+            table_names = _parse_tables(args.index_tables) or config.allowed_tables
+            result = agent.nl2sql_tool.warmup_retrievers(table_names, load_columns=args.preload_columns)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            print(f"预热索引失败: {exc}")
 
     # 设置超时时间，确保不会无限等待
     timeout_seconds = max(1, int(config.request_timeout_seconds))

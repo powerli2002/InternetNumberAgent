@@ -21,6 +21,7 @@ FusionAgent 是系统的核心组件，负责整合 NL2SQL、RAG、记忆与上�
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from typing import Iterable, List, Optional, Tuple
 
@@ -34,6 +35,34 @@ from agent.memory import EpisodicMemory, MemoryManager, SemanticMemory, WorkingM
 from agent.tools import NL2SQLTool, NoteTool, RAGTool, TaskTool, TodoTool
 from agent.tools.rag_tool import DashScopeEmbedding
 from agent.tracing import LangSmithTracer
+from src.utils.logging_manager import logger
+
+
+MODULE_LOG_ENABLED = os.getenv("MODULE_LOG_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+MODULE_LOG_BODY_LIMIT = max(256, int(os.getenv("MODULE_LOG_BODY_LIMIT", "2000")))
+MODULE_LOG_MAX_ITEMS = max(1, int(os.getenv("MODULE_LOG_MAX_ITEMS", "5")))
+
+
+def _preview_text(text: str, limit: int) -> str:
+    """截断长文本，避免日志过长。"""
+    if text is None:
+        return ""
+    raw = str(text)
+    if len(raw) > limit:
+        return f"{raw[:limit]}...<truncated {len(raw)} chars>"
+    return raw
+
+
+def _log_module_io(name: str, input_data: dict, output_data: dict) -> None:
+    """统一记录模块输入输出，使用结构化 JSON 便于排查。"""
+    if not MODULE_LOG_ENABLED:
+        return
+    payload = {
+        "module": name,
+        "input": input_data,
+        "output": output_data,
+    }
+    logger.info("MODULE_IO %s", json.dumps(payload, ensure_ascii=False))
 
 
 class FusionAgent:
@@ -302,20 +331,45 @@ class FusionAgent:
 
             适用场景：IP 归属查询、ASN 统计、路由分析等需要精确数据的场景
             """
+            use_columns = self._should_use_column_retrieval(user_message, question_type)
             if root_run:
                 # LangSmith 子链路追踪：记录 NL2SQL 工具的完整执行过程
                 with self.tracer.start_run(
                     name="nl2sql_query",
                     run_type="tool",
-                    inputs={"question": user_message, "tables": self.config.allowed_tables},
+                    inputs={
+                        "question": user_message,
+                        "tables": self.config.allowed_tables,
+                        "enable_column_retrieval": use_columns,
+                    },
                     tags=["nl2sql", "tool"],
                     metadata={"question_type": question_type},
                     parent=root_run,
                 ) as run:
-                    nl2sql_result = self.nl2sql_tool.query(user_message, tables=self.config.allowed_tables)
+                    nl2sql_result = self.nl2sql_tool.query(
+                        user_message,
+                        tables=self.config.allowed_tables,
+                        enable_column_retrieval=use_columns,
+                    )
                     run.add_outputs({"sql": nl2sql_result.sql, "result": str(nl2sql_result.result)})
             else:
-                nl2sql_result = self.nl2sql_tool.query(user_message, tables=self.config.allowed_tables)
+                nl2sql_result = self.nl2sql_tool.query(
+                    user_message,
+                    tables=self.config.allowed_tables,
+                    enable_column_retrieval=use_columns,
+                )
+            _log_module_io(
+                "nl2sql",
+                {
+                    "question": _preview_text(user_message, MODULE_LOG_BODY_LIMIT),
+                    "tables": self.config.allowed_tables,
+                    "enable_column_retrieval": use_columns,
+                },
+                {
+                    "sql": _preview_text(nl2sql_result.sql, MODULE_LOG_BODY_LIMIT),
+                    "result": _preview_text(str(nl2sql_result.result), MODULE_LOG_BODY_LIMIT),
+                },
+            )
 
             # 将 SQL 执行结果转换为结构化证据
             evidences.append(
@@ -354,6 +408,18 @@ class FusionAgent:
                         metadata={"tool": "nl2sql"},
                     )
                 )
+            _log_module_io(
+                "memory_write",
+                {
+                    "type": "episodic",
+                    "source": "nl2sql",
+                    "content_preview": _preview_text(
+                        f"SQL: {nl2sql_result.sql}\n结果: {nl2sql_result.result}",
+                        min(512, MODULE_LOG_BODY_LIMIT),
+                    ),
+                },
+                {"status": "ok"},
+            )
             sources.append("nl2sql")
 
         if use_rag:
@@ -371,6 +437,25 @@ class FusionAgent:
                     run.add_outputs({"hits": len(rag_results)})
             else:
                 rag_results = self.rag_tool.search(user_message, top_k=5)
+            _log_module_io(
+                "rag",
+                {
+                    "query": _preview_text(user_message, MODULE_LOG_BODY_LIMIT),
+                    "top_k": 5,
+                    "collection": self.config.vector_collection,
+                },
+                {
+                    "hits": len(rag_results),
+                    "items": [
+                        {
+                            "source": _preview_text(chunk.source, min(256, MODULE_LOG_BODY_LIMIT)),
+                            "score": chunk.metadata.get("score") if isinstance(chunk.metadata, dict) else None,
+                            "text_preview": _preview_text(chunk.text, min(512, MODULE_LOG_BODY_LIMIT)),
+                        }
+                        for chunk in rag_results[:MODULE_LOG_MAX_ITEMS]
+                    ],
+                },
+            )
             for chunk in rag_results:
                 evidences.append(
                     EvidenceItem(
@@ -406,6 +491,15 @@ class FusionAgent:
                             metadata={"source": chunk.source},
                         )
                     )
+                _log_module_io(
+                    "memory_write",
+                    {
+                        "type": "working",
+                        "source": chunk.source,
+                        "content_preview": _preview_text(chunk.text, min(512, MODULE_LOG_BODY_LIMIT)),
+                    },
+                    {"status": "ok"},
+                )
                 sources.append(chunk.source)
 
         if self._should_plan(user_message):
@@ -423,8 +517,45 @@ class FusionAgent:
                     run.add_outputs({"count": len(todo_items)})
             else:
                 todo_items = self._plan_todos(user_message)
+            _log_module_io(
+                "todo_plan",
+                {
+                    "question": _preview_text(user_message, MODULE_LOG_BODY_LIMIT),
+                    "count": len(todo_items),
+                    "items": [
+                        {
+                            "id": item.id,
+                            "title": _preview_text(item.title, 256),
+                            "intent": _preview_text(item.intent, min(512, MODULE_LOG_BODY_LIMIT)),
+                        }
+                        for item in todo_items[:MODULE_LOG_MAX_ITEMS]
+                    ],
+                },
+                {"status": "ok"},
+            )
             self.todo_tool.add_items(todo_items)
             task_results = self.task_tool.run_tasks(todo_items)
+            _log_module_io(
+                "task",
+                {
+                    "count": len(todo_items),
+                    "items": [
+                        {"id": item.id, "title": _preview_text(item.title, 256)}
+                        for item in todo_items[:MODULE_LOG_MAX_ITEMS]
+                    ],
+                },
+                {
+                    "count": len(task_results),
+                    "items": [
+                        {
+                            "id": result.task.id,
+                            "summary_preview": _preview_text(result.summary, min(512, MODULE_LOG_BODY_LIMIT)),
+                            "sources": result.sources[:MODULE_LOG_MAX_ITEMS],
+                        }
+                        for result in task_results[:MODULE_LOG_MAX_ITEMS]
+                    ],
+                },
+            )
             for result in task_results:
                 evidences.append(
                     EvidenceItem(
@@ -459,6 +590,15 @@ class FusionAgent:
                             metadata={"task_id": result.task.id},
                         )
                     )
+                _log_module_io(
+                    "memory_write",
+                    {
+                        "type": "episodic",
+                        "source": f"task:{result.task.id}",
+                        "content_preview": _preview_text(result.summary, min(512, MODULE_LOG_BODY_LIMIT)),
+                    },
+                    {"status": "ok"},
+                )
                 sources.extend(result.sources)
 
         # 统一从三类记忆中检索高相关内容补充上下文
@@ -475,7 +615,40 @@ class FusionAgent:
                 run.add_outputs({"count": len(memories)})
         else:
             memories = self.memory_manager.search(user_message, top_k=5)
+        _log_module_io(
+            "memory_lookup",
+            {
+                "query": _preview_text(user_message, MODULE_LOG_BODY_LIMIT),
+                "top_k": 5,
+            },
+            {
+                "hits": len(memories),
+                "items": [
+                    {
+                        "type": mem.memory_type,
+                        "score": mem.score,
+                        "preview": _preview_text(mem.content, min(512, MODULE_LOG_BODY_LIMIT)),
+                        "metadata": mem.metadata,
+                    }
+                    for mem in memories[:MODULE_LOG_MAX_ITEMS]
+                ],
+            },
+        )
         notes = self.note_tool.search(user_message, limit=3)
+        _log_module_io(
+            "notes_search",
+            {
+                "query": _preview_text(user_message, MODULE_LOG_BODY_LIMIT),
+                "limit": 3,
+            },
+            {
+                "hits": len(notes),
+                "items": [
+                    _preview_text(note.content, min(512, MODULE_LOG_BODY_LIMIT))
+                    for note in notes[:MODULE_LOG_MAX_ITEMS]
+                ],
+            },
+        )
 
         # GSSC：Gather/Select/Structure/Compress 组装上下文
         context = self.context_builder.build(
@@ -516,6 +689,15 @@ class FusionAgent:
                     metadata={"source": "chat"},
                 )
             )
+        _log_module_io(
+            "memory_write",
+            {
+                "type": "working",
+                "source": "chat",
+                "content_preview": _preview_text(f"用户问题：{user_message}\n回答：{answer}", min(512, MODULE_LOG_BODY_LIMIT)),
+            },
+            {"status": "ok"},
+        )
         # 语义记忆：抽取稳定知识/规则/偏好写入 Neo4j
         self._maybe_write_semantic_memory(user_message, answer, root_run)
 
@@ -541,6 +723,21 @@ class FusionAgent:
                 run.add_outputs({"status": "ok", "count": len(records)})
         else:
             self._write_semantic_records(records)
+        _log_module_io(
+            "semantic_memory_write",
+            {
+                "count": len(records),
+                "items": [
+                    {
+                        "concept": _preview_text(record.concept, 128),
+                        "description_preview": _preview_text(record.description, min(512, MODULE_LOG_BODY_LIMIT)),
+                        "metadata": record.metadata,
+                    }
+                    for record in records[:MODULE_LOG_MAX_ITEMS]
+                ],
+            },
+            {"status": "ok"},
+        )
 
     def _extract_semantic_records(self, user_message: str, answer: str) -> List[SemanticRecord]:
         """抽取语义记忆条目，失败返回空列表。"""
@@ -604,6 +801,51 @@ class FusionAgent:
         # 解释性问题优先走 RAG；否则默认也可补充说明
         keywords = ["是什么", "定义", "背景", "原理", "说明", "解释", "如何"]
         return any(k in text for k in keywords) or not self._should_use_nl2sql(text)
+
+    def _should_use_column_retrieval(self, text: str, question_type: str) -> bool:
+        """
+        根据问题类型与关键词判断是否启用列索引检索。
+
+        设计原则：
+        - 默认优先表索引，避免每次加载大量列索引造成延迟
+        - 当问题涉及“属性/名称/国家/组织/行业/网站”等字段时再启用列索引
+        """
+        if question_type == "domain_query":
+            return True
+        keywords = [
+            "国家",
+            "组织",
+            "公司",
+            "行业",
+            "域名",
+            "网站",
+            "标题",
+            "名称",
+            "名字",
+            "描述",
+            "类型",
+            "状态",
+            "country",
+            "org",
+            "organization",
+            "industry",
+            "domain",
+            "website",
+            "title",
+            "name",
+            "descr",
+            "status",
+            "type",
+        ]
+        lowered = text.lower()
+        for keyword in keywords:
+            if keyword.isascii():
+                if keyword in lowered:
+                    return True
+            else:
+                if keyword in text:
+                    return True
+        return False
 
     def _should_plan(self, text: str) -> bool:
         # 简单规则：显式“计划/步骤”或长问题触发分解

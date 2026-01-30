@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+import os
+import time
 from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -13,6 +15,7 @@ from pydantic import BaseModel, Field
 from agent.agent_loop import FusionAgent
 from agent.config import AgentConfig
 from agent.models import ConversationTurn
+from src.utils.logging_manager import logger
 
 
 class ThreadCreateRequest(BaseModel):
@@ -300,6 +303,30 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _preview_body(body: bytes, limit: int) -> str:
+    """截断并解码请求/响应体，避免日志过大。"""
+    if not body:
+        return ""
+    preview = body[:limit]
+    text = preview.decode("utf-8", errors="replace")
+    if len(body) > limit:
+        return f"{text}...<truncated {len(body)} bytes>"
+    return text
+
+
+def _get_client_ip(request: Request) -> str:
+    client = request.client
+    return client.host if client else "-"
+
+
+def _get_request_id(request: Request) -> str:
+    return request.headers.get("x-request-id") or str(uuid.uuid4())
+
+
+API_LOG_ENABLED = os.getenv("API_LOG_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+API_LOG_BODY_LIMIT = max(256, int(os.getenv("API_LOG_BODY_LIMIT", "2000")))
+
+
 def _extract_user_message(payload: Dict[str, Any]) -> str:
     if "messages" in payload and payload["messages"]:
         last = payload["messages"][-1]
@@ -343,6 +370,86 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_request_response(request: Request, call_next):
+    """统一记录请求与响应日志。"""
+    if not API_LOG_ENABLED:
+        return await call_next(request)
+
+    request_id = _get_request_id(request)
+    start_time = time.monotonic()
+    body_bytes = await request.body()
+    request_body = _preview_body(body_bytes, API_LOG_BODY_LIMIT)
+    logger.info(
+        "HTTP请求 id=%s method=%s path=%s ip=%s query=%s body=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        _get_client_ip(request),
+        request.url.query,
+        request_body,
+    )
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        cost_ms = int((time.monotonic() - start_time) * 1000)
+        logger.exception(
+            "HTTP异常 id=%s method=%s path=%s cost_ms=%s error=%s",
+            request_id,
+            request.method,
+            request.url.path,
+            cost_ms,
+            exc,
+        )
+        raise
+
+    if isinstance(response, StreamingResponse):
+        original_iterator = response.body_iterator
+
+        async def _wrap_iterator():
+            preview_parts: List[bytes] = []
+            total_size = 0
+            async for chunk in original_iterator:
+                chunk_bytes: bytes
+                if isinstance(chunk, str):
+                    chunk_bytes = chunk.encode("utf-8", errors="replace")
+                else:
+                    chunk_bytes = bytes(chunk) if chunk is not None else b""
+                if chunk_bytes and total_size < API_LOG_BODY_LIMIT:
+                    remaining = API_LOG_BODY_LIMIT - total_size
+                    preview_parts.append(chunk_bytes[:remaining])
+                    total_size += len(chunk_bytes[:remaining])
+                yield chunk
+            cost_ms = int((time.monotonic() - start_time) * 1000)
+            preview_body = _preview_body(b"".join(preview_parts), API_LOG_BODY_LIMIT)
+            logger.info(
+                "HTTP回复 id=%s method=%s path=%s status=%s cost_ms=%s body=%s",
+                request_id,
+                request.method,
+                request.url.path,
+                response.status_code,
+                cost_ms,
+                preview_body,
+            )
+
+        response.body_iterator = _wrap_iterator()
+        return response
+
+    response_body = _preview_body(getattr(response, "body", b"") or b"", API_LOG_BODY_LIMIT)
+    cost_ms = int((time.monotonic() - start_time) * 1000)
+    logger.info(
+        "HTTP回复 id=%s method=%s path=%s status=%s cost_ms=%s body=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        cost_ms,
+        response_body,
+    )
+    return response
 
 
 @app.get("/health")
