@@ -158,6 +158,10 @@ class FusionAgent:
             index_cache_dir=self.config.nl2sql_index_cache_dir,
             enable_index_cache=self.config.nl2sql_index_cache_enabled,
             force_rebuild_cache=self.config.nl2sql_index_cache_force_rebuild,
+            max_rows=self.config.nl2sql_max_rows,
+            statement_timeout_ms=self.config.nl2sql_statement_timeout_ms,
+            max_sql_length=self.config.nl2sql_max_sql_length,
+            allow_subquery=self.config.nl2sql_allow_subquery,
         )
 
         # RAGTool：文档向量检索工具

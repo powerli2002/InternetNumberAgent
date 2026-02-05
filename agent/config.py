@@ -120,6 +120,18 @@ class AgentConfig:
     nl2sql_index_cache_force_rebuild: bool = False
     """是否强制重建索引缓存，表结构变更时使用"""
 
+    nl2sql_max_rows: int = 200
+    """NL2SQL 查询最大返回行数，用于强制限制结果规模"""
+
+    nl2sql_statement_timeout_ms: int = 15000
+    """NL2SQL SQL 执行超时（毫秒），用于防止慢查询"""
+
+    nl2sql_max_sql_length: int = 4000
+    """NL2SQL 生成 SQL 的最大长度，避免异常超长语句"""
+
+    nl2sql_allow_subquery: bool = False
+    """是否允许包含子查询的 SQL（默认禁止以降低安全风险）"""
+
     # 工具与目录配置
     notes_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1] / "notes")
     """笔记存储目录"""
@@ -241,6 +253,31 @@ class AgentConfig:
         force_rebuild_value = os.environ.get("NL2SQL_INDEX_CACHE_FORCE_REBUILD")
         if force_rebuild_value is not None:
             cfg.nl2sql_index_cache_force_rebuild = force_rebuild_value.strip().lower() in {"1", "true", "yes", "on"}
+
+        max_rows_value = os.environ.get("NL2SQL_MAX_ROWS")
+        if max_rows_value:
+            try:
+                cfg.nl2sql_max_rows = max(1, int(max_rows_value))
+            except ValueError:
+                pass
+
+        timeout_value = os.environ.get("NL2SQL_STATEMENT_TIMEOUT_MS")
+        if timeout_value:
+            try:
+                cfg.nl2sql_statement_timeout_ms = max(1000, int(timeout_value))
+            except ValueError:
+                pass
+
+        max_sql_length_value = os.environ.get("NL2SQL_MAX_SQL_LENGTH")
+        if max_sql_length_value:
+            try:
+                cfg.nl2sql_max_sql_length = max(100, int(max_sql_length_value))
+            except ValueError:
+                pass
+
+        allow_subquery_value = os.environ.get("NL2SQL_ALLOW_SUBQUERY")
+        if allow_subquery_value is not None:
+            cfg.nl2sql_allow_subquery = allow_subquery_value.strip().lower() in {"1", "true", "yes", "on"}
 
         # 为依赖 OpenAI 兼容接口的组件兜底注入 KEY，避免默认 OpenAIEmbedding 报错
         if cfg.dashscope_api_key:

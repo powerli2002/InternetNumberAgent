@@ -10,6 +10,7 @@ from psycopg2 import sql
 import yaml
 
 from src.utils.entity_persistence import EntityPersistence
+from src.utils.schema_manager import apply_core_ddl, resolve_core_ddl_path
 from src.utils.logging_manager import logger
 
 CORE_TABLES = [
@@ -144,6 +145,8 @@ def main() -> None:
     parser.add_argument("--root", default=".", help="Project root directory")
     parser.add_argument("--date", default=None, help="Date for entity persistence")
     parser.add_argument("--cleanup-only", action="store_true", help="Drop non-core tables and exit")
+    parser.add_argument("--ddl-path", default=None, help="Core DDL file path, default database/core_schema.sql")
+    parser.add_argument("--skip-ddl", action="store_true", help="Skip applying core DDL before import")
     parser.add_argument(
         "--ensure-core",
         action="store_true",
@@ -158,8 +161,23 @@ def main() -> None:
     cfg = load_config(config_path)
     date = args.date or cfg.get("current_date") or datetime.now().strftime("%Y-%m-%d")
     output_dir = resolve_path(root_dir, cfg.get("output_dir", "./data/"))
+    ddl_path = resolve_path(root_dir, args.ddl_path) if args.ddl_path else resolve_core_ddl_path(root_dir)
 
     wait_for_db(cfg, args.wait_seconds)
+
+    should_apply_ddl = not args.skip_ddl and not args.cleanup_only
+    if should_apply_ddl and not (args.cleanup_only or args.ensure_core):
+        conn = psycopg2.connect(
+            database=cfg["postgresql_database"],
+            user=cfg["postgresql_user"],
+            password=cfg["postgresql_password"],
+            host=cfg["postgresql_host"],
+            port=cfg["postgresql_port"],
+        )
+        try:
+            apply_core_ddl(conn, ddl_path)
+        finally:
+            conn.close()
 
     if args.cleanup_only or args.ensure_core:
         conn = psycopg2.connect(
@@ -170,6 +188,8 @@ def main() -> None:
             port=cfg["postgresql_port"],
         )
         try:
+            if should_apply_ddl:
+                apply_core_ddl(conn, ddl_path)
             drop_audit_triggers(conn)
             dropped = drop_non_core_tables(conn)
             if dropped:

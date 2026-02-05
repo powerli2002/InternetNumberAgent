@@ -16,6 +16,8 @@
    docker compose -f docker/docker-compose.yml build loader
    docker compose -f docker/docker-compose.yml run --rm loader
    ```
+   - 导入流程会自动应用统一 DDL：`database/core_schema.sql`
+   - 如需单独执行：`python scripts/ensure_core_schema.py --config conf/config.docker.yaml --root .`
 
 3. （可选）预构建 NL2SQL 索引
    ```bash

@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -226,14 +227,160 @@ class DatabaseClient:
         """获取 SQLAlchemy 引擎，便于复用连接池。"""
         return self._get_engine()
 
-    def run_sql(self, sql: str) -> List[Tuple]:
-        # 统一执行入口，返回原始行数据
+    def run_sql(self, sql: str, timeout_ms: Optional[int] = None, max_rows: Optional[int] = None) -> Dict[str, Any]:
+        # 统一执行入口，返回列名与行数据
         engine = self._get_engine()
         with engine.connect() as conn:
             from sqlalchemy import text as sql_text  # type: ignore
 
+            if timeout_ms:
+                conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
             result = conn.execute(sql_text(sql))  # type: ignore
-            return result.fetchall()
+            columns = list(result.keys())
+            if max_rows:
+                rows = result.fetchmany(max_rows + 1)
+                truncated = len(rows) > max_rows
+                if truncated:
+                    rows = rows[:max_rows]
+            else:
+                rows = result.fetchall()
+                truncated = False
+            return {"columns": columns, "rows": rows, "truncated": truncated}
+
+
+class SQLGuard:
+    """SQL 安全守卫：校验只读与表白名单，并强制 LIMIT。"""
+
+    _BLOCKED_KEYWORDS = {
+        "insert",
+        "update",
+        "delete",
+        "drop",
+        "alter",
+        "create",
+        "truncate",
+        "merge",
+        "grant",
+        "revoke",
+        "copy",
+        "vacuum",
+        "analyze",
+        "call",
+        "execute",
+        "set",
+        "show",
+        "reset",
+        "lock",
+        "notify",
+        "listen",
+        "into",
+    }
+
+    _BLOCKED_FUNCTIONS = {
+        "pg_sleep",
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+    }
+
+    def __init__(
+        self,
+        allowed_tables: List[str],
+        max_rows: int,
+        max_sql_length: int,
+        allow_subquery: bool,
+    ) -> None:
+        self.allowed_tables = {t.lower() for t in allowed_tables}
+        self.max_rows = max_rows
+        self.max_sql_length = max_sql_length
+        self.allow_subquery = allow_subquery
+
+    def sanitize(self, sql: str) -> Tuple[str, Dict[str, Any]]:
+        """校验并修正 SQL，返回安全 SQL 与执行策略信息。"""
+        raw_sql = (sql or "").strip()
+        if not raw_sql:
+            raise RuntimeError("生成 SQL 为空，无法执行。")
+
+        cleaned = self._strip_comments(raw_sql).strip().rstrip(";").strip()
+        if not cleaned:
+            raise RuntimeError("SQL 仅包含注释或空内容，无法执行。")
+        if ";" in cleaned:
+            raise RuntimeError("检测到多语句 SQL，已拒绝执行。")
+        if len(cleaned) > self.max_sql_length:
+            raise RuntimeError("SQL 超过长度限制，已拒绝执行。")
+
+        sql_no_strings = self._strip_string_literals(cleaned)
+        if not re.match(r"^(select|with)\b", sql_no_strings, flags=re.IGNORECASE):
+            raise RuntimeError("仅允许执行 SELECT/CTE 查询。")
+
+        for keyword in self._BLOCKED_KEYWORDS:
+            if re.search(rf"\b{re.escape(keyword)}\b", sql_no_strings, flags=re.IGNORECASE):
+                raise RuntimeError(f"SQL 含有禁止关键字: {keyword}")
+
+        for func in self._BLOCKED_FUNCTIONS:
+            if re.search(rf"\b{re.escape(func)}\b", sql_no_strings, flags=re.IGNORECASE):
+                raise RuntimeError(f"SQL 含有禁止函数: {func}")
+
+        tables = self._extract_tables(sql_no_strings)
+        for table in tables:
+            if table.lower() not in self.allowed_tables:
+                raise RuntimeError(f"SQL 引用了未授权表: {table}")
+
+        safe_sql, limit_info = self._enforce_limit(cleaned)
+        return safe_sql, limit_info
+
+    def _strip_comments(self, sql: str) -> str:
+        # 移除行注释与块注释，避免干扰关键字检查
+        sql = re.sub(r"--.*", "", sql)
+        sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+        return sql
+
+    def _strip_string_literals(self, sql: str) -> str:
+        # 替换字符串字面量，避免误判关键字
+        return re.sub(r"'(?:''|[^'])*'", "''", sql)
+
+    def _extract_tables(self, sql: str) -> List[str]:
+        # 解析 FROM/JOIN 后的表名，拒绝子查询以提升安全性
+        if not self.allow_subquery and re.search(r"\b(from|join)\s+\(", sql, flags=re.IGNORECASE):
+            raise RuntimeError("检测到子查询，当前策略禁止执行。")
+        pattern = re.compile(r'\b(from|join)\s+(?:only\s+)?(["\w\.]+)', re.IGNORECASE)
+        tables: List[str] = []
+        for match in pattern.finditer(sql):
+            token = match.group(2)
+            name = token.strip('"')
+            if "." in name:
+                name = name.split(".")[-1]
+            if name:
+                tables.append(name.lower())
+        return tables
+
+    def _enforce_limit(self, sql: str) -> Tuple[str, Dict[str, Any]]:
+        # 强制加 LIMIT，并对已有 LIMIT 做上限收敛
+        if self.max_rows <= 0:
+            raise RuntimeError("NL2SQL_MAX_ROWS 必须大于 0")
+
+        limit_matches = list(re.finditer(r"\blimit\s+(\d+)", sql, flags=re.IGNORECASE))
+        limit_applied = False
+        limit_clamped = False
+        limit_value = self.max_rows
+
+        if limit_matches:
+            last_match = limit_matches[-1]
+            current = int(last_match.group(1))
+            limit_value = min(current, self.max_rows)
+            limit_applied = True
+            if current > self.max_rows:
+                sql = sql[: last_match.start(1)] + str(self.max_rows) + sql[last_match.end(1) :]
+                limit_clamped = True
+        else:
+            sql = f"{sql} LIMIT {self.max_rows}"
+            limit_applied = True
+            limit_clamped = True
+
+        return sql, {
+            "limit_applied": limit_applied,
+            "limit_value": limit_value,
+            "limit_clamped": limit_clamped,
+        }
 
 
 class NL2SQLTool:
@@ -331,6 +478,10 @@ class NL2SQLTool:
         column_index_max_values: int = 200,
         column_index_max_value_length: int = 128,
         column_index_config: Optional[Dict[str, List[str]]] = None,
+        max_rows: int = 200,
+        statement_timeout_ms: int = 15000,
+        max_sql_length: int = 4000,
+        allow_subquery: bool = False,
     ) -> None:
         self.postgres_url = postgres_url
         self.allowed_tables = allowed_tables or []
@@ -351,6 +502,10 @@ class NL2SQLTool:
         self.column_index_max_values = column_index_max_values
         self.column_index_max_value_length = column_index_max_value_length
         self.column_index_config = column_index_config or self.COLUMN_INDEX_CONFIG
+        self.max_rows = max_rows
+        self.statement_timeout_ms = statement_timeout_ms
+        self.max_sql_length = max_sql_length
+        self.allow_subquery = allow_subquery
         self._llm = None
         self._embed_model = None
         self._table_retriever_cache = None
@@ -371,11 +526,9 @@ class NL2SQLTool:
             from llama_index.core.objects import ObjectIndex, SQLTableNodeMapping, SQLTableSchema  # type: ignore
             from llama_index.core.schema import TextNode  # type: ignore
             try:
-                from llama_index.core.indices.struct_store import SQLTableRetrieverQueryEngine  # type: ignore
+                from llama_index.core.indices.struct_store.sql_retriever import NLSQLRetriever  # type: ignore
             except Exception:
-                from llama_index.core.indices.struct_store.sql_query import (  # type: ignore
-                    SQLTableRetrieverQueryEngine,
-                )
+                from llama_index.core.indices.struct_store import NLSQLRetriever  # type: ignore
         except Exception as exc:
             raise RuntimeError("缺少 llama-index 依赖，无法执行 NL2SQL。") from exc
 
@@ -432,23 +585,47 @@ class NL2SQLTool:
         _log_nl2sql("NL2SQL步骤 检索器准备耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
         step_time = time.monotonic()
-        engine = SQLTableRetrieverQueryEngine(
+        nlsql_retriever = NLSQLRetriever(
             sql_database=db,
+            llm=llm,
             table_retriever=table_retriever,
             cols_retrievers=cols_retrievers,
-            llm=llm,
             context_query_kwargs=table_context,
-            embed_model=embed_model,
+            sql_only=True,
             verbose=False,
         )
-        _log_nl2sql("NL2SQL步骤 引擎初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        _log_nl2sql("NL2SQL步骤 SQL生成器初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
-        # 让引擎生成 SQL 并执行，返回结构化结果
         step_time = time.monotonic()
-        response = engine.query(question)
-        _log_nl2sql("NL2SQL步骤 查询执行耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        retrieved_nodes, metadata = nlsql_retriever.retrieve_with_metadata(question)
+        sql_query = metadata.get("result") if isinstance(metadata, dict) else None
+        if not sql_query and retrieved_nodes:
+            sql_query = getattr(retrieved_nodes[0].node, "text", "") or ""
+        _log_nl2sql("NL2SQL步骤 SQL生成耗时=%dms", int((time.monotonic() - step_time) * 1000))
+
+        guard = SQLGuard(
+            allowed_tables=table_names,
+            max_rows=self.max_rows,
+            max_sql_length=self.max_sql_length,
+            allow_subquery=self.allow_subquery,
+        )
+        safe_sql, limit_info = guard.sanitize(sql_query or "")
+
+        step_time = time.monotonic()
+        exec_result = self._execute(safe_sql)
+        rows = [list(row) for row in exec_result.get("rows", [])]
+        result_payload = {
+            "columns": exec_result.get("columns", []),
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": exec_result.get("truncated", False),
+            "limit_applied": limit_info.get("limit_applied"),
+            "limit_value": limit_info.get("limit_value"),
+            "limit_clamped": limit_info.get("limit_clamped"),
+        }
+        _log_nl2sql("NL2SQL步骤 SQL执行耗时=%dms", int((time.monotonic() - step_time) * 1000))
         _log_nl2sql("NL2SQL完成 总耗时=%dms", int((time.monotonic() - start_time) * 1000))
-        return NL2SQLResult(sql=str(response.metadata.get("sql_query", "")), result=str(response))
+        return NL2SQLResult(sql=safe_sql, result=result_payload)
 
     def warmup_retrievers(
         self,
@@ -504,10 +681,10 @@ class NL2SQLTool:
         _log_nl2sql("NL2SQL预热完成 耗时=%dms", elapsed_ms)
         return {"status": "ok", "tables": table_names, "elapsed_ms": elapsed_ms}
 
-    def _execute(self, sql: str) -> List[Tuple]:
+    def _execute(self, sql: str) -> Dict[str, Any]:
         if not self.db:
             raise RuntimeError("未配置数据库连接，无法执行 SQL。")
-        return self.db.run_sql(sql)
+        return self.db.run_sql(sql, timeout_ms=self.statement_timeout_ms, max_rows=self.max_rows)
 
     def _build_table_context(self) -> Dict[str, str]:
         """将 summary.md 的字段信息转为 NL2SQL 提示上下文。"""
