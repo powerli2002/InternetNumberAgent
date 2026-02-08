@@ -25,3 +25,4 @@ tiktoken
 socksio
 langsmith
 python-docx
+fastmcp

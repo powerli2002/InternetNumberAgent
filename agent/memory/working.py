@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional
 
-from agent.models import MemoryItem
+from agent.core.models import MemoryItem
 from .base import BaseMemory
 
 

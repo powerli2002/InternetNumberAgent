@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import List
 
-from agent.models import MemoryItem
+from agent.core.models import MemoryItem
 
 
 class BaseMemory(ABC):

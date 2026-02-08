@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
 
-from agent.config import AgentConfig
+# 兼容以脚本路径直接执行：将项目根目录加入模块搜索路径
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from agent.core.config import AgentConfig
 from agent.tools.nl2sql_tool import NL2SQLTool
 
 

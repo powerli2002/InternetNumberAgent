@@ -19,14 +19,17 @@ import argparse
 import sys
 import os
 import json
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-# sys.path.append("../")
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 直接脚本启动时，确保优先从项目根目录解析 `agent.*` 包，避免命中 `agent/agent` 子目录
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.agent_loop import FusionAgent
-from agent.config import AgentConfig
-from agent.models import ConversationTurn
+from agent.core.config import AgentConfig
+from agent.core.models import ConversationTurn
+from agent.runtime.fusion_agent import FusionAgent
 
 
 def _run_with_timeout(agent: FusionAgent, user_input: str, history: list[ConversationTurn], timeout_seconds: int):
@@ -96,7 +99,7 @@ def main() -> None:
             print(f"预热索引失败: {exc}")
 
     # 设置超时时间，确保不会无限等待
-    timeout_seconds = max(1, int(config.request_timeout_seconds))
+    timeout_seconds = max(1, int(config.cli_timeout_seconds))
     history: list[ConversationTurn] = []
 
     if args.once:

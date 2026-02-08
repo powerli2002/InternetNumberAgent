@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -93,3 +93,54 @@ class LLMClient:
             return json.loads(content)
         except Exception as exc:
             raise ValueError(f"模型输出无法解析为 JSON: {content}") from exc
+
+    def tool_call(
+        self,
+        messages: List[LLMMessage],
+        tools: List[Dict[str, Any]],
+        tool_choice: str = "required",
+        temperature: float = 0.2,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """使用 Function Calling 获取工具调用参数。"""
+        try:
+            from openai import OpenAI  # type: ignore
+            from langsmith.wrappers import wrap_openai  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("未安装 openai/langsmith SDK，无法调用百炼兼容接口。") from exc
+
+        if not self.api_key:
+            raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用百炼模型。")
+
+        client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=[message.__dict__ for message in messages],
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+        )
+        message = response.choices[0].message
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not tool_calls and getattr(message, "function_call", None):
+            tool_calls = [message.function_call]
+        if not tool_calls:
+            raise ValueError("模型未返回工具调用结果。")
+
+        call = tool_calls[0]
+        if isinstance(call, dict):
+            func = call.get("function") or call
+            name = func.get("name")
+            arguments = func.get("arguments")
+        else:
+            func = getattr(call, "function", call)
+            name = getattr(func, "name", None)
+            arguments = getattr(func, "arguments", None)
+        if not name:
+            raise ValueError("工具调用缺少函数名。")
+        if not arguments:
+            raise ValueError("工具调用缺少参数。")
+        try:
+            payload = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+        except Exception as exc:
+            raise ValueError(f"工具调用参数解析失败: {arguments}") from exc
+        return name, payload

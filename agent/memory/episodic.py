@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from agent.models import MemoryItem
+from agent.core.models import MemoryItem
 from .base import BaseMemory
 
 

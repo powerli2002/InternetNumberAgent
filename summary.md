@@ -16,6 +16,27 @@
 4. **域名/网站关联**：将域名或网站与 IP、前缀、AS、组织建立关联链路。
 5. **可落库**：默认仅写入 16 张核心实体表，便于 API 检索、图谱建模与查询性能优化。
 
+### 1.1 智能体目录分层（2026-02-06）
+
+为降低耦合并统一工程规范，`agent/` 目录已按分层组织，并在 2026-02-06 完成 **MCP + A2A** 升级：
+
+- `agent/core/`：配置、模型、提示词、LLM、追踪、Schema
+- `agent/runtime/`：FusionAgent 运行时编排与主路由协议
+- `agent/interfaces/http/`：FastAPI 接口与线程消息存储
+- `agent/interfaces/mcp/`：FastMCP 服务入口
+- `agent/interfaces/a2a/`：A2A Worker 服务入口
+- `agent/mcp/`：MCP 工具服务与客户端
+- `agent/protocols/a2a/`：A2A 协议模型与客户端
+- `agent/workers/`：A2A Worker 执行器
+- `agent/cli/`：命令行入口
+
+当前统一入口：
+
+- MCP：`uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032`
+- A2A：`uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031`
+- API：`uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025`
+- CLI：`python -m agent.cli.main --once "你的问题"`
+
 ---
 
 ## 2. 数据格式与落库规则

@@ -9,9 +9,9 @@
 
 文档内容紧贴代码实现，主要参考：
 - `agent/tools/nl2sql_tool.py`
-- `agent/schema.py`
-- `agent/agent_loop.py`
-- `agent/config.py`
+- `agent/core/schema.py`
+- `agent/runtime/fusion_agent.py`
+- `agent/core/config.py`
 - `scripts/build_nl2sql_indexes.py`
 
 ---
@@ -58,7 +58,7 @@ NL2SQL_ALLOW_SUBQUERY=false
 
 ## 3. Schema 与上下文注入
 
-`agent/schema.py` 中维护了两类关键结构：
+`agent/core/schema.py` 中维护了两类关键结构：
 
 1) `TABLE_SCHEMA`：每张表字段列表，用于构建 LlamaIndex 的表结构上下文。
 2) `TABLE_CONTEXT_HINTS`：字段语义补充，避免国家字段误用（如 `country` vs `country_cn`）。
@@ -128,7 +128,7 @@ values = select(column).distinct().limit(column_index_max_values)
 # 为每个 distinct value 构建向量索引
 ```
 
-是否启用列检索由 `FusionAgent._should_use_column_retrieval()` 决定（仅在字段相关问题中启用）。
+是否启用列检索由主代理路由约束 `constraints.enable_column_retrieval` 决定，并通过 MCP 工具入参传递。
 
 ---
 
@@ -189,15 +189,16 @@ python scripts/build_nl2sql_indexes.py --skip-columns
 
 ## 9. 与 FusionAgent 的集成
 
-`FusionAgent` 在 `agent/agent_loop.py` 中调度 NL2SQL：
+`FusionAgent` 在 `agent/runtime/fusion_agent.py` 中调度 NL2SQL：
 
-- `_should_use_nl2sql()` 判定问题是否为结构化查询
-- `_should_use_column_retrieval()` 决定是否启用列检索
-- 调用 `NL2SQLTool.query()` 并将结果写入 Evidence + 情景记忆
+- 通过 `route_tools` Function Calling 生成工具计划（`ToolRouterDecision`）
+- 当计划包含 `tool=nl2sql` 时调用 `MCPToolClient.call_tool("nl2sql_query", ...)`
+- MCP 服务端（`agent/mcp/server.py`）执行 `NL2SQLTool.query()`
+- 执行结果回传主代理后写入 Evidence + 情景记忆
 
 日志与追踪：
 - 模块日志：`_log_module_io()`
-- LangSmith：`nl2sql_query` 子 run
+- LangSmith：客户端 `mcp_tool:nl2sql_query` + 服务端 `mcp_server:nl2sql_query`
 
 ---
 
@@ -206,14 +207,14 @@ python scripts/build_nl2sql_indexes.py --skip-columns
 ### 10.1 CLI 单次问答
 
 ```bash
-python -m agent.main --once "列出 ASN 12345 的 IPv4 前缀"
+python -m agent.cli.main --once "列出 ASN 12345 的 IPv4 前缀"
 ```
 
 ### 10.2 预热索引
 
 ```bash
-python agent/main.py --preload-index
-python agent/main.py --preload-index --preload-columns
+python agent/cli/main.py --preload-index
+python agent/cli/main.py --preload-index --preload-columns
 ```
 
 ---

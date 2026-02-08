@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from typing import List, Tuple
 
@@ -13,10 +14,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from agent.agent_loop import FusionAgent
-from agent.config import AgentConfig
-from agent.models import ConversationTurn
-from agent.prompts import SYSTEM_PROMPT
+from agent.core.config import AgentConfig
+from agent.core.models import ConversationTurn
+from agent.core.prompts import SYSTEM_PROMPT
+from agent.runtime.fusion_agent import FusionAgent
 
 
 _config = AgentConfig.load()
@@ -69,7 +70,12 @@ def _agent_node(state: MessagesState) -> MessagesState:
     messages = state["messages"]
     user_message = _extract_user_message(messages)
     history = _build_history(messages[:-1])
-    context, _sources, _question_type = _fusion_agent._prepare_context(user_message, history, None)
+    context, _sources, _question_type = _fusion_agent._prepare_context(
+        user_message,
+        history,
+        None,
+        str(uuid.uuid4()),
+    )
 
     response = _llm.invoke(
         [

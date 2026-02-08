@@ -12,9 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent.agent_loop import FusionAgent
-from agent.config import AgentConfig
-from agent.models import ConversationTurn
+from agent.core.config import AgentConfig
+from agent.core.models import ConversationTurn
+from agent.runtime.fusion_agent import FusionAgent
 from src.utils.logging_manager import logger
 
 
@@ -465,6 +465,8 @@ async def info() -> Dict[str, Any]:
         "status": "ok",
         "assistant_id": "fusion-agent",
         "graph_id": "fusion-agent",
+        "mcp_server_url": config.mcp_server_url,
+        "a2a_server_url": config.a2a_server_url,
         "version": "local",
         "time": _now_iso(),
     }

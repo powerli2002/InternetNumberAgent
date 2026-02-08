@@ -12,7 +12,19 @@ requires-python = ">=3.10"
 package-dir = { "agent" = "." }
 packages = [
   "agent",
+  "agent.cli",
+  "agent.core",
   "agent.context",
+  "agent.interfaces",
+  "agent.interfaces.http",
+  "agent.interfaces.mcp",
+  "agent.interfaces.a2a",
   "agent.memory",
+  "agent.runtime",
   "agent.tools",
+  "agent.subagents",
+  "agent.mcp",
+  "agent.protocols",
+  "agent.protocols.a2a",
+  "agent.workers",
 ]

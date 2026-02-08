@@ -1,6 +1,6 @@
 # 互联网号码资源问答系统（fusionprocessing）
 
-本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。NL2SQL 基于 LlamaIndex 的表检索与列值索引增强生成准确率。
+本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**工具层 FastMCP（HTTP） + 代理协同 A2A（HTTP+SSE） + 全链路 LangSmith 追踪**。主代理仍使用 Function Calling 做工具路由，但工具执行与子代理执行已全部协议化。
 
 ## 启动与部署（简版）
 
@@ -24,23 +24,25 @@
    python scripts/build_nl2sql_indexes.py
    ```
 
-4. 启动 API（FusionAgent）
+4. 启动智能体三层服务（MCP / A2A / API）
    ```bash
-   docker compose -f docker/docker-compose.yml up -d agent-api
+   docker compose -f docker/docker-compose.yml up -d agent-mcp agent-a2a agent-api
    ```
 
 > API 默认端口：`2025`（访问 `http://localhost:2025/info` 验证）
 
 ### 方式二：本地运行（开发）
 
-1. 安装依赖并启动 API
+1. 安装依赖并启动三层服务
    ```bash
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    # 可选：预构建 NL2SQL 索引
    python scripts/build_nl2sql_indexes.py
-   uvicorn agent.api_server:app --host 0.0.0.0 --port 2025
+   uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032
+   uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031
+   uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025
    ```
 
 2. 启动前端（Agent Chat UI）
@@ -55,10 +57,21 @@
 ## 常用端口
 
 - API：`2025`
+- A2A Worker：`2031`
+- MCP Tool Server：`2032`
 - PostgreSQL：`5432`
 - Neo4j：`7474/7687`
 - Milvus：`19530/9091`
 - Agent Chat UI：`3012`
+
+关键环境变量：
+- `MCP_SERVER_URL`（默认 `http://127.0.0.1:2032/mcp`）
+- `A2A_SERVER_URL`（默认 `http://127.0.0.1:2031/a2a`）
+- `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `60` 秒）
+- `CLI_TIMEOUT_SECONDS`（CLI 外层超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
+- `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
+- `A2A_TIMEOUT_SECONDS`（A2A 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
+- `A2A_EVENT_POLL_TIMEOUT_SECONDS`（A2A Worker SSE 轮询超时/心跳间隔，默认 `15` 秒）
 
 ## 运行时表说明
 
@@ -81,8 +94,38 @@ FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张�
 - `MODULE_LOG_BODY_LIMIT`：模块日志中单字段最大长度（默认 `2000` 字符）
 - `MODULE_LOG_MAX_ITEMS`：模块日志最多记录的返回项数量（默认 `5`）
 
+按 `metadata.trace_id` 拼接 LangSmith 跨服务链路（推荐用于排查 `tool_router plan`、MCP/A2A 断点）：
+
+```bash
+python scripts/trace_by_metadata_id.py \
+  --project "${LANGSMITH_PROJECT}" \
+  --trace-id "<metadata.trace_id>" \
+  --since-hours 24 \
+  --show-io
+```
+
+## Agent 目录分层（2026-02-06）
+
+为降低耦合并便于扩展，`agent/` 已按分层重构：
+
+- `agent/core/`：配置、模型、提示词、LLM、追踪、Schema
+- `agent/runtime/`：FusionAgent 运行时编排、主路由协议
+- `agent/interfaces/http/`：FastAPI 接口与线程消息存储
+- `agent/interfaces/mcp/`：MCP 服务入口
+- `agent/interfaces/a2a/`：A2A 服务入口
+- `agent/mcp/`：FastMCP 工具服务与客户端
+- `agent/protocols/a2a/`：A2A 协议模型与客户端
+- `agent/workers/`：A2A Worker 执行器与服务
+- `agent/cli/`：命令行入口
+- `agent/context/`、`agent/memory/`、`agent/tools/`、`agent/subagents/`：上下文、记忆、工具、子代理
+
+注意：旧入口文件已移除，需统一使用新分层路径。
+
 ## 详细文档
 
 - 项目目标与数据结构：`summary.md`
 - 部署与导入：`docs/部署.md`
 - 系统技术文档：`docs/互联网号码资源问答系统技术文档.md`
+- 子代理方案：`docs/子代理构建.md`
+- Agent 目录说明：`agent/README.md`
+- 面试深潜文档：`agent/docs/system_architecture_deep_dive/README.md`

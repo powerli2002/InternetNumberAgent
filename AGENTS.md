@@ -7,12 +7,15 @@
 ## 系统结构与关键目录
 - `src/`：数据处理流水线（解析/清洗/实体化/格式化器）。
 - `scripts/`：CSV 导入与辅助脚本（如 `scripts/load_all_csv.py`）。
-- `agent/`：FusionAgent、上下文工程、记忆、工具、追踪；API 在 `agent/api_server.py`。
-- `agent/tools/`：NL2SQL、RAG、Note/Todo/Task、Neo4j/疆域分析工具等。
+- `agent/`：FusionAgent、上下文工程、记忆、工具、追踪；API 在 `agent/interfaces/http/server.py`。
+- `agent/mcp/`：FastMCP 工具服务与客户端（NL2SQL/RAG/Neo4j/Note/Todo）。
+- `agent/protocols/a2a/`：A2A 协议模型与客户端（HTTP+SSE）。
+- `agent/workers/`：A2A Worker 服务与子代理执行器。
+- `agent/tools/`：底层工具实现（由 MCP Server 封装暴露）。
 - `conf/`：配置与 `.env`；`config.yaml`（本机）/`config.docker.yaml`（容器）。
 - `data/format/`：实体 CSV 输出；多为日期快照。
 - `docs/`：项目与部署文档；`summary.md` 为 16 表与关系的权威摘要。
-- `agent-chat-ui/`：可选前端，使用 LangGraph 风格 API 访问 `agent/api_server.py`。
+- `agent-chat-ui/`：可选前端，使用 LangGraph 风格 API 访问 `agent/interfaces/http/server.py`。
 
 ## 数据与模型约束（必须遵守）
 - **仅 16 张核心实体表**为默认落库目标；避免生成 `*_audit` 或原始表，除非明确要求。
@@ -25,7 +28,9 @@
 
 ## 运行与验证（常用）
 - 导入 16 表：`python scripts/load_all_csv.py --config conf/config.docker.yaml --root . --ensure-core`
-- API：`uvicorn agent.api_server:app --host 0.0.0.0 --port 2025`
+- MCP 工具服务：`uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032`
+- A2A Worker 服务：`uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031`
+- API：`uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025`
 - 向量索引：`python agent/knowledge_ingest.py --root . --path agent/knowledge --reset`
 - Neo4j 图谱：`python -m agent.tools.neo4j_graph_loader --batch-size 1000`
 - AS 疆域分析：`python agent/tools/as_territory_tools.py --config conf/config.docker.yaml --root . [--load-neo4j]`

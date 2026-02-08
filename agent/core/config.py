@@ -7,11 +7,12 @@
 2. YAML 文件（conf/config.yaml）：静态配置，区分本机和容器环境
 3. 默认值：代码中的默认参数，确保系统能正常启动
 
-配置分类：
-- 数据库连接：PostgreSQL、Neo4j、Milvus
-- LLM 服务：阿里云百炼 API 配置
-- 记忆系统：各类型记忆的容量和行为参数
-- 工具配置：索引缓存、向量集合等
+    配置分类：
+    - 数据库连接：PostgreSQL、Neo4j、Milvus
+    - LLM 服务：阿里云百炼 API 配置
+    - 协议服务：MCP 工具服务与 A2A Worker 服务
+    - 记忆系统：各类型记忆的容量和行为参数
+    - 工具配置：索引缓存、向量集合等
 - 系统参数：上下文长度、超时时间等
 """
 
@@ -42,7 +43,7 @@ class AgentConfig:
     """
 
     # 路径配置
-    project_root: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1])
+    project_root: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2])
     """项目根目录路径，自动从当前文件位置推导"""
 
     env_path: Optional[Path] = None
@@ -96,8 +97,26 @@ class AgentConfig:
     max_context_tokens: int = 4096
     """上下文最大 token 数，控制发送给 LLM 的上下文长度"""
 
-    request_timeout_seconds: int = 60
-    """单次请求超时时间（秒）"""
+    request_timeout_seconds: int = 180
+    """统一请求超时时间（秒），用于各模块默认回退"""
+
+    cli_timeout_seconds: int = 180
+    """CLI 外层执行超时时间（秒）"""
+
+    mcp_timeout_seconds: int = 180
+    """MCP 客户端调用超时时间（秒）"""
+
+    a2a_timeout_seconds: int = 180
+    """A2A 客户端 HTTP/SSE 调用超时时间（秒）"""
+
+    a2a_event_poll_timeout_seconds: float = 15.0
+    """A2A Worker 事件队列轮询超时时间（秒），用于 SSE 心跳"""
+
+    mcp_server_url: str = "http://127.0.0.1:2032/mcp"
+    """FastMCP 工具服务地址（HTTP Streamable）。"""
+
+    a2a_server_url: str = "http://127.0.0.1:2031/a2a"
+    """A2A Worker 服务地址（HTTP+SSE）。"""
 
     semantic_memory_enabled: bool = True
     """是否启用语义记忆抽取功能"""
@@ -110,7 +129,7 @@ class AgentConfig:
 
     # NL2SQL 索引缓存配置
     nl2sql_index_cache_dir: Path = field(
-        default_factory=lambda: Path(__file__).resolve().parents[1] / "agent" / "index_store" / "nl2sql"
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "index_store" / "nl2sql"
     )
     """NL2SQL 索引缓存目录：存储表结构和列值的向量索引"""
 
@@ -132,8 +151,24 @@ class AgentConfig:
     nl2sql_allow_subquery: bool = False
     """是否允许包含子查询的 SQL（默认禁止以降低安全风险）"""
 
+    # 子代理与图谱查询配置
+    subagent_max_turns: int = 4
+    """子代理路由最大步数"""
+
+    subagent_max_tokens: int = 1200
+    """子代理单次任务最大输出 token 预算（软预算）"""
+
+    subagent_max_time_ms: int = 15000
+    """子代理单次任务最大执行时间（毫秒）"""
+
+    graph_max_rows: int = 200
+    """Neo4j 查询最大返回行数"""
+
+    graph_max_cypher_length: int = 4000
+    """Neo4j Cypher 最大长度"""
+
     # 工具与目录配置
-    notes_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1] / "notes")
+    notes_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "notes")
     """笔记存储目录"""
 
     notes_index: Path = field(init=False)
@@ -167,7 +202,7 @@ class AgentConfig:
         Returns:
             AgentConfig: 加载完成的配置对象
         """
-        root = project_root or Path(__file__).resolve().parents[1]
+        root = project_root or Path(__file__).resolve().parents[2]
         cfg = cls(project_root=root)
 
         # 第一步：读取环境变量文件 conf/.env
@@ -218,13 +253,48 @@ class AgentConfig:
         cfg.dashscope_model = os.environ.get("DASHSCOPE_MODEL", cfg.dashscope_model)
         cfg.dashscope_embedding_model = os.environ.get("DASHSCOPE_EMBEDDING_MODEL", cfg.dashscope_embedding_model)
 
-        # 请求超时配置（秒）
+        # 统一请求超时配置（秒）
         timeout_value = os.environ.get("REQUEST_TIMEOUT_SECONDS") or os.environ.get("AGENT_REQUEST_TIMEOUT_SECONDS")
         if timeout_value:
             try:
-                cfg.request_timeout_seconds = int(timeout_value)
+                cfg.request_timeout_seconds = max(1, int(timeout_value))
             except ValueError:
                 pass
+        # 各模块默认继承统一超时，允许用专用环境变量覆盖
+        cfg.cli_timeout_seconds = cfg.request_timeout_seconds
+        cfg.mcp_timeout_seconds = cfg.request_timeout_seconds
+        cfg.a2a_timeout_seconds = cfg.request_timeout_seconds
+
+        cli_timeout_value = os.environ.get("CLI_TIMEOUT_SECONDS")
+        if cli_timeout_value:
+            try:
+                cfg.cli_timeout_seconds = max(1, int(cli_timeout_value))
+            except ValueError:
+                pass
+
+        mcp_timeout_value = os.environ.get("MCP_TIMEOUT_SECONDS")
+        if mcp_timeout_value:
+            try:
+                cfg.mcp_timeout_seconds = max(1, int(mcp_timeout_value))
+            except ValueError:
+                pass
+
+        a2a_timeout_value = os.environ.get("A2A_TIMEOUT_SECONDS")
+        if a2a_timeout_value:
+            try:
+                cfg.a2a_timeout_seconds = max(1, int(a2a_timeout_value))
+            except ValueError:
+                pass
+
+        a2a_event_poll_timeout_value = os.environ.get("A2A_EVENT_POLL_TIMEOUT_SECONDS")
+        if a2a_event_poll_timeout_value:
+            try:
+                cfg.a2a_event_poll_timeout_seconds = max(1.0, float(a2a_event_poll_timeout_value))
+            except ValueError:
+                pass
+
+        cfg.mcp_server_url = os.environ.get("MCP_SERVER_URL", cfg.mcp_server_url)
+        cfg.a2a_server_url = os.environ.get("A2A_SERVER_URL", cfg.a2a_server_url)
 
         # 语义记忆配置
         enabled_value = os.environ.get("SEMANTIC_MEMORY_ENABLED")
@@ -278,6 +348,37 @@ class AgentConfig:
         allow_subquery_value = os.environ.get("NL2SQL_ALLOW_SUBQUERY")
         if allow_subquery_value is not None:
             cfg.nl2sql_allow_subquery = allow_subquery_value.strip().lower() in {"1", "true", "yes", "on"}
+
+        subagent_max_turns_value = os.environ.get("SUBAGENT_MAX_TURNS")
+        if subagent_max_turns_value:
+            try:
+                cfg.subagent_max_turns = max(1, int(subagent_max_turns_value))
+            except ValueError:
+                pass
+        subagent_max_tokens_value = os.environ.get("SUBAGENT_MAX_TOKENS")
+        if subagent_max_tokens_value:
+            try:
+                cfg.subagent_max_tokens = max(256, int(subagent_max_tokens_value))
+            except ValueError:
+                pass
+        subagent_max_time_value = os.environ.get("SUBAGENT_MAX_TIME_MS")
+        if subagent_max_time_value:
+            try:
+                cfg.subagent_max_time_ms = max(1000, int(subagent_max_time_value))
+            except ValueError:
+                pass
+        graph_max_rows_value = os.environ.get("GRAPH_MAX_ROWS")
+        if graph_max_rows_value:
+            try:
+                cfg.graph_max_rows = max(1, int(graph_max_rows_value))
+            except ValueError:
+                pass
+        graph_max_cypher_value = os.environ.get("GRAPH_MAX_CYPHER_LENGTH")
+        if graph_max_cypher_value:
+            try:
+                cfg.graph_max_cypher_length = max(256, int(graph_max_cypher_value))
+            except ValueError:
+                pass
 
         # 为依赖 OpenAI 兼容接口的组件兜底注入 KEY，避免默认 OpenAIEmbedding 报错
         if cfg.dashscope_api_key:

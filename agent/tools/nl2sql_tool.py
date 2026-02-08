@@ -23,6 +23,7 @@ NL2SQL 工具模块 - 自然语言到 SQL 的转换与执行
 
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass
 import hashlib
 import json
@@ -35,11 +36,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from llama_index.core.bridge.pydantic import PrivateAttr
 
-from agent.schema import TABLE_CONTEXT_HINTS, TABLE_SCHEMA
+from agent.core.schema import TABLE_CONTEXT_HINTS, TABLE_SCHEMA
 from src.utils.logging_manager import logger
 
 
 NL2SQL_LOG_ENABLED = os.getenv("NL2SQL_LOG_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+NL2SQL_TRACE_ID_CTX: contextvars.ContextVar[str] = contextvars.ContextVar("nl2sql_trace_id", default="")
 
 
 def _log_nl2sql(message: str, *args) -> None:
@@ -159,6 +161,16 @@ class DashScopeLlamaLLM:
                     model_name=model_name,
                 )
 
+            def set_trace_id(self, trace_id: str) -> None:
+                # 将 trace_id 绑定到当前调用上下文，便于 LangSmith 串联子 run
+                NL2SQL_TRACE_ID_CTX.set(str(trace_id or "").strip())
+
+            def _langsmith_extra(self):
+                trace_id = NL2SQL_TRACE_ID_CTX.get().strip()
+                if not trace_id:
+                    return None
+                return {"metadata": {"trace_id": trace_id}}
+
             @property
             def metadata(self):  # type: ignore[override]
                 return self._metadata
@@ -171,6 +183,7 @@ class DashScopeLlamaLLM:
                     model=self._model,
                     messages=[{"role": "user", "content": prompt}],
                     stream=False,
+                    langsmith_extra=self._langsmith_extra(),
                 )
                 text = response.choices[0].message.content or ""
                 return CompletionResponse(text=text, raw=response)
@@ -183,6 +196,7 @@ class DashScopeLlamaLLM:
                     model=self._model,
                     messages=[{"role": "user", "content": prompt}],
                     stream=True,
+                    langsmith_extra=self._langsmith_extra(),
                 )
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content or ""
@@ -517,6 +531,7 @@ class NL2SQLTool:
         question: str,
         tables: Optional[List[str]] = None,
         enable_column_retrieval: Optional[bool] = None,
+        trace_id: str = "",
     ) -> NL2SQLResult:
         """使用 LlamaIndex NL2SQL 生成查询并执行。"""
         start_time = time.monotonic()
@@ -553,6 +568,8 @@ class NL2SQLTool:
         _log_nl2sql("NL2SQL步骤 SQLDatabase初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
         step_time = time.monotonic()
         llm = self._get_llm()
+        if hasattr(llm, "set_trace_id"):
+            llm.set_trace_id(trace_id)
         embed_model = self._get_embed_model()
         self._apply_llamaindex_settings(llm=llm, embed_model=embed_model)
         _log_nl2sql("NL2SQL步骤 模型与设置耗时=%dms", int((time.monotonic() - step_time) * 1000))

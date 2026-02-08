@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from agent.models import MemoryItem
+from agent.core.models import MemoryItem
 from .base import BaseMemory
+from src.utils.logging_manager import logger
 
 
 @dataclass
@@ -26,7 +27,14 @@ class SemanticMemory(BaseMemory):
         self.password = password
         self.embedding_dim = embedding_dim
         self._driver = None
-        self._init_driver()
+        self._enabled = True
+        try:
+            self._init_driver()
+        except Exception as exc:
+            # 语义记忆降级为可用但无后端，避免主流程因 Neo4j 不可用而失败
+            self._enabled = False
+            self._driver = None
+            logger.warning("SemanticMemory 初始化失败，已降级为 no-op: %s", exc)
 
     def _init_driver(self) -> None:
         try:
@@ -47,8 +55,8 @@ class SemanticMemory(BaseMemory):
                 )
 
     def add(self, item: MemoryItem) -> None:
-        if not self._driver:
-            raise RuntimeError("Neo4j 未初始化，无法写入语义记忆。")
+        if not self._enabled or not self._driver:
+            return
         with self._driver.session() as session:
             session.run(
                 """
@@ -63,8 +71,8 @@ class SemanticMemory(BaseMemory):
             )
 
     def add_concept(self, record: SemanticRecord) -> None:
-        if not self._driver:
-            raise RuntimeError("Neo4j 未初始化，无法写入语义记忆。")
+        if not self._enabled or not self._driver:
+            return
         metadata = record.metadata or {}
         with self._driver.session() as session:
             session.run(
@@ -88,8 +96,8 @@ class SemanticMemory(BaseMemory):
                 )
 
     def search(self, query: str, top_k: int = 5) -> List[MemoryItem]:
-        if not self._driver:
-            raise RuntimeError("Neo4j 未初始化，无法检索语义记忆。")
+        if not self._enabled or not self._driver:
+            return []
         with self._driver.session() as session:
             result = session.run(
                 """

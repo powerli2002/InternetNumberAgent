@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
-from agent.config import AgentConfig
+from agent.core.config import AgentConfig
 from agent.tools.rag_tool import DashScopeEmbedding, DocumentChunk, RAGTool
 
 

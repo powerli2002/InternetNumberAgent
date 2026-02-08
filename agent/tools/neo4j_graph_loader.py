@@ -10,7 +10,7 @@ import psycopg2
 from neo4j import GraphDatabase
 from tqdm import tqdm
 
-from agent.config import AgentConfig
+from agent.core.config import AgentConfig
 
 
 def _normalize_value(value: Any) -> Any:

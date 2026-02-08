@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import List
 
-from agent.models import MemoryItem
+from agent.core.models import MemoryItem
 from .episodic import EpisodicMemory
 from .semantic import SemanticMemory
 from .working import WorkingMemory

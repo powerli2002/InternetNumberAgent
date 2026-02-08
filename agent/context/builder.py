@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from agent.models import ConversationTurn, EvidenceItem, MemoryItem
+from agent.core.models import ConversationTurn, EvidenceItem, MemoryItem
 
 
 @dataclass
