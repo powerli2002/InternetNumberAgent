@@ -247,17 +247,42 @@ class FusionAgent:
                     use_columns_raw = step.constraints.get("enable_column_retrieval")
                 use_columns = bool(use_columns_raw)
                 question = str(action_args.get("question") or step_objective)
-                nl2sql_payload = self.mcp_client.call_tool(
-                    "nl2sql_query",
-                    {
-                        "question": question,
-                        "tables": tables,
-                        "enable_column_retrieval": use_columns,
-                        "trace_id": trace_id,
-                    },
-                    trace_id=trace_id,
-                    root_run=root_run,
-                )
+                retried_without_columns = False
+                retry_error = ""
+                try:
+                    nl2sql_payload = self.mcp_client.call_tool(
+                        "nl2sql_query",
+                        {
+                            "question": question,
+                            "tables": tables,
+                            "enable_column_retrieval": use_columns,
+                            "trace_id": trace_id,
+                        },
+                        trace_id=trace_id,
+                        root_run=root_run,
+                    )
+                except Exception as exc:
+                    if not use_columns:
+                        raise
+                    # 列级索引在冷启动时可能较慢，超时后降级为表级检索重试
+                    retried_without_columns = True
+                    retry_error = str(exc)
+                    logger.warning(
+                        "NL2SQL 首次调用失败，降级重试（无列检索）question=%s error=%s",
+                        _preview_text(question, 200),
+                        retry_error,
+                    )
+                    nl2sql_payload = self.mcp_client.call_tool(
+                        "nl2sql_query",
+                        {
+                            "question": question,
+                            "tables": tables,
+                            "enable_column_retrieval": False,
+                            "trace_id": trace_id,
+                        },
+                        trace_id=trace_id,
+                        root_run=root_run,
+                    )
                 sql = str(nl2sql_payload.get("sql", "")) if isinstance(nl2sql_payload, dict) else ""
                 result = nl2sql_payload.get("result", {}) if isinstance(nl2sql_payload, dict) else {}
                 _log_module_io(
@@ -271,6 +296,10 @@ class FusionAgent:
                         content=f"SQL: {sql}\n结果: {result}",
                         source="nl2sql",
                         score=1.0,
+                        metadata={
+                            "retried_without_columns": retried_without_columns,
+                            "retry_error": retry_error,
+                        },
                     )
                 )
                 self.memory_manager.add_memory(
@@ -567,11 +596,11 @@ class FusionAgent:
         return records
 
     def _write_semantic_records(self, records: List[SemanticRecord]) -> None:
-        try:
-            for record in records:
+        for record in records:
+            try:
                 self.memory_manager.semantic_memory.add_concept(record)
-        except Exception:
-            return
+            except Exception as exc:
+                logger.warning("语义记忆写入失败 concept=%s error=%s", record.concept, exc)
 
     def _plan_steps(
         self, user_message: str, history: List[ConversationTurn], trace_id: str, root_run
@@ -704,23 +733,35 @@ class FusionAgent:
         ]
         response = self.llm.chat(prompt)
         try:
-            data = json.loads(response)
+            raw = json.loads(response)
         except Exception:
-            data = [{"title": "执行综合检索", "intent": text}]
+            raw = []
+        data = raw
+        if isinstance(raw, dict):
+            data = (
+                raw.get("subtasks")
+                or raw.get("items")
+                or raw.get("todos")
+                or raw.get("plan")
+                or []
+            )
         if not isinstance(data, list):
-            data = [{"title": "执行综合检索", "intent": text}]
+            data = []
         items: List[TodoItem] = []
         for item in data[:6]:
             if not isinstance(item, dict):
                 continue
-            title = str(item.get("title", "")).strip()
+            title = str(item.get("title") or item.get("name") or "").strip()
             if not title:
                 continue
+            intent = str(item.get("intent") or item.get("objective") or "").strip()
+            if not intent:
+                intent = text
             items.append(
                 TodoItem(
                     id=str(uuid.uuid4())[:8],
                     title=title,
-                    intent=str(item.get("intent", "")).strip(),
+                    intent=intent,
                     status="pending",
                 )
             )

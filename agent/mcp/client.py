@@ -70,6 +70,7 @@ class MCPToolClient:
                 result = await client.call_tool(
                     name=name,
                     arguments=payload,
+                    timeout=self.timeout_seconds,
                     meta={"trace_id": trace_id},
                     raise_on_error=True,
                 )
@@ -101,4 +102,3 @@ class MCPToolClient:
                     texts.append(str(text))
             return {"text": "\n".join(texts)}
         return result
-

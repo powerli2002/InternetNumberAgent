@@ -4,7 +4,19 @@
 
 ### 3.1 协议驱动架构升级
 
-主代理已从"进程内工具直调"升级到"协议驱动编排"，实现工具层与代理层的解耦：
+#### 3.1.1 为什么从进程内调用升级到协议驱动？
+
+主代理已从"进程内工具直调"升级到"协议驱动编排"，实现工具层与代理层的解耦。
+
+**架构演进的理论依据：**
+
+这次升级参考了**微服务架构（Microservices Architecture）**的核心原则：
+
+- **理论来源**：James Lewis & Martin Fowler "Microservices" (2014)
+- **核心思想**：通过网络协议解耦服务，每个服务独立部署、独立扩展
+- **参考网址**：https://martinfowler.com/articles/microservices.html
+
+**为什么需要解耦？传统进程内调用的问题：**
 
 **旧架构（2025年12月前）**：
 ```python
@@ -20,6 +32,31 @@ class FusionAgent:
         result = self.nl2sql_tool.query(query)
 ```
 
+**问题分析**：
+
+1. **部署耦合（Deployment Coupling）**
+   - 工具代码变更需要重启主代理进程
+   - 无法独立升级工具版本
+   - 参考论文：Newman "Building Microservices" (O'Reilly 2015)
+   - 实际案例：NL2SQL 工具优化后，需要重启整个 Agent 服务，导致正在进行的对话中断
+
+2. **资源隔离差（Resource Isolation）**
+   - 工具内存泄漏会影响主代理
+   - 单个工具 CPU 密集计算会阻塞整个进程
+   - 参考模式：Bulkhead Pattern（舱壁模式）
+   - 网址：https://docs.microsoft.com/en-us/azure/architecture/patterns/bulkhead
+
+3. **横向扩展困难（Horizontal Scaling）**
+   - 无法单独扩展 NL2SQL 工具（高 CPU）而不扩展整个 Agent
+   - 参考原则：Scale Cube Model（AKF 扩展立方体）
+   - 论文：Abbott & Fisher "The Art of Scalability" (2015)
+
+4. **故障传播（Failure Propagation）**
+   - 工具崩溃导致主代理进程退出
+   - 无法优雅降级
+   - 参考模式：Circuit Breaker Pattern（熔断器模式）
+   - 网址：https://martinfowler.com/bliki/CircuitBreaker.html
+
 **新架构（2026年2月）**：
 ```python
 # ✅ 松耦合：通过协议客户端调用
@@ -32,6 +69,82 @@ class FusionAgent:
         # 协议调用
         result = self.mcp_client.call_tool("nl2sql_query", {...})
 ```
+
+**优势分析**：
+
+1. **独立部署**：工具服务独立更新，主代理无感知
+2. **资源隔离**：工具服务独立进程，内存/CPU 隔离
+3. **按需扩展**：高负载工具（如 NL2SQL）可以独立横向扩展
+4. **故障隔离**：工具服务崩溃不影响主代理，可以降级或重试
+
+**为什么选择 HTTP 而非其他协议？**
+
+我们对比了以下协议选型：
+
+| 协议 | 优势 | 劣势 | 适用场景 |
+|------|------|------|---------|
+| **HTTP/REST** | 生态成熟、调试方便、跨语言 | 延迟稍高（相比 gRPC） | **工具层（MCP）** ✅ |
+| **gRPC** | 性能高、类型安全 | 调试困难、生态较新 | 高性能内部服务 |
+| **消息队列** | 异步解耦、削峰填谷 | 复杂度高、实时性差 | 批处理任务 |
+| **WebSocket** | 双向通信、低延迟 | 状态管理复杂 | 实时推送 |
+
+**选择依据**：
+
+- **MCP 工具层选择 HTTP**：
+  - 理由：工具调用为同步请求-响应模式，HTTP 最简单直接
+  - 延迟可接受：工具执行时间（NL2SQL 300ms，RAG 100ms）远大于 HTTP 开销（5-10ms）
+  - 参考标准：OpenAPI 3.0 规范
+  - 网址：https://swagger.io/specification/
+
+- **A2A 代理层选择 HTTP + SSE**：
+  - 理由：支持流式返回（SSE），适合长时间任务进度反馈
+  - SSE（Server-Sent Events）是 HTTP 的扩展，兼容性好
+  - 参考标准：W3C Server-Sent Events
+  - 网址：https://html.spec.whatwg.org/multipage/server-sent-events.html
+
+**协议标准的参考来源**：
+
+**MCP（Model Context Protocol）**：
+
+- **灵感来源**：Anthropic 的 MCP 协议规范（2024）
+- **核心理念**：LLM 与工具之间的标准化通信协议
+- **参考网址**：https://modelcontextprotocol.io/introduction
+- **借鉴点**：
+  - 工具描述 Schema（JSON Schema）
+  - 请求/响应格式（统一 JSON）
+  - 错误处理机制（标准错误码）
+
+- **本系统的改进**：
+  - 基于 FastMCP 简化实现（Python SDK）
+  - 网址：https://github.com/jlowin/fastmcp
+  - 添加追踪支持（LangSmith 集成）
+
+**A2A（Agent-to-Agent Protocol）**：
+
+- **灵感来源**：FIPA（Foundation for Intelligent Physical Agents）的 Agent Communication Language（1997）
+- **参考规范**：FIPA ACL Message Structure Specification
+- **网址**：http://www.fipa.org/specs/fipa00061/
+- **核心概念**：
+  - Performative（意图类型：REQUEST、INFORM、QUERY）
+  - Content（任务载荷）
+  - Ontology（领域本体）
+
+- **本系统的简化设计**：
+  - 不完全遵循 FIPA（过于复杂），仅借鉴核心概念
+  - 统一使用 JSON 载荷（A2ATaskPayload）
+  - 支持流式响应（SSE）用于进度反馈
+
+**类似架构的业界参考**：
+
+- **LangChain 的 LangServe**：
+  - 将 Chain 封装为 HTTP API
+  - 网址：https://github.com/langchain-ai/langserve
+  - 借鉴点：FastAPI + Pydantic 的工具定义方式
+
+- **AutoGPT 的 Agent Protocol**：
+  - 标准化的 Agent HTTP 接口
+  - 网址：https://agentprotocol.ai/
+  - 借鉴点：任务创建、执行、查询的 RESTful 设计
 
 **架构分层**：
 

@@ -10,6 +10,7 @@ from agent.core.prompts import SUBAGENT_ROUTER_PROMPT
 from agent.core.tracing import LangSmithTracer
 from agent.subagents.protocol import RouterDecision, TaskEnvelope, allowed_agent_names
 from agent.subagents.function_schemas import subagent_router_schema
+from src.utils.logging_manager import logger
 
 
 class SubAgentRouter:
@@ -30,10 +31,20 @@ class SubAgentRouter:
         allowed_agents = task.constraints.get("tools_allowed") if isinstance(task.constraints, dict) else None
         if not isinstance(allowed_agents, list) or not allowed_agents:
             allowed_agents = self.allowed_agents
-        prompt = SUBAGENT_ROUTER_PROMPT.format(
-            agent_list=", ".join(allowed_agents),
-            max_turns=4,
-        )
+        try:
+            prompt = SUBAGENT_ROUTER_PROMPT.format(
+                agent_list=", ".join(allowed_agents),
+                max_turns=4,
+            )
+        except Exception as exc:
+            # 避免提示模板格式错误阻断整条 supervisor 链路
+            logger.warning("SubAgentRouter prompt 格式化失败，使用兜底提示: %s", exc)
+            prompt = (
+                "你是子代理路由器。"
+                "仅输出 JSON，字段包含 plan/reason/max_turns。"
+                f"可用子代理: {', '.join(allowed_agents)}。"
+                "plan 中每一步包含 agent/objective/constraints/expected_output/budget。"
+            )
         messages = [
             LLMMessage(role="system", content=prompt),
             LLMMessage(role="user", content=json.dumps(task.to_dict(), ensure_ascii=False)),

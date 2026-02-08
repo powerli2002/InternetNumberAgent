@@ -36,3 +36,4 @@ ref/Hello-Agents
 agent/knowledge/互联网域间路由安全监测与防御.docx
 mount/
 conf/.env
+agent-chat-ui/*

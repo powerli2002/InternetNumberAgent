@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from agent.core.models import MemoryItem
 from .base import BaseMemory
@@ -57,33 +58,44 @@ class SemanticMemory(BaseMemory):
     def add(self, item: MemoryItem) -> None:
         if not self._enabled or not self._driver:
             return
+        metadata = item.metadata if isinstance(item.metadata, dict) else {}
+        payload = self._build_metadata_payload(metadata)
         with self._driver.session() as session:
             session.run(
                 """
                 MERGE (c:Concept {name: $name})
                 SET c.description = $description,
                     c.updated_at = datetime(),
-                    c.metadata = $metadata
+                    c.metadata_json = $metadata_json,
+                    c.source = $source,
+                    c.category = $category,
+                    c.importance = $importance,
+                    c.tags = $tags
                 """,
-                name=item.metadata.get("concept", item.content[:50]),
+                name=metadata.get("concept", item.content[:50]),
                 description=item.content,
-                metadata=item.metadata,
+                **payload,
             )
 
     def add_concept(self, record: SemanticRecord) -> None:
         if not self._enabled or not self._driver:
             return
-        metadata = record.metadata or {}
+        payload = self._build_metadata_payload(record.metadata if isinstance(record.metadata, dict) else {})
         with self._driver.session() as session:
             session.run(
                 """
                 MERGE (c:Concept {name: $name})
                 SET c.description = $description,
-                    c.metadata = $metadata
+                    c.updated_at = datetime(),
+                    c.metadata_json = $metadata_json,
+                    c.source = $source,
+                    c.category = $category,
+                    c.importance = $importance,
+                    c.tags = $tags
                 """,
                 name=record.concept,
                 description=record.description,
-                metadata=metadata,
+                **payload,
             )
             if record.vector is not None:
                 session.run(
@@ -104,19 +116,80 @@ class SemanticMemory(BaseMemory):
                 MATCH (c:Concept)
                 WHERE toLower(c.name) CONTAINS toLower($query)
                    OR toLower(c.description) CONTAINS toLower($query)
-                RETURN c.name AS name, c.description AS description, c.metadata AS metadata
+                RETURN c.name AS name,
+                       c.description AS description,
+                       coalesce(c.metadata_json, '{}') AS metadata_json,
+                       coalesce(c.source, '') AS source,
+                       coalesce(c.category, '') AS category,
+                       c.importance AS importance,
+                       coalesce(c.tags, []) AS tags
                 LIMIT $limit
                 """,
                 {"query": query, "limit": top_k},
             )
             items: List[MemoryItem] = []
             for record in result:
+                metadata = self._parse_metadata(record)
                 items.append(
                     MemoryItem(
                         content=record["description"] or "",
                         memory_type="semantic",
-                        metadata={"concept": record["name"], "metadata": record.get("metadata") or {}},
+                        metadata={"concept": record["name"], "metadata": metadata},
                         score=1.0,
                     )
                 )
             return items
+
+    @staticmethod
+    def _build_metadata_payload(metadata: Dict[str, Any]) -> Dict[str, Any]:
+        # Neo4j 属性不支持 map，统一落为可索引字段 + JSON 字符串
+        data = metadata if isinstance(metadata, dict) else {}
+        try:
+            metadata_json = json.dumps(data, ensure_ascii=False)
+        except Exception:
+            metadata_json = "{}"
+        source = str(data.get("source", "")).strip()
+        category = str(data.get("category", "")).strip()
+        importance_raw = data.get("importance")
+        importance = None
+        if importance_raw is not None:
+            try:
+                importance = float(importance_raw)
+            except (TypeError, ValueError):
+                importance = None
+        tags_raw = data.get("tags")
+        tags: List[str] = []
+        if isinstance(tags_raw, list):
+            tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()]
+        return {
+            "metadata_json": metadata_json,
+            "source": source,
+            "category": category,
+            "importance": importance,
+            "tags": tags,
+        }
+
+    @staticmethod
+    def _parse_metadata(record: Any) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {}
+        raw_json = record.get("metadata_json") if hasattr(record, "get") else None
+        if isinstance(raw_json, str) and raw_json.strip():
+            try:
+                loaded = json.loads(raw_json)
+                if isinstance(loaded, dict):
+                    metadata = loaded
+            except Exception:
+                metadata = {}
+        source = record.get("source") if hasattr(record, "get") else None
+        category = record.get("category") if hasattr(record, "get") else None
+        importance = record.get("importance") if hasattr(record, "get") else None
+        tags = record.get("tags") if hasattr(record, "get") else None
+        if isinstance(source, str) and source.strip():
+            metadata.setdefault("source", source.strip())
+        if isinstance(category, str) and category.strip():
+            metadata.setdefault("category", category.strip())
+        if importance is not None:
+            metadata.setdefault("importance", importance)
+        if isinstance(tags, list) and tags:
+            metadata.setdefault("tags", tags)
+        return metadata

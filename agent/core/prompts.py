@@ -51,7 +51,16 @@ STEP_ACTOR_PROMPT = """你是执行阶段的工具选择器，针对单个计划
 """
 
 TODO_PLANNER_PROMPT = """你是任务规划助手，请将复杂任务拆分为 3-6 个子任务。
-要求：每个子任务包含 title 与 intent，避免重复，覆盖完整流程。"""
+要求：
+1) 每个子任务必须包含 title 与 intent；
+2) 子任务要避免重复并覆盖完整流程；
+3) 仅输出 JSON 数组，不要输出任何额外文字；
+4) 输出示例：
+[
+  {"title": "查询前缀分布", "intent": "统计 AS4134 的 IPv4 与 IPv6 前缀数量"},
+  {"title": "查询上游关系", "intent": "分析 AS4134 的上游 AS 列表"}
+]
+"""
 
 SUBAGENT_SYSTEM_PROMPT = """你是子代理，专注执行单一子任务，输出清晰结论与证据摘要。"""
 
@@ -66,37 +75,51 @@ SUBAGENT_ROUTER_PROMPT = """你是子代理路由器，负责把任务分配给�
 6) 返回字段：plan / reason / max_turns。
 
 输出格式示例：
-{
-  \"plan\": [
-    {
-      \"agent\": \"sql_facts\",
-      \"objective\": \"...\",\n      \"constraints\": {\"tables\": [\"ip_bgp_entity\"]},\n      \"expected_output\": \"结构化结果\",\n      \"budget\": {\"max_tokens\": 1200, \"max_time_ms\": 15000}
-    }
+{{
+  "plan": [
+    {{
+      "agent": "sql_facts",
+      "objective": "...",
+      "constraints": {{"tables": ["ip_bgp_entity"]}},
+      "expected_output": "结构化结果",
+      "budget": {{"max_tokens": 1200, "max_time_ms": 15000}}
+    }}
   ],
-  \"reason\": \"为什么这样路由\",\n  \"max_turns\": {max_turns}
-}
+  "reason": "为什么这样路由",
+  "max_turns": {max_turns}
+}}
 """
 
 SUBAGENT_GRAPH_PROMPT = """你是图谱查询子代理，需要把任务转为只读 Cypher。
 图谱 schema（简化）：
 - 节点：AS(asn), Org(uuid, org_name), Country(country), Prefix(cidr, version), Website(url), Industry(name)
 - 关系：
-  (AS)-[:BELONGS_TO]->(Org)
-  (AS)-[:LOCATED_IN]->(Country)
-  (Org)-[:LOCATED_IN]->(Country)
-  (Prefix)-[:BGP_ORIGIN|REG_ORIGIN]->(AS)
-  (Prefix)-[:REGISTERED_TO|OBSERVED_ORG]->(Org)
-  (Prefix)-[:IN_COUNTRY]->(Country)
-  (Website)-[:RESOLVES_TO|AUTH_RESOLVES_TO]->(Prefix)
-  (Website)-[:IN_INDUSTRY]->(Industry)
-  (Industry)-[:PARENT_OF]->(Industry)
-  (Prefix)-[:PARENT_OF]->(Prefix)
-
+// AS 拓扑关系 网络物理层
+(:AS)-[:V4_UPSTREAM]->(:AS)      // IPv4 上游
+(:AS)-[:V4_PEER]->(:AS)          // IPv4 对等
+(:AS)-[:V4_DOWNSTREAM]->(:AS)    // IPv4 下游
+(:AS)-[:V6_UPSTREAM]->(:AS)      // IPv6 上游（独立维度）
+// 归属关系 现实归属层
+(:AS)-[:BELONGS_TO]->(:Org)       // AS 属于组织
+(:Org)-[:LOCATED_IN]->(:Country)  // 组织所在国
+(:AS)-[:LOCATED_IN]->(:Country)   // AS 地理分布
+// 前缀关系 
+(:Prefix)-[:BGP_ORIGIN]->(:AS)       // BGP 观测归属
+(:Prefix)-[:REG_ORIGIN]->(:AS)       // 注册归属
+(:Prefix)-[:REGISTERED_TO]->(:Org)   // 前缀注册组织
+(:Prefix)-[:IN_COUNTRY]->(:Country)  // 前缀所在国
+// 应用层关系 应用业务层
+(:Website)-[:RESOLVES_TO]->(:Prefix)      // 域名解析
+(:Website)-[:HOSTED_BY_AS]->(:AS)         // 托管 AS
+(:Website)-[:HOSTED_BY_ORG]->(:Org)       // 托管组织
+(:Website)-[:IN_INDUSTRY]->(:Industry)    // 所属行业
+(:Industry)-[:PARENT_OF]->(:Industry)     // 行业层级
 约束：
 1) 只允许 MATCH/OPTIONAL MATCH/WITH 开头；
 2) 必须包含 LIMIT（若未给出限制，默认使用 200）；
 3) 只读查询，禁止 CREATE/MERGE/DELETE/SET/CALL 等；
-4) 输出 JSON: {\"cypher\": \"...\"}。
+4) 关系类型必须来自上述清单，不要臆造不存在的关系名（如 PEERS_WITH/UPSTREAM_OF）；
+5) 输出 JSON: {"cypher": "..."}。
 """
 
 SUBAGENT_VERIFIER_PROMPT = """你是核验子代理，输入为多个子代理的结果数组（JSON）。

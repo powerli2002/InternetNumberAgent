@@ -2,6 +2,16 @@
 
 本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**工具层 FastMCP（HTTP） + 代理协同 A2A（HTTP+SSE） + 全链路 LangSmith 追踪**。主代理仍使用 Function Calling 做工具路由，但工具执行与子代理执行已全部协议化。
 
+## 稳定性修复（2026-02-08）
+
+本次针对多代理与记忆链路完成了以下修复：
+
+1. 修复 A2A supervisor 路由提示模板格式化异常，恢复 `supervisor -> 子代理` 主链路。
+2. 修复语义记忆写入 Neo4j 的类型错误（map 属性），改为 `metadata_json + 结构化字段` 存储并支持反序列化检索。
+3. 增强 Todo 解析，兼容 `subtasks/items/todos/plan` 输出结构，避免退化为单任务。
+4. 增强图谱子代理 Cypher 后验校验，关系类型越界时自动走兜底查询模板。
+5. 增强 NL2SQL 超时退化：列检索超时时自动降级为表级检索重试。
+
 ## 启动与部署（简版）
 
 ### 方式一：Docker Compose（推荐）
@@ -67,7 +77,7 @@
 关键环境变量：
 - `MCP_SERVER_URL`（默认 `http://127.0.0.1:2032/mcp`）
 - `A2A_SERVER_URL`（默认 `http://127.0.0.1:2031/a2a`）
-- `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `60` 秒）
+- `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `180` 秒）
 - `CLI_TIMEOUT_SECONDS`（CLI 外层超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `A2A_TIMEOUT_SECONDS`（A2A 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
