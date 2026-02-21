@@ -11,6 +11,8 @@
 3. 增强 Todo 解析，兼容 `subtasks/items/todos/plan` 输出结构，避免退化为单任务。
 4. 增强图谱子代理 Cypher 后验校验，关系类型越界时自动走兜底查询模板。
 5. 增强 NL2SQL 超时退化：列检索超时时自动降级为表级检索重试。
+6. RAG 索引写入支持增量去重：按 `source + text` 哈希过滤批内与存量重复切片，避免重复入库。
+7. 补齐 `agent/knowledge/bgp/hijack_detection.md` 示例文件，chapter_5 路径可直接复现。
 
 ## 启动与部署（简版）
 

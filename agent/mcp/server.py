@@ -30,74 +30,44 @@ def _preview(value: Any, limit: int = 2000) -> Any:
 
 
 class _MCPRuntime:
-    """MCP 运行时资源，按需初始化。"""
+    """MCP 运行时资源，启动时一次性初始化。"""
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
-        self._nl2sql_tool: Optional[NL2SQLTool] = None
-        self._rag_tool: Optional[RAGTool] = None
-        self._graph_tool: Optional[Neo4jQueryTool] = None
-        self._note_tool: Optional[NoteTool] = None
-        self._todo_tool: Optional[TodoTool] = None
-
-    @property
-    def nl2sql_tool(self) -> NL2SQLTool:
-        if self._nl2sql_tool is None:
-            self._nl2sql_tool = NL2SQLTool(
-                postgres_url=self.config.postgres_url or "",
-                allowed_tables=self.config.allowed_tables,
-                api_key=self.config.dashscope_api_key,
+        self.nl2sql_tool = NL2SQLTool(
+            postgres_url=self.config.postgres_url or "",
+            allowed_tables=self.config.allowed_tables,
+            api_key=self.config.dashscope_api_key,
+            base_url=self.config.dashscope_base_url,
+            model=self.config.dashscope_model,
+            embedding_model=self.config.dashscope_embedding_model,
+            index_cache_dir=self.config.nl2sql_index_cache_dir,
+            enable_index_cache=self.config.nl2sql_index_cache_enabled,
+            force_rebuild_cache=self.config.nl2sql_index_cache_force_rebuild,
+            max_rows=self.config.nl2sql_max_rows,
+            statement_timeout_ms=self.config.nl2sql_statement_timeout_ms,
+            max_sql_length=self.config.nl2sql_max_sql_length,
+            allow_subquery=self.config.nl2sql_allow_subquery,
+        )
+        self.rag_tool = RAGTool(
+            host=self.config.milvus_host,
+            port=self.config.milvus_port,
+            collection_name=self.config.vector_collection,
+            embedding=DashScopeEmbedding(
+                api_key=self.config.dashscope_api_key or "",
                 base_url=self.config.dashscope_base_url,
-                model=self.config.dashscope_model,
-                embedding_model=self.config.dashscope_embedding_model,
-                index_cache_dir=self.config.nl2sql_index_cache_dir,
-                enable_index_cache=self.config.nl2sql_index_cache_enabled,
-                force_rebuild_cache=self.config.nl2sql_index_cache_force_rebuild,
-                max_rows=self.config.nl2sql_max_rows,
-                statement_timeout_ms=self.config.nl2sql_statement_timeout_ms,
-                max_sql_length=self.config.nl2sql_max_sql_length,
-                allow_subquery=self.config.nl2sql_allow_subquery,
-            )
-        return self._nl2sql_tool
-
-    @property
-    def rag_tool(self) -> RAGTool:
-        if self._rag_tool is None:
-            self._rag_tool = RAGTool(
-                host=self.config.milvus_host,
-                port=self.config.milvus_port,
-                collection_name=self.config.vector_collection,
-                embedding=DashScopeEmbedding(
-                    api_key=self.config.dashscope_api_key or "",
-                    base_url=self.config.dashscope_base_url,
-                    model=self.config.dashscope_embedding_model,
-                ),
-            )
-        return self._rag_tool
-
-    @property
-    def graph_tool(self) -> Neo4jQueryTool:
-        if self._graph_tool is None:
-            self._graph_tool = Neo4jQueryTool(
-                uri=self.config.neo4j_uri,
-                user=self.config.neo4j_user,
-                password=self.config.neo4j_password,
-                max_rows=self.config.graph_max_rows,
-                max_cypher_length=self.config.graph_max_cypher_length,
-            )
-        return self._graph_tool
-
-    @property
-    def note_tool(self) -> NoteTool:
-        if self._note_tool is None:
-            self._note_tool = NoteTool(self.config.notes_dir)
-        return self._note_tool
-
-    @property
-    def todo_tool(self) -> TodoTool:
-        if self._todo_tool is None:
-            self._todo_tool = TodoTool(self.config.project_root / "agent" / "todo.json")
-        return self._todo_tool
+                model=self.config.dashscope_embedding_model,
+            ),
+        )
+        self.graph_tool = Neo4jQueryTool(
+            uri=self.config.neo4j_uri,
+            user=self.config.neo4j_user,
+            password=self.config.neo4j_password,
+            max_rows=self.config.graph_max_rows,
+            max_cypher_length=self.config.graph_max_cypher_length,
+        )
+        self.note_tool = NoteTool(self.config.notes_dir)
+        self.todo_tool = TodoTool(self.config.project_root / "agent" / "todo.json")
 
 
 def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:

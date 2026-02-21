@@ -35,7 +35,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from llama_index.core.bridge.pydantic import PrivateAttr
+from llama_index.core.prompts import PromptTemplate
 
+from agent.core.prompts import NL2SQL_TEXT_TO_SQL_PROMPT
 from agent.core.schema import TABLE_CONTEXT_HINTS, TABLE_SCHEMA
 from src.utils.logging_manager import logger
 
@@ -224,26 +226,19 @@ class DatabaseClient:
 
     def __init__(self, postgres_url: str) -> None:
         self.postgres_url = postgres_url
-        self._engine = None
-
-    def _get_engine(self):
-        if self._engine:
-            return self._engine
         try:
             from sqlalchemy import create_engine  # type: ignore
         except Exception as exc:
             raise RuntimeError("未安装 SQLAlchemy，无法建立数据库连接。") from exc
-        # 延迟创建，减少冷启动开销
         self._engine = create_engine(self.postgres_url)
-        return self._engine
 
     def get_engine(self):
         """获取 SQLAlchemy 引擎，便于复用连接池。"""
-        return self._get_engine()
+        return self._engine
 
     def run_sql(self, sql: str, timeout_ms: Optional[int] = None, max_rows: Optional[int] = None) -> Dict[str, Any]:
         # 统一执行入口，返回列名与行数据
-        engine = self._get_engine()
+        engine = self._engine
         with engine.connect() as conn:
             from sqlalchemy import text as sql_text  # type: ignore
 
@@ -520,8 +515,22 @@ class NL2SQLTool:
         self.statement_timeout_ms = statement_timeout_ms
         self.max_sql_length = max_sql_length
         self.allow_subquery = allow_subquery
-        self._llm = None
-        self._embed_model = None
+        self._llm = DashScopeLlamaLLM(
+            api_key=self.api_key or "",
+            base_url=self.base_url or "",
+            model=self.model,
+        ).llm
+        self._embed_model = DashScopeLlamaEmbedding(
+            api_key=self.api_key or "",
+            base_url=self.base_url or "",
+            model=self.embedding_model,
+        ).embedding
+        try:
+            from llama_index.core import Settings  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("缺少 llama-index 依赖，无法初始化 NL2SQL。") from exc
+        Settings.llm = self._llm
+        Settings.embed_model = self._embed_model
         self._table_retriever_cache = None
         self._cols_retrievers_cache = None
         self._cache_signature = None
@@ -567,11 +576,10 @@ class NL2SQLTool:
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
         _log_nl2sql("NL2SQL步骤 SQLDatabase初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
         step_time = time.monotonic()
-        llm = self._get_llm()
+        llm = self._llm
         if hasattr(llm, "set_trace_id"):
             llm.set_trace_id(trace_id)
-        embed_model = self._get_embed_model()
-        self._apply_llamaindex_settings(llm=llm, embed_model=embed_model)
+        embed_model = self._embed_model
         _log_nl2sql("NL2SQL步骤 模型与设置耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
         # 为每张表构建上下文提示，帮助模型理解字段语义
@@ -605,6 +613,7 @@ class NL2SQLTool:
         nlsql_retriever = NLSQLRetriever(
             sql_database=db,
             llm=llm,
+            text_to_sql_prompt=PromptTemplate(NL2SQL_TEXT_TO_SQL_PROMPT),
             table_retriever=table_retriever,
             cols_retrievers=cols_retrievers,
             context_query_kwargs=table_context,
@@ -670,9 +679,7 @@ class NL2SQLTool:
 
         _log_nl2sql("NL2SQL预热开始 tables=%s load_columns=%s", ",".join(table_names), load_columns)
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
-        llm = self._get_llm()
-        embed_model = self._get_embed_model()
-        self._apply_llamaindex_settings(llm=llm, embed_model=embed_model)
+        embed_model = self._embed_model
 
         table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
         table_schema = [
@@ -714,33 +721,6 @@ class NL2SQLTool:
                 context[table] = f"字段: {', '.join(columns)}"
         return context
 
-    def _get_llm(self):
-        if self._llm is None:
-            self._llm = DashScopeLlamaLLM(
-                api_key=self.api_key,
-                base_url=self.base_url or "",
-                model=self.model,
-            ).llm
-        return self._llm
-
-    def _get_embed_model(self):
-        if self._embed_model is None:
-            self._embed_model = DashScopeLlamaEmbedding(
-                api_key=self.api_key,
-                base_url=self.base_url or "",
-                model=self.embedding_model,
-            ).embedding
-        return self._embed_model
-
-    def _apply_llamaindex_settings(self, llm, embed_model) -> None:
-        """同步 LlamaIndex 全局设置，避免默认 OpenAIEmbedding 触发缺少 KEY 的异常。"""
-        try:
-            from llama_index.core import Settings  # type: ignore
-        except Exception:
-            return
-        Settings.llm = llm
-        Settings.embed_model = embed_model
-
     def prepare_index_cache(
         self,
         table_names: Optional[List[str]] = None,
@@ -776,8 +756,7 @@ class NL2SQLTool:
             raise RuntimeError("缺少 llama-index 依赖，无法预构建索引。") from exc
 
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
-        embed_model = self._get_embed_model()
-        self._apply_llamaindex_settings(llm=self._get_llm(), embed_model=embed_model)
+        embed_model = self._embed_model
 
         table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
         table_schema = [

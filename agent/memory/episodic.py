@@ -31,6 +31,15 @@ class EpisodicMemory(BaseMemory):
             raise RuntimeError("未提供 postgres_url 或 sqlite_path，无法初始化情景记忆。")
         if not self._is_safe_table_name(self.table_name):
             raise ValueError("table_name 只能包含字母、数字和下划线。")
+        if self._use_postgres:
+            if not self.postgres_url:
+                raise RuntimeError("缺少 POSTGRES_URL，无法初始化情景记忆。")
+            try:
+                from sqlalchemy import create_engine, text  # type: ignore
+            except Exception as exc:
+                raise RuntimeError("未安装 SQLAlchemy，无法连接 PostgreSQL。") from exc
+            self._engine = create_engine(self.postgres_url)
+            self._text = text
         self._init_db()
 
     def _init_db(self) -> None:
@@ -57,8 +66,7 @@ class EpisodicMemory(BaseMemory):
             )
 
     def _init_postgres(self) -> None:
-        engine = self._get_engine()
-        with engine.begin() as conn:
+        with self._engine.begin() as conn:
             conn.execute(
                 self._text(
                     f"""
@@ -72,19 +80,6 @@ class EpisodicMemory(BaseMemory):
                     """
                 )
             )
-
-    def _get_engine(self):
-        if self._engine:
-            return self._engine
-        if not self.postgres_url:
-            raise RuntimeError("缺少 POSTGRES_URL，无法初始化情景记忆。")
-        try:
-            from sqlalchemy import create_engine, text  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("未安装 SQLAlchemy，无法连接 PostgreSQL。") from exc
-        self._engine = create_engine(self.postgres_url)
-        self._text = text
-        return self._engine
 
     def add(self, item: MemoryItem) -> None:
         if self._use_postgres:
@@ -116,9 +111,8 @@ class EpisodicMemory(BaseMemory):
             )
 
     def _add_postgres(self, item: MemoryItem) -> None:
-        engine = self._get_engine()
         created_at = self._normalize_created_at(item.created_at)
-        with engine.begin() as conn:
+        with self._engine.begin() as conn:
             conn.execute(
                 self._text(
                     f"""
@@ -184,8 +178,7 @@ class EpisodicMemory(BaseMemory):
             ).fetchall()
 
     def _fetch_postgres_rows(self) -> List[Tuple[Any, ...]]:
-        engine = self._get_engine()
-        with engine.begin() as conn:
+        with self._engine.begin() as conn:
             return conn.execute(
                 self._text(
                     f"""

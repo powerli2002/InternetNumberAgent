@@ -4,6 +4,7 @@ from agent.core.config import AgentConfig  # noqa: F401
 from agent.core.llm import LLMClient, LLMMessage  # noqa: F401
 from agent.core.models import ConversationTurn, EvidenceItem, MemoryItem, TodoItem, ToolResult  # noqa: F401
 from agent.core.prompts import (  # noqa: F401
+    NL2SQL_TEXT_TO_SQL_PROMPT,
     SEMANTIC_EXTRACT_PROMPT,
     SUBAGENT_GRAPH_PROMPT,
     SUBAGENT_ROUTER_PROMPT,

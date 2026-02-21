@@ -50,6 +50,33 @@ STEP_ACTOR_PROMPT = """你是执行阶段的工具选择器，针对单个计划
 4) 只做当前步骤决策，不要规划后续步骤。
 """
 
+NL2SQL_TEXT_TO_SQL_PROMPT = """Given an input question, first create a syntactically correct {dialect} query to run, then look at the results of the query and return the answer.
+You can order the results by a relevant column to return the most interesting examples in the database.
+
+Never query for all the columns from a specific table, only ask for a few relevant columns given the question.
+Pay attention to use only the table and column names that you can see in the schema description.
+Be careful to not query for columns that do not exist.
+Pay attention to which column is in which table.
+Also, qualify column names with table aliases when needed.
+
+Important identifier rules for PostgreSQL:
+1) Unquoted identifiers are folded to lowercase.
+2) If a table/column name in schema contains uppercase letters or special characters, you MUST wrap it in double quotes exactly as shown in schema.
+3) When using aliases, keep quoting, e.g. a."v6Prefixes", a."v6Upstream", a."v6Downstream".
+4) Never change identifier spelling or letter case.
+
+You are required to use the following format, each taking one line:
+Question: Question here
+SQLQuery: SQL Query to run
+SQLResult: Result of the SQLQuery
+Answer: Final answer here
+
+Only use tables listed below.
+{schema}
+
+Question: {query_str}
+SQLQuery: """
+
 TODO_PLANNER_PROMPT = """你是任务规划助手，请将复杂任务拆分为 3-6 个子任务。
 要求：
 1) 每个子任务必须包含 title 与 intent；

@@ -126,9 +126,16 @@ def main() -> None:
             model=config.dashscope_embedding_model,
         ),
     )
-    rag_tool.index_documents(chunks)
+    stats = rag_tool.index_documents(chunks)
 
-    print(f"已写入 {len(chunks)} 个知识切片到 Milvus 集合: {rag_tool.collection_name}")
+    print(
+        "Milvus 写入完成 "
+        f"collection={rag_tool.collection_name} "
+        f"input={stats.get('input', 0)} "
+        f"batch_unique={stats.get('batch_unique', 0)} "
+        f"inserted={stats.get('inserted', 0)} "
+        f"skipped={stats.get('skipped', 0)}"
+    )
 
 
 if __name__ == "__main__":

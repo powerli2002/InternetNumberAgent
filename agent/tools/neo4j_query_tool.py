@@ -81,26 +81,19 @@ class Neo4jQueryTool:
         self.password = password
         self.max_rows = max_rows
         self.max_cypher_length = max_cypher_length
-        self._driver = None
-
-    def _get_driver(self):
-        if self._driver:
-            return self._driver
         try:
             from neo4j import GraphDatabase  # type: ignore
         except Exception as exc:
             raise RuntimeError("未安装 neo4j 驱动，无法执行图谱查询。") from exc
         self._driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
-        return self._driver
 
     def query(self, cypher: str, max_rows: Optional[int] = None) -> Dict[str, Any]:
         guard = CypherGuard(max_rows=max_rows or self.max_rows, max_cypher_length=self.max_cypher_length)
         info = guard.sanitize(cypher)
         safe_cypher = info["cypher"]
-        driver = self._get_driver()
         rows: List[Dict[str, Any]] = []
         truncated = False
-        with driver.session() as session:
+        with self._driver.session() as session:
             result = session.run(safe_cypher)
             for idx, record in enumerate(result):
                 if idx >= guard.max_rows:

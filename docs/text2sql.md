@@ -67,6 +67,13 @@ NL2SQL_ALLOW_SUBQUERY=false
 
 代码入口：`NL2SQLTool._build_table_context()`
 
+另外，`NL2SQLTool` 会向 `NLSQLRetriever` 注入自定义 `text_to_sql_prompt`，显式约束 PostgreSQL 标识符规则：
+- 对包含大写字母或特殊字符的列名必须使用双引号（例如 `a."v6Prefixes"`）
+- 禁止擅自改变列名大小写
+
+提示词定义：`agent/core/prompts.py` 中 `NL2SQL_TEXT_TO_SQL_PROMPT`  
+注入入口：`NL2SQLTool.query()`
+
 ---
 
 ## 4. NL2SQL 查询流程（核心逻辑）
