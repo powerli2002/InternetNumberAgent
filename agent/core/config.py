@@ -127,9 +127,15 @@ class AgentConfig:
     semantic_memory_min_importance: float = 0.6
     """语义记忆抽取的最小重要性阈值（0.0-1.0）"""
 
-    # NL2SQL 索引缓存配置
+    # 统一存储目录（运行时状态、缓存）
+    store_root: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store")
+    """统一存储根目录：聚合 memory/index/notes 等运行时数据"""
+
+    memory_store_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store" / "memory")
+    """情景记忆 SQLite 等本地状态目录"""
+
     nl2sql_index_cache_dir: Path = field(
-        default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "index_store" / "nl2sql"
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store" / "index" / "nl2sql"
     )
     """NL2SQL 索引缓存目录：存储表结构和列值的向量索引"""
 
@@ -168,7 +174,7 @@ class AgentConfig:
     """Neo4j Cypher 最大长度"""
 
     # 工具与目录配置
-    notes_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "notes")
+    notes_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store" / "notes")
     """笔记存储目录"""
 
     notes_index: Path = field(init=False)
@@ -232,6 +238,13 @@ class AgentConfig:
                 port = data.get("postgresql_port", "5432")
                 if db and user and pwd:
                     cfg.postgres_url = f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}"
+
+        store_root_value = os.environ.get("AGENT_STORE_DIR")
+        if store_root_value:
+            cfg.store_root = Path(store_root_value)
+            cfg.memory_store_dir = cfg.store_root / "memory"
+            cfg.nl2sql_index_cache_dir = cfg.store_root / "index" / "nl2sql"
+            cfg.notes_dir = cfg.store_root / "notes"
 
         # 环境变量覆盖
         cfg.postgres_url = os.environ.get("POSTGRES_URL") or cfg.postgres_url
@@ -317,6 +330,12 @@ class AgentConfig:
         cache_dir_value = os.environ.get("NL2SQL_INDEX_CACHE_DIR")
         if cache_dir_value:
             cfg.nl2sql_index_cache_dir = Path(cache_dir_value)
+        memory_store_value = os.environ.get("MEMORY_STORE_DIR")
+        if memory_store_value:
+            cfg.memory_store_dir = Path(memory_store_value)
+        notes_dir_value = os.environ.get("NOTES_DIR")
+        if notes_dir_value:
+            cfg.notes_dir = Path(notes_dir_value)
         cache_enabled_value = os.environ.get("NL2SQL_INDEX_CACHE_ENABLED")
         if cache_enabled_value is not None:
             cfg.nl2sql_index_cache_enabled = cache_enabled_value.strip().lower() in {"1", "true", "yes", "on"}
@@ -383,6 +402,9 @@ class AgentConfig:
         # 为依赖 OpenAI 兼容接口的组件兜底注入 KEY，避免默认 OpenAIEmbedding 报错
         if cfg.dashscope_api_key:
             os.environ.setdefault("OPENAI_API_KEY", cfg.dashscope_api_key)
+
+        cfg.store_root = cfg.memory_store_dir.parent
+        cfg.notes_index = cfg.notes_dir / "notes_index.json"
 
         # 默认暴露的表
         cfg.allowed_tables = [

@@ -122,7 +122,7 @@ services:
     volumes:
       - ..:/work
     working_dir: /work
-    command: ["bash", "-lc", "uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025"]
+    command: ["bash", "-lc", "uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025"]
 
   agent-mcp:
     build:
@@ -146,7 +146,7 @@ services:
     volumes:
       - ..:/work
     working_dir: /work
-    command: ["bash", "-lc", "uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032"]
+    command: ["bash", "-lc", "uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032"]
 
   agent-a2a:
     build:
@@ -173,4 +173,4 @@ services:
     volumes:
       - ..:/work
     working_dir: /work
-    command: ["bash", "-lc", "uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031"]
+    command: ["bash", "-lc", "uvicorn agent.services.a2a.server:app --host 0.0.0.0 --port 2031"]

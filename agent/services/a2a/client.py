@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterator, Optional
 import httpx
 
 from agent.core.tracing import LangSmithTracer
-from agent.protocols.a2a.models import A2AEvent, A2AResultEnvelope, A2ATaskPayload
+from agent.services.a2a.models import A2AEvent, A2AResultEnvelope, A2ATaskPayload, A2ATaskState
 
 
 class A2AClient:
@@ -143,7 +143,7 @@ class A2AClient:
             if line.startswith("data:"):
                 data_buf.append(line[5:].strip())
 
-    def get_task_state(self, task_id: str, root_run=None):
+    def get_task_state(self, task_id: str, root_run=None) -> A2ATaskState:
         """获取任务当前状态。"""
         run_ctx = (
             self.tracer.start_run(
@@ -162,8 +162,6 @@ class A2AClient:
                 response = client.get(f"{self.base_url}/tasks/{task_id}")
                 response.raise_for_status()
                 data: Dict[str, Any] = response.json()
-            from agent.protocols.a2a.models import A2ATaskState
-
             state = A2ATaskState.model_validate(data)
             if run:
                 run.add_outputs({"status": state.status})

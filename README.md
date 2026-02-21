@@ -52,9 +52,9 @@
    pip install -r requirements.txt
    # 可选：预构建 NL2SQL 索引
    python scripts/build_nl2sql_indexes.py
-   uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032
-   uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031
-   uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025
+   uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
+   uvicorn agent.services.a2a.server:app --host 0.0.0.0 --port 2031
+   uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
    ```
 
 2. 启动前端（Agent Chat UI）
@@ -79,6 +79,10 @@
 关键环境变量：
 - `MCP_SERVER_URL`（默认 `http://127.0.0.1:2032/mcp`）
 - `A2A_SERVER_URL`（默认 `http://127.0.0.1:2031/a2a`）
+- `AGENT_STORE_DIR`（统一存储根目录，默认 `agent/store`）
+- `MEMORY_STORE_DIR`（情景记忆本地目录，默认 `agent/store/memory`）
+- `NOTES_DIR`（笔记目录，默认 `agent/store/notes`）
+- `NL2SQL_INDEX_CACHE_DIR`（NL2SQL 索引目录，默认 `agent/store/index/nl2sql`）
 - `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `180` 秒）
 - `CLI_TIMEOUT_SECONDS`（CLI 外层超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
@@ -122,14 +126,12 @@ python scripts/trace_by_metadata_id.py \
 
 - `agent/core/`：配置、模型、提示词、LLM、追踪、Schema
 - `agent/runtime/`：FusionAgent 运行时编排、主路由协议
-- `agent/interfaces/http/`：FastAPI 接口与线程消息存储
-- `agent/interfaces/mcp/`：MCP 服务入口
-- `agent/interfaces/a2a/`：A2A 服务入口
-- `agent/mcp/`：FastMCP 工具服务与客户端
-- `agent/protocols/a2a/`：A2A 协议模型与客户端
-- `agent/workers/`：A2A Worker 执行器与服务
+- `agent/services/http/`：FastAPI 接口与线程消息存储
+- `agent/services/mcp/`：MCP 服务与客户端
+- `agent/services/a2a/`：A2A 协议模型、客户端、Worker 执行器与服务
 - `agent/cli/`：命令行入口
-- `agent/context/`、`agent/memory/`、`agent/tools/`、`agent/subagents/`：上下文、记忆、工具、子代理
+- `agent/runtime/context_builder.py`、`agent/memory/`、`agent/tools/`、`agent/subagents/`：上下文、记忆、工具、子代理
+- `agent/store/`：统一运行时存储目录（memory/index/notes）
 
 注意：旧入口文件已移除，需统一使用新分层路径。
 

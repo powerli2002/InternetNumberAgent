@@ -12,8 +12,8 @@ from agent.core.config import AgentConfig
 from agent.core.llm import LLMClient, LLMMessage
 from agent.core.prompts import SUBAGENT_GRAPH_PROMPT, SUBAGENT_VERIFIER_PROMPT
 from agent.core.tracing import LangSmithTracer
-from agent.mcp.client import MCPToolClient
-from agent.protocols.a2a.models import A2AResultEnvelope, A2AResultEvidence, A2ATaskPayload
+from agent.services.a2a.models import A2AResultEnvelope, A2AResultEvidence, A2ATaskPayload
+from agent.services.mcp.client import MCPToolClient
 from agent.subagents.protocol import TaskEnvelope
 from agent.subagents.router import SubAgentRouter
 from agent.subagents.utils import extract_json, truncate_text

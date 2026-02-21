@@ -200,7 +200,7 @@ python scripts/build_nl2sql_indexes.py --skip-columns
 
 - 通过 `route_tools` Function Calling 生成工具计划（`ToolRouterDecision`）
 - 当计划包含 `tool=nl2sql` 时调用 `MCPToolClient.call_tool("nl2sql_query", ...)`
-- MCP 服务端（`agent/mcp/server.py`）执行 `NL2SQLTool.query()`
+- MCP 服务端（`agent/services/mcp/server.py`）执行 `NL2SQLTool.query()`
 - 执行结果回传主代理后写入 Evidence + 情景记忆
 
 日志与追踪：

@@ -1,15 +1,15 @@
 # Agent Chat UI 接入指南
 
-本指南说明如何将 LangChain 的 Agent Chat UI 接入当前“互联网号码资源问答系统”。系统已提供 LangGraph 兼容 API（`agent/interfaces/http/server.py`），前端只需指向该 API 即可。
+本指南说明如何将 LangChain 的 Agent Chat UI 接入当前“互联网号码资源问答系统”。系统已提供 LangGraph 兼容 API（`agent/services/http/server.py`），前端只需指向该 API 即可。
 
 ## 1. 启动后端服务（MCP + A2A + API）
 
 方式一：本机运行
 
 ```bash
-uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032
-uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031
-uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025
+uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
+uvicorn agent.services.a2a.server:app --host 0.0.0.0 --port 2031
+uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
 ```
 
 方式二：Docker Compose

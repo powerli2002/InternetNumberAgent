@@ -13,14 +13,14 @@ from fastapi.responses import StreamingResponse
 
 from agent.core.config import AgentConfig
 from agent.core.tracing import LangSmithTracer
-from agent.protocols.a2a.models import (
+from agent.services.a2a.executor import WorkerExecutor
+from agent.services.a2a.models import (
     A2AEvent,
     A2AResultEnvelope,
     A2ATaskPayload,
     A2ATaskState,
     A2ATaskSubmitResponse,
 )
-from agent.workers.executor import WorkerExecutor
 
 
 def _now_iso() -> str:

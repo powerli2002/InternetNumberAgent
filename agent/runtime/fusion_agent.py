@@ -14,7 +14,6 @@ import os
 import uuid
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from agent.context import ContextBuilder
 from agent.core.config import AgentConfig
 from agent.core.llm import LLMClient, LLMMessage
 from agent.core.models import ConversationTurn, EvidenceItem, MemoryItem, TodoItem
@@ -26,13 +25,14 @@ from agent.core.prompts import (
     TOOL_ROUTER_PROMPT,
 )
 from agent.core.tracing import LangSmithTracer
-from agent.mcp.client import MCPToolClient
 from agent.memory import EpisodicMemory, MemoryManager, SemanticMemory, WorkingMemory
 from agent.memory.semantic import SemanticRecord
-from agent.protocols.a2a.client import A2AClient
-from agent.protocols.a2a.models import A2AResultEnvelope, A2ATaskPayload
+from agent.runtime.context_builder import ContextBuilder
 from agent.runtime.tool_router_protocol import ToolActionStep, ToolPlanStep, ToolRouterDecision, allowed_tool_names
 from agent.runtime.tool_router_schemas import step_router_schema, tool_router_schema
+from agent.services.a2a.client import A2AClient
+from agent.services.a2a.models import A2AResultEnvelope, A2ATaskPayload
+from agent.services.mcp.client import MCPToolClient
 from src.utils.logging_manager import logger
 
 
@@ -82,11 +82,10 @@ class FusionAgent:
         self.semantic_memory_max_items = self.config.semantic_memory_max_items
         self.semantic_memory_min_importance = self.config.semantic_memory_min_importance
 
-        memory_dir = self.config.project_root / "agent" / "memory_store"
         self.memory_manager = MemoryManager(
             working_memory=WorkingMemory(capacity=self.config.working_memory_size),
             episodic_memory=EpisodicMemory(
-                sqlite_path=memory_dir / "episodic.sqlite",
+                sqlite_path=self.config.memory_store_dir / "episodic.sqlite",
                 capacity=self.config.episodic_memory_size,
                 postgres_url=self.config.postgres_url,
             ),
