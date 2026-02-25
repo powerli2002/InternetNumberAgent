@@ -31,6 +31,11 @@ PostgreSQL 执行
 返回用户
 ```
 
+**安全边界说明（重要）**：
+- LlamaIndex 在 Text2SQL 场景主要负责“生成 SQL / 检索上下文”，并不提供完整的 SQL 安全围栏。
+- `sql_only=True` 仅表示“生成 SQL 不直接执行”；`handle_sql_errors` 类能力属于异常处理，不等于安全校验。
+- 本项目的安全收敛由 `SQLGuard` 实现（禁写操作、禁多语句、危险函数拦截、白名单校验、强制 LIMIT）。
+
 **为什么不能信任 LLM 直接生成的 SQL？**
 
 这基于对抗机器学习（Adversarial Machine Learning）的研究：
@@ -116,8 +121,8 @@ db.execute(safe_sql)  # 只执行通过校验的 SQL
 
 | 框架 | 优势 | 劣势 | 是否采用 |
 |------|------|------|---------|
-| **LlamaIndex** | 向量检索集成、Schema 注入灵活 | 生态较新 | **✅ 采用** |
-| **LangChain SQLDatabaseChain** | 生态成熟、文档丰富 | 扩展性差、安全机制弱 | ❌ 未采用 |
+| **LlamaIndex** | 向量检索集成、Schema 注入灵活 | 不提供完整内置 SQL 安全校验（需应用层实现） | **✅ 采用** |
+| **LangChain SQLDatabaseChain** | 生态成熟、文档丰富 | 默认链路缺少强制 SQL 安全围栏（需应用层实现） | ❌ 未采用 |
 | **Defog SQLCoder** | 开源模型、可私有部署 | 精度不如 GPT-4 | ❌ 未采用 |
 | **Vanna AI** | 专注 Text2SQL、RAG 集成 | 过度依赖训练数据 | ❌ 未采用 |
 
@@ -145,7 +150,7 @@ db.execute(safe_sql)  # 只执行通过校验的 SQL
 **未选择其他框架的原因**：
 
 - **LangChain SQLDatabaseChain**：
-  - 安全机制弱：没有内置 SQL 校验，需要手动实现
+  - 默认链路无强制 SQL 安全围栏：仍需手动实现 SQLGuard 类策略
   - 扩展性差：修改查询流程需要 Fork 代码
   
 - **Defog SQLCoder**（开源模型）：
@@ -447,58 +452,20 @@ class SQLGuard:
 
 **问题**：每次查询都重建向量索引，耗时 5-10 秒
 
-**解决方案**：磁盘持久化 + 内存缓存
+**解决方案**：Milvus 持久化 + 内存缓存 + manifest
 
-```python
-# 来自 agent/tools/nl2sql_tool.py:797-863
-def _get_or_build_retrievers(self, table_names, table_schema, ...):
-    """
-    优先复用缓存索引，必要时重建
-    
-    缓存层级：
-    1. 内存缓存（_table_retriever_cache）：最快
-    2. 磁盘缓存（index_cache_dir）：次快
-    3. 重建索引：最慢
-    
-    缓存失效条件：
-    - schema_signature 变化（表结构修改）
-    - force_rebuild_cache = True
-    """
-    signature = self._compute_schema_signature(table_names)
-    
-    # [1] 内存缓存命中
-    if self._cache_signature == signature and self._table_retriever_cache is not None:
-        logger.info("NL2SQL检索器 命中内存缓存 signature=%s", signature)
-        return self._table_retriever_cache, self._cols_retrievers_cache
-    
-    # [2] 磁盘缓存命中
-    if self.enable_index_cache and self.index_cache_dir and not self.force_rebuild_cache:
-        if self._is_cache_valid(signature):
-            logger.info("NL2SQL检索器 尝试加载磁盘缓存 signature=%s", signature)
-            table_retriever = self._load_table_retriever_from_cache(table_node_mapping, table_top_k)
-            cols_retrievers = self._load_column_retrievers_from_cache(table_names) if enable_columns else None
-            if table_retriever:
-                logger.info("NL2SQL检索器 磁盘缓存加载成功")
-                self._table_retriever_cache = table_retriever
-                self._cols_retrievers_cache = cols_retrievers
-                self._cache_signature = signature
-                return table_retriever, cols_retrievers
-    
-    # [3] 重建索引
-    logger.info("NL2SQL检索器 重建索引")
-    table_retriever = self._build_table_retriever(...)
-    cols_retrievers = self._build_column_retrievers(...) if enable_columns else None
-    
-    # 写入磁盘缓存
-    if self.enable_index_cache and self.index_cache_dir:
-        self._write_index_manifest(signature, table_names, build_columns=enable_columns)
-    
-    # 写入内存缓存
-    self._table_retriever_cache = table_retriever
-    self._cols_retrievers_cache = cols_retrievers
-    self._cache_signature = signature
-    return table_retriever, cols_retrievers
-```
+缓存层级：
+1. 内存缓存（`_table_retriever_cache`）：最快
+2. Milvus 持久化（单 collection + 分区）：次快
+3. 重建索引：最慢
+
+缓存失效条件：
+- `schema_signature` 变化（表结构修改）
+- `force_rebuild_cache = True`
+
+说明：
+- 表索引与列索引写入同一 collection，不同分区（`nl2sql_tables` / `nl2sql_columns`）
+- 本地仅保存轻量 manifest（`index_cache_dir/manifest.json`）
 
 **缓存签名计算**（`agent/tools/nl2sql_tool.py:938-951`）：
 
@@ -861,28 +828,19 @@ LIMIT 200;
 ```
 
 **缓存持久化**：
+- 向量数据存储在 Milvus：单 collection + 分区（`nl2sql_tables` / `nl2sql_columns`）
+- 本地仅保存轻量 manifest：
 ```
 index_cache_dir/
-├── manifest.json          # 缓存元数据
-│   {
-│     "schema_signature": "a3f2c8d9...",
-│     "tables": ["as_entity", "ip_bgp_entity", ...],
-│     "build_columns": true,
-│     "updated_at": "2026-02-06T10:30:00Z"
-│   }
-├── tables/                # 表级索引
-│   ├── docstore.json
-│   ├── index_store.json
-│   └── vector_store.json
-└── columns/               # 列级索引
-    ├── as_entity/
-    │   ├── org_name/
-    │   │   ├── docstore.json
-    │   │   └── vector_store.json
-    │   └── org_country/
-    └── ip_bgp_entity/
-        ├── country/
-        └── org_name_bgp/
+└── manifest.json          # 缓存元数据
+    {
+      "schema_signature": "a3f2c8d9...",
+      "tables": ["as_entity", "ip_bgp_entity", ...],
+      "build_columns": true,
+      "collection": "nl2sql_index",
+      "partitions": {"tables": "nl2sql_tables", "columns": "nl2sql_columns"},
+      "updated_at": "2026-02-06T10:30:00Z"
+    }
 ```
 
 ## [面试攻防]
@@ -1130,5 +1088,5 @@ def query_with_retry(self, question: str, tables: List[str]) -> NL2SQLResult:
 - Text2SQL 采用"生成 → 校验 → 执行"三段式安全链路，避免直接执行 LLM 输出
 - Schema 注入通过业务语义提示引导 LLM 生成正确 SQL（ISO 代码、字段类型）
 - SQLGuard 实施多层防御：禁写操作、禁多语句、禁危险函数、白名单校验、强制 LIMIT
-- 向量检索优化：表/列双重索引 + 磁盘缓存 + 内存缓存，实现 20 倍加速
+- 向量检索优化：表/列双重索引 + Milvus 持久化 + 内存缓存，实现 20 倍加速
 - 大表 JOIN 优化：路由缩表 + 索引覆盖 + 先聚合后明细 + 离线任务引导

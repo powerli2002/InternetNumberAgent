@@ -1,17 +1,46 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+"""
+导入 16 张核心实体表到 PostgreSQL。
+
+关键能力：
+1. 可选在导入前自动应用统一 DDL；
+2. 支持清理非核心表与核心表空库检测；
+3. 支持单事务导入（默认）保证 16 表一致性。
+"""
+
 import argparse
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import psycopg2
 from psycopg2 import sql
-import yaml
+
+try:
+    from agent.scripts.common import (
+        load_yaml_config,
+        open_pg_connection,
+        resolve_project_path,
+        wait_for_postgres,
+    )
+except ModuleNotFoundError:
+    import sys
+
+    project_root = Path(__file__).resolve().parents[2]
+    project_root_str = str(project_root)
+    if project_root_str not in sys.path:
+        sys.path.insert(0, project_root_str)
+    from agent.scripts.common import (
+        load_yaml_config,
+        open_pg_connection,
+        resolve_project_path,
+        wait_for_postgres,
+    )
 
 from src.utils.entity_persistence import EntityPersistence
-from src.utils.schema_manager import apply_core_ddl, resolve_core_ddl_path
 from src.utils.logging_manager import logger
+from src.utils.schema_manager import apply_core_ddl, resolve_core_ddl_path
 
 CORE_TABLES = [
     "as_entity",
@@ -34,35 +63,25 @@ CORE_TABLES = [
 CORE_TABLE_SET = set(CORE_TABLES)
 PROTECTED_TABLES = {"agent_threads", "agent_messages"}
 
-
-def load_config(config_path: Path) -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def resolve_path(root_dir: Path, path_value: str) -> Path:
-    path = Path(path_value)
-    return path if path.is_absolute() else (root_dir / path).resolve()
-
-
-def wait_for_db(cfg: dict, timeout_seconds: int) -> None:
-    # 等待数据库可用，避免首次连接失败
-    deadline = time.time() + timeout_seconds
-    while True:
-        try:
-            conn = psycopg2.connect(
-                database=cfg["postgresql_database"],
-                user=cfg["postgresql_user"],
-                password=cfg["postgresql_password"],
-                host=cfg["postgresql_host"],
-                port=cfg["postgresql_port"],
-            )
-            conn.close()
-            return
-        except Exception as exc:
-            if time.time() > deadline:
-                raise RuntimeError(f"PostgreSQL wait timeout: {exc}") from exc
-            time.sleep(2)
+# 导入计划：按固定顺序执行，避免实体引用关系出现前后依赖错位。
+CORE_IMPORT_PLAN: list[tuple[tuple[str, ...], str, str]] = [
+    (("as_entity",), "as_entity_prst", "as_entity"),
+    (("country_entity",), "country_entity_prst", "country_entity"),
+    (("org_entity",), "org_entity_prst", "org_entity"),
+    (("industry_entity",), "industry_entity_prst", "industry_entity"),
+    (("ip_bgp_entity",), "ip_bgp_entity_prst", "ip_bgp_entity"),
+    (("ipv6_bgp_entity",), "ipv6_bgp_entity_prst", "ipv6_bgp_entity"),
+    (("ip_inetnum_entity",), "ip_inetnum_entity_prst", "ip_inetnum_entity"),
+    (("ipv6_inetnum_entity",), "ipv6_inetnum_entity_prst", "ipv6_inetnum_entity"),
+    (("ip_rdap_entity",), "ip_rdap_entity_prst", "ip_rdap_entity"),
+    (("ipv6_rdap_entity",), "ipv6_rdap_entity_prst", "ipv6_rdap_entity"),
+    (("ip_route_entity",), "ip_route_entity_prst", "ip_route_entity"),
+    (("ipv6_route_entity",), "ipv6_route_entity_prst", "ipv6_route_entity"),
+    (("asn_entity",), "as_delegate_entity_prst", "asn_entity"),
+    (("ipv4_entity",), "ip_delegate_entity_prst", "ipv4_entity"),
+    (("ipv6_entity",), "ipv6_delegate_entity_prst", "ipv6_entity"),
+    (("website_entity_base", "domain_cn"), "website_entity_prst", "website_entity_base"),
+]
 
 
 def build_core_paths(output_dir: Path, date: str) -> dict:
@@ -139,6 +158,24 @@ def get_table_counts(conn, tables: list[str], existing: set[str]) -> dict[str, O
     return counts
 
 
+def import_core_tables(ep: EntityPersistence, core_paths: dict[str, Path], missing: list[str], chunk_size: int) -> None:
+    """
+    按导入计划执行 16 张核心表导入。
+
+    算法步骤：
+    1) 按 `CORE_IMPORT_PLAN` 顺序遍历每个实体导入任务；
+    2) 先校验该任务依赖的 CSV 文件是否齐全；
+    3) 文件齐全则调用 `EntityPersistence` 对应导入方法；
+    4) 文件缺失则记录到 `missing`，由上层决定是否回滚。
+    """
+    for required_keys, persist_method, source_key in CORE_IMPORT_PLAN:
+        required_paths = [core_paths[key] for key in required_keys]
+        if not ensure_files_exist(required_paths, missing):
+            continue
+        importer = getattr(ep, persist_method)
+        importer(str(core_paths[source_key]), chunksize=chunk_size)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Load core CSVs into PostgreSQL")
     parser.add_argument("--config", default="conf/config.docker.yaml", help="YAML config path")
@@ -154,39 +191,33 @@ def main() -> None:
     )
     parser.add_argument("--chunk-size", type=int, default=100000, help="CSV chunk size, 0 means no chunking")
     parser.add_argument("--wait-seconds", type=int, default=120, help="Wait seconds for DB ready")
+    parser.add_argument(
+        "--single-transaction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否使用单事务导入 16 张核心表（默认开启）",
+    )
     args = parser.parse_args()
 
     root_dir = Path(args.root).resolve()
     config_path = Path(args.config).resolve()
-    cfg = load_config(config_path)
+    cfg = load_yaml_config(config_path)
     date = args.date or cfg.get("current_date") or datetime.now().strftime("%Y-%m-%d")
-    output_dir = resolve_path(root_dir, cfg.get("output_dir", "./data/"))
-    ddl_path = resolve_path(root_dir, args.ddl_path) if args.ddl_path else resolve_core_ddl_path(root_dir)
+    output_dir = resolve_project_path(root_dir, cfg.get("output_dir", "./data/"))
+    ddl_path = resolve_project_path(root_dir, args.ddl_path) if args.ddl_path else resolve_core_ddl_path(root_dir)
 
-    wait_for_db(cfg, args.wait_seconds)
+    wait_for_postgres(cfg, args.wait_seconds)
 
     should_apply_ddl = not args.skip_ddl and not args.cleanup_only
     if should_apply_ddl and not (args.cleanup_only or args.ensure_core):
-        conn = psycopg2.connect(
-            database=cfg["postgresql_database"],
-            user=cfg["postgresql_user"],
-            password=cfg["postgresql_password"],
-            host=cfg["postgresql_host"],
-            port=cfg["postgresql_port"],
-        )
+        conn = open_pg_connection(cfg)
         try:
             apply_core_ddl(conn, ddl_path)
         finally:
             conn.close()
 
     if args.cleanup_only or args.ensure_core:
-        conn = psycopg2.connect(
-            database=cfg["postgresql_database"],
-            user=cfg["postgresql_user"],
-            password=cfg["postgresql_password"],
-            host=cfg["postgresql_host"],
-            port=cfg["postgresql_port"],
-        )
+        conn = open_pg_connection(cfg)
         try:
             if should_apply_ddl:
                 apply_core_ddl(conn, ddl_path)
@@ -215,42 +246,33 @@ def main() -> None:
     missing: list[str] = []
 
     ep = EntityPersistence(str(config_path), date)
-
-    if ensure_files_exist([core_paths["as_entity"]], missing):
-        ep.as_entity_prst(str(core_paths["as_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["country_entity"]], missing):
-        ep.country_entity_prst(str(core_paths["country_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["org_entity"]], missing):
-        ep.org_entity_prst(str(core_paths["org_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["industry_entity"]], missing):
-        ep.industry_entity_prst(str(core_paths["industry_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ip_bgp_entity"]], missing):
-        ep.ip_bgp_entity_prst(str(core_paths["ip_bgp_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ipv6_bgp_entity"]], missing):
-        ep.ipv6_bgp_entity_prst(str(core_paths["ipv6_bgp_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ip_inetnum_entity"]], missing):
-        ep.ip_inetnum_entity_prst(str(core_paths["ip_inetnum_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ipv6_inetnum_entity"]], missing):
-        ep.ipv6_inetnum_entity_prst(str(core_paths["ipv6_inetnum_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ip_rdap_entity"]], missing):
-        ep.ip_rdap_entity_prst(str(core_paths["ip_rdap_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ipv6_rdap_entity"]], missing):
-        ep.ipv6_rdap_entity_prst(str(core_paths["ipv6_rdap_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ip_route_entity"]], missing):
-        ep.ip_route_entity_prst(str(core_paths["ip_route_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ipv6_route_entity"]], missing):
-        ep.ipv6_route_entity_prst(str(core_paths["ipv6_route_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["asn_entity"]], missing):
-        ep.as_delegate_entity_prst(str(core_paths["asn_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ipv4_entity"]], missing):
-        ep.ip_delegate_entity_prst(str(core_paths["ipv4_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["ipv6_entity"]], missing):
-        ep.ipv6_delegate_entity_prst(str(core_paths["ipv6_entity"]), chunksize=args.chunk_size)
-    if ensure_files_exist([core_paths["website_entity_base"], core_paths["domain_cn"]], missing):
-        ep.website_entity_prst(str(core_paths["website_entity_base"]), chunksize=args.chunk_size)
+    if args.single_transaction:
+        # 单事务语义：
+        # 1) 绑定同一连接给所有导入操作；
+        # 2) 任一实体失败或文件缺失时回滚；
+        # 3) 全部成功后一次性提交，保证 16 表一致性。
+        conn = open_pg_connection(cfg)
+        conn.autocommit = False
+        ep.bind_connection(conn)
+        try:
+            import_core_tables(ep, core_paths, missing, args.chunk_size)
+            if missing:
+                raise RuntimeError(f"核心表导入文件缺失，触发回滚：{missing}")
+            conn.commit()
+            logger.info("核心表单事务导入完成，已提交。")
+        except Exception as exc:
+            conn.rollback()
+            logger.error("核心表单事务导入失败，已回滚：%s", exc)
+            raise
+        finally:
+            ep.unbind_connection()
+            conn.close()
+    else:
+        # 非单事务模式仅用于兼容旧的大批量历史导入场景。
+        import_core_tables(ep, core_paths, missing, args.chunk_size)
 
     if missing:
-        logger.warning("Missing CSV files: %s", missing)
+        logger.warning("缺失 CSV 文件：%s", missing)
 
 
 if __name__ == "__main__":

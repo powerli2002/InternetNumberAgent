@@ -6,7 +6,7 @@
 
 ## 系统结构与关键目录
 - `src/`：数据处理流水线（解析/清洗/实体化/格式化器）。
-- `scripts/`：CSV 导入与辅助脚本（如 `scripts/load_all_csv.py`）。
+- `agent/scripts/`：CSV 导入与辅助脚本（如 `python -m agent.scripts.load_all_csv`）。
 - `agent/`：FusionAgent、上下文工程、记忆、工具、追踪；API 在 `agent/interfaces/http/server.py`。
 - `agent/mcp/`：FastMCP 工具服务与客户端（NL2SQL/RAG/Neo4j/Note/Todo）。
 - `agent/protocols/a2a/`：A2A 协议模型与客户端（HTTP+SSE）。
@@ -27,7 +27,7 @@
 - RIR 注册归属与 BGP 观测归属并行保留：`ip_bgp_entity.route` vs `ip_bgp_entity.bgp`。
 
 ## 运行与验证（常用）
-- 导入 16 表：`python scripts/load_all_csv.py --config conf/config.docker.yaml --root . --ensure-core`
+- 导入 16 表：`python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --ensure-core`
 - MCP 工具服务：`uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032`
 - A2A Worker 服务：`uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031`
 - API：`uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025`
@@ -36,12 +36,14 @@
 - AS 疆域分析：`python agent/tools/as_territory_tools.py --config conf/config.docker.yaml --root . [--load-neo4j]`
 
 ## 开发规范
-- 代码优先放在：**智能体链路→`agent/`**；**数据融合/规则→`src/`**；**工具/脚本→`agent/tools/`、`scripts/`**。
+- 严禁使用 回退策略，如果不可行，则报告并询问需要的决策。
+- 代码优先放在：**智能体链路→`agent/`**；**工具/脚本→`agent/tools/`、`agent/scripts/`**。
 - 保持脚本 **幂等**（可重复执行不重复写入）。
 - 修改配置时优先更新 `conf/.env`，不要提交密钥。
 - PostgreSQL 数据卷挂载路径需保持 `../mount/...`，避免数据损坏。
 - 代码注释必须为简体中文，复杂逻辑先写思路再实现。
 - 需求不清晰时先提问或给出可执行的具体方案。
+
 
 ## 重大修改必须同步文档（强制）
 凡涉及以下任一项的“重大修改”，**必须回写文档**：

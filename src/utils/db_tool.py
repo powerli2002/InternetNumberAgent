@@ -8,7 +8,8 @@ import psycopg2
 from psycopg2 import DatabaseError
 from psycopg2.extras import execute_values
 from psycopg2.extensions import connection
-from typing import Union
+from contextlib import contextmanager
+from typing import Iterator, Tuple, Union
 
 sys.path.append(os.getcwd())
 
@@ -29,7 +30,47 @@ class DB_Tool():
             None
         '''
         self.date = date
+        self._bound_conn: connection | None = None
         self.__load_config(config_path)
+
+    def bind_connection(self, conn: connection) -> None:
+        """
+        绑定外部连接，供多表导入使用同一事务。
+
+        说明：
+        - 绑定后 df_to_DB/query_by_sql/query_from_DB 将复用该连接；
+        - 事务提交/回滚由调用方负责；
+        - 适用于“全量导入 16 表要么全成功要么全回滚”的场景。
+        """
+        self._bound_conn = conn
+
+    def unbind_connection(self) -> None:
+        """解绑外部连接，恢复为每次调用自建连接模式。"""
+        self._bound_conn = None
+
+    @contextmanager
+    def _managed_connection(self) -> Iterator[Tuple[connection, bool]]:
+        """
+        统一管理连接来源。
+
+        Returns:
+            (conn, auto_commit_mode)
+            - auto_commit_mode=True: 当前方法负责提交/回滚；
+            - auto_commit_mode=False: 使用外部事务，提交/回滚交给调用方。
+        """
+        if self._bound_conn is not None:
+            yield self._bound_conn, False
+            return
+
+        with psycopg2.connect(
+            database=self.postgresql_database,
+            user=self.postgresql_user,
+            password=self.postgresql_password,
+            host=self.postgresql_host,
+            port=self.postgresql_port,
+        ) as conn:
+            conn.autocommit = True
+            yield conn, True
 
     def __load_config(self, config_path):
         with open(config_path, 'r') as cf:
@@ -40,7 +81,15 @@ class DB_Tool():
             self.postgresql_host = config["postgresql_host"]
             self.postgresql_port = config["postgresql_port"]
 
-    def __creat_table(self, conn: connection, table_name: str = None, col_list: list = None, primary: list = None, ctype: dict = None):
+    def __creat_table(
+        self,
+        conn: connection,
+        table_name: str = None,
+        col_list: list = None,
+        primary: list = None,
+        ctype: dict = None,
+        auto_commit: bool = True,
+    ):
         '''
         创建表格，如果表格已存在则不创建
 
@@ -90,10 +139,14 @@ class DB_Tool():
                 # 执行 SQL 语句
                 cur.execute(table_creat_sql)
                 # 提交事务
-                conn.commit()
+                if auto_commit:
+                    conn.commit()
         except (Exception, DatabaseError) as e:
             # loggingManager.logger.error('PostgreSQL 建表失败：%s' % e)
             logger.error('PostgreSQL 建表失败：%s' % e)
+            if auto_commit:
+                conn.rollback()
+            raise
 
     def __check_table_exist(self, conn: connection, table_name: str) -> bool:
         '''
@@ -114,11 +167,10 @@ class DB_Tool():
                 # 执行 SQL 语句
                 cur.execute(
                     "SELECT EXISTS(SELECT * FROM information_schema.tables WHERE table_name = '{0}');".format(table_name,))
-                # 提交事务
-                conn.commit()
                 return cur.fetchone()[0]
         except (Exception, DatabaseError) as e:
             logger.error('PostgreSQL 检查表格 %s 是否存在失败：%s' % (table_name, e))
+            raise
 
     def df_to_DB(self, df: pd.DataFrame, table_name: str, primary: list = None, ctype: dict = None,
                  truncate: bool = True):
@@ -142,15 +194,26 @@ class DB_Tool():
             None
         '''
 
-        # 创建 PostgreSQL 数据库连接
-        with psycopg2.connect(database=self.postgresql_database, user=self.postgresql_user, password=self.postgresql_password, host=self.postgresql_host, port=self.postgresql_port) as conn:
-            conn.autocommit = True
+        with self._managed_connection() as (conn, auto_commit_mode):
             table_name = re.sub('[^0-9a-zA-Z_]+', '_', table_name)
             if not self.__check_table_exist(conn, table_name):
                 self.__creat_table(
-                    conn, table_name=table_name, col_list=df.columns.to_list(), primary=primary, ctype=ctype)
+                    conn,
+                    table_name=table_name,
+                    col_list=df.columns.to_list(),
+                    primary=primary,
+                    ctype=ctype,
+                    auto_commit=auto_commit_mode,
+                )
 
-            self.__store_data(conn, df, table_name, primary=primary, truncate=truncate)
+            self.__store_data(
+                conn,
+                df,
+                table_name,
+                primary=primary,
+                truncate=truncate,
+                auto_commit=auto_commit_mode,
+            )
 
     def query_by_sql(self, sql: str) -> pd.DataFrame:
         '''
@@ -164,15 +227,14 @@ class DB_Tool():
 
             pd.DataFrame - 查询结果
         '''
-        # 创建 PostgreSQL 数据库连接
-        with psycopg2.connect(database=self.postgresql_database, user=self.postgresql_user, password=self.postgresql_password, host=self.postgresql_host, port=self.postgresql_port) as conn:
-            conn.autocommit = True
+        with self._managed_connection() as (conn, auto_commit_mode):
             # 创建数据库游标，用 with 语句自动关闭游标
             with conn.cursor() as cur:
                 # 执行 SQL 语句
                 cur.execute(sql)
                 # 提交事务
-                conn.commit()
+                if auto_commit_mode:
+                    conn.commit()
                 if cur.description is not None:
                     return pd.DataFrame(cur.fetchall())
 
@@ -192,9 +254,7 @@ class DB_Tool():
 
             pd.DataFrame - 查询结果
         '''
-        # 创建 PostgreSQL 数据库连接
-        with psycopg2.connect(database=self.postgresql_database, user=self.postgresql_user, password=self.postgresql_password, host=self.postgresql_host, port=self.postgresql_port) as conn:
-            conn.autocommit = True
+        with self._managed_connection() as (conn, _):
             if not self.__check_table_exist(conn, table_name):
                 logger.error('表格 %s 不存在' % table_name)
                 return pd.DataFrame()
@@ -224,7 +284,6 @@ class DB_Tool():
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT column_name, data_type FROM information_schema.columns where table_name = '{table_name}';")
-                conn.commit()
                 records = cur.fetchall()
                 column_name = [x[0] for x in records]
                 # data_type = [x[1] for x in records]
@@ -258,15 +317,13 @@ class DB_Tool():
                     else:
                         predicate = conditions
                     cur.execute(f'SELECT {sel_list} FROM {table_name} WHERE {predicate};')
-                # 提交事务
-                conn.commit()
                 return pd.DataFrame(cur.fetchall(), columns=col_list)
         except (Exception, DatabaseError) as e:
             logger.error('PostgreSQL 查询表格 %s 失败：%s' % (table_name, e))
-            return None
+            raise
 
     def __store_data(self, conn: connection, df: pd.DataFrame, table_name: str, primary: list = None,
-                     truncate: bool = True):
+                     truncate: bool = True, auto_commit: bool = True):
         '''
         将 DataFrame 数据存储到 PostgreSQL 数据库
 
@@ -316,13 +373,18 @@ class DB_Tool():
                                 audit_table, col_list_sql, table_name))
                     else:
                         cur.execute('TRUNCATE {0};'.format(table_name))
-                    conn.commit()
+                    if auto_commit:
+                        conn.commit()
             with conn.cursor() as cur:
                 # 插入新数据
                 execute_values(cur, 'INSERT INTO {0} ({1}) VALUES %s ON CONFLICT ({2}) DO UPDATE SET {3};'.format(
                     table_name, col_list_sql, ','.join(f'"{p}"' for p in primary), excluded_str), data)
                 # 提交事务
-                conn.commit()
+                if auto_commit:
+                    conn.commit()
             logger.debug('%s 数据写入成功' % table_name)
         except (Exception, DatabaseError) as e:
             logger.error('%s 数据写入失败：%s' % (table_name, e))
+            if auto_commit:
+                conn.rollback()
+            raise

@@ -1,4 +1,10 @@
 """根据 summary.md 提取的核心表字段，用于 NL2SQL 提示与校验。"""
+# https://developers.llamaindex.ai/python/examples/index_structs/struct_indices/sqlindexdemo/
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Dict, Tuple
 
 TABLE_SCHEMA = {
     "as_entity": [
@@ -171,3 +177,71 @@ TABLE_CONTEXT_HINTS = {
     "ipv6_entity": "country 使用 ISO 3166-1 alpha-2 代码。",
     "org_entity": "org_country 使用 ISO 3166-1 alpha-2 代码，org_country_cn 为中文国家名。",
 }
+
+
+_TABLE_COMMENT_RE = re.compile(r'^COMMENT ON TABLE public\."([^"]+)" IS \'(.*)\';\s*$')
+_COLUMN_COMMENT_RE = re.compile(r'^COMMENT ON COLUMN public\."([^"]+)"\."([^"]+)" IS \'(.*)\';\s*$')
+_SCHEMA_COMMENTS_FILE = Path(__file__).resolve().parents[2] / "database" / "core_schema_comments.review.sql"
+
+
+def _compact_comment(raw_text: str, max_len: int = 96) -> str:
+    """
+    压缩注释文本，避免 prompt 过长。
+
+    处理策略：
+    1) 还原 SQL 字符串中的转义单引号；
+    2) 去掉“示例”尾注，仅保留语义描述；
+    3) 控制最大长度，超过则截断。
+    """
+    text = raw_text.replace("''", "'").strip()
+    marker = "(示例:"
+    marker_index = text.find(marker)
+    if marker_index >= 0:
+        text = text[:marker_index].rstrip(" 。.")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len].rstrip()}..."
+
+
+def _load_review_comments(path: Path) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
+    """
+    从 core_schema_comments.review.sql 解析表/字段注释。
+
+    返回：
+    - table_comments: {table -> comment}
+    - column_comments: {table -> {column -> comment}}
+    """
+    table_comments: Dict[str, str] = {}
+    column_comments: Dict[str, Dict[str, str]] = {}
+
+    if not path.exists():
+        return table_comments, column_comments
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return table_comments, column_comments
+
+    for line in lines:
+        stmt = line.strip()
+        if not stmt or stmt.startswith("--"):
+            continue
+
+        table_match = _TABLE_COMMENT_RE.match(stmt)
+        if table_match:
+            table_name, raw_comment = table_match.groups()
+            table_comments[table_name] = _compact_comment(raw_comment)
+            continue
+
+        column_match = _COLUMN_COMMENT_RE.match(stmt)
+        if column_match:
+            table_name, column_name, raw_comment = column_match.groups()
+            table_columns = column_comments.setdefault(table_name, {})
+            table_columns[column_name] = _compact_comment(raw_comment)
+
+    return table_comments, column_comments
+
+
+# 从评审注释文件加载的表/字段语义注释，用于 NL2SQL prompt 辅助信息。
+TABLE_REVIEW_COMMENTS, COLUMN_REVIEW_COMMENTS = _load_review_comments(_SCHEMA_COMMENTS_FILE)

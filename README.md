@@ -14,6 +14,14 @@
 6. RAG 索引写入支持增量去重：按 `source + text` 哈希过滤批内与存量重复切片，避免重复入库。
 7. 补齐 `agent/knowledge/bgp/hijack_detection.md` 示例文件，chapter_5 路径可直接复现。
 
+## RAG 升级（2026-02-22）
+
+1. 入库流程统一为 `Any -> MarkItDown -> Markdown 智能分块 -> Milvus`，避免多套转换逻辑并行。
+2. RAG embedding 默认改为本地离线 `BAAI/bge-m3`，不再依赖在线 embedding API。
+3. 召回策略默认启用 `MQE + RRF`（多查询扩展 + 融合排序），提高复杂查询的覆盖率。
+4. 入库脚本与 MCP 检索统一复用同一 embedding 构造逻辑，避免“入库模型/查询模型”不一致。
+5. NL2SQL 表/列检索 embedding 默认改为本地离线 `BAAI/bge-m3`，与 RAG 一致。
+
 ## 启动与部署（简版）
 
 ### 方式一：Docker Compose（推荐）
@@ -23,20 +31,34 @@
    docker compose -f docker/docker-compose.yml up -d postgres etcd minio milvus neo4j
    ```
 
-2. 导入 CSV（仅 16 张核心表）
+2. 导入 CSV（仅 16 张核心表，手动触发）
    ```bash
-   docker compose -f docker/docker-compose.yml build loader
-   docker compose -f docker/docker-compose.yml run --rm loader
+   # 本机执行
+   python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --date 2024-08-12 --ensure-core
+
+   # 或在现有 agent 镜像中执行（无需本机安装 Python 依赖）
+   docker compose -f docker/docker-compose.yml run --rm agent-mcp \
+     python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root /work --date 2024-08-12 --ensure-core
    ```
    - 导入流程会自动应用统一 DDL：`database/core_schema.sql`
-   - 如需单独执行：`python scripts/ensure_core_schema.py --config conf/config.docker.yaml --root .`
+   - `python -m agent.scripts.load_all_csv` 默认启用 `--single-transaction`，16 张核心表导入失败或核心 CSV 缺失会整批回滚
+   - 如需单独执行：`python -m agent.scripts.ensure_core_schema --config conf/config.docker.yaml --root .`
 
-3. （可选）预构建 NL2SQL 索引
+3. （可选）一体化顺序导入 PostgreSQL + Neo4j
    ```bash
-   python scripts/build_nl2sql_indexes.py
+   python -m agent.scripts.load_network_data_atomic --root . --config conf/config.docker.yaml --ensure-core
    ```
+   - 执行顺序：先 PostgreSQL（单事务）→ 后 Neo4j
+   - PostgreSQL 失败时不会触发 Neo4j 导入
+   - Neo4j 可通过 `--neo4j-single-transaction` 控制是否整批事务写入
 
-4. 启动智能体三层服务（MCP / A2A / API）
+4. （可选）预构建 NL2SQL 索引
+   ```bash
+   python -m agent.scripts.build_nl2sql_indexes
+   ```
+   - NL2SQL 表/列索引将写入 Milvus（单 collection + 分区），本地仅保留轻量 manifest
+
+5. 启动智能体三层服务（MCP / A2A / API）
    ```bash
    docker compose -f docker/docker-compose.yml up -d agent-mcp agent-a2a agent-api
    ```
@@ -51,7 +73,7 @@
    source .venv/bin/activate
    pip install -r requirements.txt
    # 可选：预构建 NL2SQL 索引
-   python scripts/build_nl2sql_indexes.py
+   python -m agent.scripts.build_nl2sql_indexes
    uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
    uvicorn agent.services.a2a.server:app --host 0.0.0.0 --port 2031
    uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
@@ -82,12 +104,22 @@
 - `AGENT_STORE_DIR`（统一存储根目录，默认 `agent/store`）
 - `MEMORY_STORE_DIR`（情景记忆本地目录，默认 `agent/store/memory`）
 - `NOTES_DIR`（笔记目录，默认 `agent/store/notes`）
-- `NL2SQL_INDEX_CACHE_DIR`（NL2SQL 索引目录，默认 `agent/store/index/nl2sql`）
+- `NL2SQL_INDEX_CACHE_DIR`（NL2SQL 索引 manifest 目录，默认 `agent/store/index/nl2sql`）
+- `NL2SQL_VECTOR_COLLECTION`（NL2SQL 向量索引的 Milvus collection 名称，默认 `nl2sql_index`）
 - `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `180` 秒）
 - `CLI_TIMEOUT_SECONDS`（CLI 外层超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `A2A_TIMEOUT_SECONDS`（A2A 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `A2A_EVENT_POLL_TIMEOUT_SECONDS`（A2A Worker SSE 轮询超时/心跳间隔，默认 `15` 秒）
+- `RAG_EMBEDDING_BACKEND`（默认 `local_bge`）
+- `RAG_EMBEDDING_MODEL`（默认 `BAAI/bge-m3`，也可填本地模型目录）
+- `RAG_EMBEDDING_DEVICE`（默认 `cpu`）
+- `NL2SQL_EMBEDDING_BACKEND`（默认 `local_bge`）
+- `NL2SQL_EMBEDDING_MODEL`（默认 `BAAI/bge-m3`，也可填本地模型目录）
+- `NL2SQL_EMBEDDING_DEVICE`（默认 `cpu`）
+- `NL2SQL_EMBEDDING_BATCH_SIZE`（默认 `16`）
+- `NL2SQL_EMBEDDING_NORMALIZE`（默认 `true`）
+- `RAG_ENABLE_MQE`（默认 `true`）
 
 ## 运行时表说明
 
@@ -113,7 +145,7 @@ FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张�
 按 `metadata.trace_id` 拼接 LangSmith 跨服务链路（推荐用于排查 `tool_router plan`、MCP/A2A 断点）：
 
 ```bash
-python scripts/trace_by_metadata_id.py \
+python -m agent.scripts.trace_by_metadata_id \
   --project "${LANGSMITH_PROJECT}" \
   --trace-id "<metadata.trace_id>" \
   --since-hours 24 \

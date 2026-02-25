@@ -10,6 +10,8 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "NL2SQLTool": ("agent.tools.nl2sql_tool", "NL2SQLTool"),
     "RAGTool": ("agent.tools.rag_tool", "RAGTool"),
     "DashScopeEmbedding": ("agent.tools.rag_tool", "DashScopeEmbedding"),
+    "LocalBGEEmbedding": ("agent.tools.rag_tool", "LocalBGEEmbedding"),
+    "build_rag_embedding": ("agent.tools.rag_tool", "build_rag_embedding"),
     "NoteTool": ("agent.tools.note_tool", "NoteTool"),
     "TodoTool": ("agent.tools.todo_tool", "TodoTool"),
     "TaskTool": ("agent.tools.task_tool", "TaskTool"),

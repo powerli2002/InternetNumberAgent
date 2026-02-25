@@ -141,11 +141,16 @@ class FusionAgent:
         return self._stream_core(user_message, history, None, trace_id)
 
     def _respond_core(self, user_message: str, history: List[ConversationTurn], root_run, trace_id: str) -> Tuple[str, dict]:
+        # 第 1 步：先完成“上下文准备”，该步骤会触发规划、路由、工具执行、记忆检索等动作，
+        # 最终返回可直接喂给生成模型的 context，以及证据来源 sources 和问题类型 question_type。
         context, sources, question_type = self._prepare_context(user_message, history, root_run, trace_id)
+        # 第 2 步：构造最终生成阶段的消息。
+        # system 使用全局系统提示，user 使用已经拼装好的上下文（不是原始问题）。
         messages = [
             LLMMessage(role="system", content=SYSTEM_PROMPT),
             LLMMessage(role="user", content=context),
         ]
+        # 第 3 步：如果存在根 trace，则把“最终回答生成”纳入可观测链路。
         if root_run:
             with self.tracer.start_run(
                 name="llm_generate",
@@ -155,24 +160,34 @@ class FusionAgent:
                 metadata={"question_type": question_type},
                 parent=root_run,
             ) as run:
+                # 同步生成完整回答文本。
                 answer = self.llm.chat(messages)
+                # 把模型输出写入 trace，便于后续复盘。
                 run.add_outputs({"answer": answer})
         else:
+            # 无 trace 场景下直接调用模型，功能等价但不记录子 run。
             answer = self.llm.chat(messages)
+        # 第 4 步：把最终问答写入记忆系统（working/semantic 等），不影响当前返回结构。
         self._write_final_answer(user_message, answer, root_run)
+        # sources 去重后返回，供上层接口写 metadata 或调试展示。
         return answer, {"sources": list(dict.fromkeys(sources))}
 
     def _stream_core(
         self, user_message: str, history: List[ConversationTurn], root_run, trace_id: str
     ) -> Tuple[Iterable[str], dict]:
+        # 与 _respond_core 一致，流式模式也先准备完整上下文，
+        # 保证“同步回答”和“流式回答”在工具调用侧行为一致。
         context, sources, question_type = self._prepare_context(user_message, history, root_run, trace_id)
+        # 生成阶段消息：system + 结构化 context。
         messages = [
             LLMMessage(role="system", content=SYSTEM_PROMPT),
             LLMMessage(role="user", content=context),
         ]
 
         def _generator() -> Iterable[str]:
+            # 增量片段缓冲区：一边 yield 给前端，一边累计为最终完整答案用于记忆写入。
             answer_parts: List[str] = []
+            # 有 trace 时记录流式生成子链路。
             if root_run:
                 with self.tracer.start_run(
                     name="llm_generate",
@@ -182,34 +197,54 @@ class FusionAgent:
                     metadata={"question_type": question_type},
                     parent=root_run,
                 ) as run:
+                    # chat_stream 返回增量 token/片段，逐段透传给上层。
                     for delta in self.llm.chat_stream(messages):
                         answer_parts.append(delta)
                         yield delta
+                    # 结束后补写完整答案到 trace。
                     run.add_outputs({"answer": "".join(answer_parts)})
             else:
+                # 无 trace 的流式分支：仅保留业务行为。
                 for delta in self.llm.chat_stream(messages):
                     answer_parts.append(delta)
                     yield delta
+            # 流结束后拼接完整答案，用于统一记忆写入。
             answer = "".join(answer_parts)
             self._write_final_answer(user_message, answer, root_run)
 
+        # 返回生成器 + 去重 sources，调用侧（HTTP SSE）会逐段消费该生成器。
         return _generator(), {"sources": list(dict.fromkeys(sources))}
 
     def _prepare_context(
         self, user_message: str, history: List[ConversationTurn], root_run, trace_id: str
     ) -> Tuple[str, List[str], str]:
-        """按路由执行 MCP/A2A，并组装上下文。"""
+        """
+        按“规划 -> 路由 -> 工具执行 -> 证据汇总 -> 记忆检索 -> 上下文构建”的顺序准备生成上下文。
+
+        返回值：
+        1) context: 供最终 LLM 生成回答的完整上下文文本
+        2) sources: 工具/文档来源列表（可能重复，调用方可再去重）
+        3) question_type: 问题粗分类（用于 trace 和策略分支）
+        """
+        # evidences：本轮工具执行得到的证据集合，会进入 ContextBuilder。
         evidences: List[EvidenceItem] = []
+        # sources：记录证据来源（如 nl2sql/rag/neo4j 等），便于响应元数据输出。
         sources: List[str] = []
+        # 先做问题分类，用于后续路由提示和 tracing metadata。
         question_type = self._classify_question(user_message)
+        # 第一步：先让规划器生成“步骤计划”（不绑定具体工具）。
         plan_decision = self._plan_steps(user_message, history, trace_id, root_run)
+        # 记录规划结果输入输出，便于定位路由问题。
         _log_module_io(
             "plan_router",
             {"question": _preview_text(user_message, MODULE_LOG_BODY_LIMIT), "history_len": len(history)},
             {"reason": plan_decision.reason, "plan": [step.to_dict() for step in plan_decision.plan]},
         )
 
+        # 第二步：按规划步骤执行，每个 step 再做一次“工具级路由”。
+        # 注意只执行 max_turns 个步骤，避免无限扩展。
         for step_index, step in enumerate(plan_decision.plan[: plan_decision.max_turns]):
+            # 针对当前 step 选择工具（nl2sql/rag/todo/none）并生成参数。
             action = self._route_step_tool(
                 step=step,
                 user_message=user_message,
@@ -218,6 +253,7 @@ class FusionAgent:
                 root_run=root_run,
                 step_index=step_index,
             )
+            # 记录 step 级路由详情（输入约束 + 选择动作）。
             _log_module_io(
                 "step_router",
                 {
@@ -227,28 +263,39 @@ class FusionAgent:
                 },
                 {"action": action.to_dict()},
             )
+            # 读取目标工具类型。
             tool = action.tool
+            # none 表示该 step 不执行任何工具，直接进入下一步。
             if tool == "none":
                 continue
 
+            # step_objective：优先使用动作里重写的 objective，否则沿用计划 objective。
             step_objective = action.objective or step.objective
+            # action_args：工具参数，若格式异常则兜底为空字典。
             action_args = action.arguments if isinstance(action.arguments, dict) else {}
 
             if tool == "nl2sql":
+                # 参数来源优先级：action.arguments > step.constraints > 全局默认 allowed_tables。
                 plan_tables = action_args.get("tables")
                 if plan_tables is None and isinstance(step.constraints, dict):
                     plan_tables = step.constraints.get("tables")
+                # 对外部传入表名做白名单过滤，确保只访问允许表。
                 tables = [t for t in (plan_tables or self.config.allowed_tables) if t in self.config.allowed_tables]
+                # 如果过滤后为空，回退到全量允许表，避免工具参数非法。
                 if not tables:
                     tables = list(self.config.allowed_tables)
+                # 是否启用列级检索（更准但可能更慢）。
                 use_columns_raw = action_args.get("enable_column_retrieval")
                 if use_columns_raw is None and isinstance(step.constraints, dict):
                     use_columns_raw = step.constraints.get("enable_column_retrieval")
                 use_columns = bool(use_columns_raw)
+                # 最终传给 NL2SQL 的自然语言问题文本。
                 question = str(action_args.get("question") or step_objective)
+                # 记录是否发生“列级检索失败 -> 降级重试”。
                 retried_without_columns = False
                 retry_error = ""
                 try:
+                    # 首次调用：按当前策略执行。
                     nl2sql_payload = self.mcp_client.call_tool(
                         "nl2sql_query",
                         {
@@ -261,6 +308,7 @@ class FusionAgent:
                         root_run=root_run,
                     )
                 except Exception as exc:
+                    # 若本来就没开列级检索，则异常直接上抛。
                     if not use_columns:
                         raise
                     # 列级索引在冷启动时可能较慢，超时后降级为表级检索重试
@@ -271,6 +319,7 @@ class FusionAgent:
                         _preview_text(question, 200),
                         retry_error,
                     )
+                    # 降级重试：无列检索。
                     nl2sql_payload = self.mcp_client.call_tool(
                         "nl2sql_query",
                         {
@@ -282,13 +331,16 @@ class FusionAgent:
                         trace_id=trace_id,
                         root_run=root_run,
                     )
+                # 规整 MCP 返回结构：抽取 SQL 与结果体。
                 sql = str(nl2sql_payload.get("sql", "")) if isinstance(nl2sql_payload, dict) else ""
                 result = nl2sql_payload.get("result", {}) if isinstance(nl2sql_payload, dict) else {}
+                # 记录模块级输入输出（问题、表集、SQL、结果预览）。
                 _log_module_io(
                     "mcp_nl2sql",
                     {"question": _preview_text(question, MODULE_LOG_BODY_LIMIT), "tables": tables},
                     {"sql": _preview_text(sql, MODULE_LOG_BODY_LIMIT), "result": _preview_text(str(result), MODULE_LOG_BODY_LIMIT)},
                 )
+                # 写入 evidence：后续会进入上下文，驱动最终回答可解释性。
                 evidences.append(
                     EvidenceItem(
                         title="NL2SQL 结果",
@@ -301,6 +353,7 @@ class FusionAgent:
                         },
                     )
                 )
+                # 同步写入情节记忆，便于后续跨轮次复用。
                 self.memory_manager.add_memory(
                     MemoryItem(
                         content=f"SQL: {sql}\n结果: {result}",
@@ -308,10 +361,13 @@ class FusionAgent:
                         metadata={"tool": "nl2sql"},
                     )
                 )
+                # 记录来源标签。
                 sources.append("nl2sql")
 
             elif tool == "rag":
+                # 默认召回条数。
                 top_k = 5
+                # 参数来源优先级同上：action.arguments > step.constraints > 默认值。
                 top_k_raw = action_args.get("top_k")
                 if top_k_raw is None and isinstance(step.constraints, dict):
                     top_k_raw = step.constraints.get("top_k")
@@ -320,19 +376,24 @@ class FusionAgent:
                         top_k = max(1, int(top_k_raw))
                     except (TypeError, ValueError):
                         top_k = 5
+                # 检索 query：优先动作参数，其次 step objective。
                 query = str(action_args.get("query") or step_objective)
+                # 调用 MCP RAG 工具。
                 rag_payload = self.mcp_client.call_tool(
                     "rag_search",
                     {"query": query, "top_k": top_k, "trace_id": trace_id},
                     trace_id=trace_id,
                     root_run=root_run,
                 )
+                # 抽取文档片段数组。
                 rag_results = rag_payload.get("chunks", []) if isinstance(rag_payload, dict) else []
+                # 记录检索命中数量。
                 _log_module_io(
                     "mcp_rag",
                     {"query": _preview_text(query, MODULE_LOG_BODY_LIMIT), "top_k": top_k},
                     {"hits": len(rag_results)},
                 )
+                # 将每个 chunk 转换为 evidence + working memory。
                 for chunk in rag_results:
                     if not isinstance(chunk, dict):
                         continue
@@ -356,14 +417,18 @@ class FusionAgent:
                     sources.append(source)
 
             elif tool == "todo":
+                # todo 模式用于复杂任务拆解：先规划子任务，再交给 A2A supervisor 执行。
                 todo_items = self._plan_todos(step_objective)
+                # 尝试把待办落盘到 todo 工具（失败不阻断主流程）。
                 self._persist_todos(todo_items, trace_id=trace_id, root_run=root_run)
+                # 调用 A2A 执行子任务链。
                 task_results = self._run_todo_via_a2a(
                     todo_items=todo_items,
                     user_message=user_message,
                     trace_id=trace_id,
                     root_run=root_run,
                 )
+                # 把每个子任务结果转换成 evidence + episodic memory。
                 for result in task_results:
                     summary = self._summarize_a2a_result(result)
                     evidences.append(
@@ -381,8 +446,10 @@ class FusionAgent:
                             metadata={"task_agent": result.agent},
                         )
                     )
+                    # 收集子任务证据源，供返回 metadata 使用。
                     sources.extend(self._collect_a2a_sources(result))
 
+        # 第三步：检索记忆库（working/episodic/semantic）补充上下文背景。
         if root_run:
             with self.tracer.start_run(
                 name="memory_lookup",
@@ -397,22 +464,26 @@ class FusionAgent:
         else:
             memories = self.memory_manager.search(user_message, top_k=5)
 
+        # 第四步：附加 note_search 结果（轻量补充知识）。
         notes_payload = self.mcp_client.call_tool(
             "note_search",
             {"query": user_message, "limit": 3, "trace_id": trace_id},
             trace_id=trace_id,
             root_run=root_run,
         )
+        # 做严格类型兜底，避免外部工具返回异常结构污染上下文构建。
         notes = notes_payload.get("notes", []) if isinstance(notes_payload, dict) else []
         if not isinstance(notes, list):
             notes = []
         notes = [str(note) for note in notes]
+        # 记录 note 检索命中。
         _log_module_io(
             "mcp_note_search",
             {"query": _preview_text(user_message, MODULE_LOG_BODY_LIMIT), "limit": 3},
             {"hits": len(notes), "items": notes[:MODULE_LOG_MAX_ITEMS]},
         )
 
+        # 第五步：统一走 ContextBuilder（GSSC）构建最终上下文文本。
         context = self.context_builder.build(
             system_prompt=SYSTEM_PROMPT,
             user_query=user_message,
@@ -421,6 +492,7 @@ class FusionAgent:
             evidences=evidences,
             notes=notes,
         )
+        # 输出给生成层：context + 原始 sources + question_type。
         return context, sources, question_type
 
     def _run_todo_via_a2a(

@@ -112,7 +112,23 @@ def _make_progress(total: Optional[int], desc: str, enabled: bool) -> Optional[t
     return tqdm(total=total, desc=desc, unit="rows", dynamic_ncols=True, leave=True)
 
 
-def _write_nodes(session, label: str, key: str, rows: List[Dict[str, Any]]) -> None:
+def _run_write(context, cypher: str, rows: List[Dict[str, Any]]) -> None:
+    """兼容 session 与 tx 的统一写入入口。"""
+    if hasattr(context, "execute_write"):
+        context.execute_write(lambda tx: tx.run(cypher, rows=rows))
+        return
+    context.run(cypher, rows=rows)
+
+
+def _run_statement(context, cypher: str) -> None:
+    """兼容 session 与 tx 的统一语句执行入口。"""
+    if hasattr(context, "execute_write"):
+        context.execute_write(lambda tx: tx.run(cypher))
+        return
+    context.run(cypher)
+
+
+def _write_nodes(context, label: str, key: str, rows: List[Dict[str, Any]]) -> None:
     if not rows:
         return
     cypher = (
@@ -120,24 +136,24 @@ def _write_nodes(session, label: str, key: str, rows: List[Dict[str, Any]]) -> N
         f"MERGE (n:{label} {{{key}: row.{key}}}) "
         f"SET n += row"
     )
-    session.execute_write(lambda tx: tx.run(cypher, rows=rows))
+    _run_write(context, cypher, rows)
 
 
-def _write_relationships(session, cypher: str, rows: List[Dict[str, Any]]) -> None:
+def _write_relationships(context, cypher: str, rows: List[Dict[str, Any]]) -> None:
     if not rows:
         return
-    session.execute_write(lambda tx: tx.run(cypher, rows=rows))
+    _run_write(context, cypher, rows)
 
 
-def _create_constraints(session, include_website: bool, include_industry: bool) -> None:
-    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (a:AS) REQUIRE a.asn IS UNIQUE")
-    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (o:Org) REQUIRE o.uuid IS UNIQUE")
-    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Country) REQUIRE c.country IS UNIQUE")
-    session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (p:Prefix) REQUIRE p.cidr IS UNIQUE")
+def _create_constraints(context, include_website: bool, include_industry: bool) -> None:
+    _run_statement(context, "CREATE CONSTRAINT IF NOT EXISTS FOR (a:AS) REQUIRE a.asn IS UNIQUE")
+    _run_statement(context, "CREATE CONSTRAINT IF NOT EXISTS FOR (o:Org) REQUIRE o.uuid IS UNIQUE")
+    _run_statement(context, "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Country) REQUIRE c.country IS UNIQUE")
+    _run_statement(context, "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Prefix) REQUIRE p.cidr IS UNIQUE")
     if include_website:
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (w:Website) REQUIRE w.url IS UNIQUE")
+        _run_statement(context, "CREATE CONSTRAINT IF NOT EXISTS FOR (w:Website) REQUIRE w.url IS UNIQUE")
     if include_industry:
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (i:Industry) REQUIRE i.name IS UNIQUE")
+        _run_statement(context, "CREATE CONSTRAINT IF NOT EXISTS FOR (i:Industry) REQUIRE i.name IS UNIQUE")
 
 
 def _load_countries(pg_conn, session, batch_size: int, show_progress: bool) -> None:
@@ -1029,6 +1045,39 @@ def _build_org_name_map(pg_conn) -> Dict[str, str]:
     return mapping
 
 
+def _run_import_pipeline(pg_conn, context, args, show_progress: bool) -> None:
+    """执行图谱导入主流程。"""
+    _create_constraints(context, args.include_website, args.include_industry)
+
+    _load_countries(pg_conn, context, args.batch_size, show_progress)
+    _load_orgs(pg_conn, context, args.batch_size, show_progress)
+    _load_as_nodes(
+        pg_conn,
+        context,
+        args.batch_size,
+        show_progress,
+        include_relations=not args.skip_as_relations,
+    )
+    _load_asn_nodes(pg_conn, context, args.batch_size, show_progress)
+
+    _load_as_org_relations(pg_conn, context, args.batch_size, show_progress)
+    _load_org_country_relations(pg_conn, context, args.batch_size, show_progress)
+    _load_as_country_relations(pg_conn, context, args.batch_size, show_progress)
+
+    _load_prefix_from_bgp(pg_conn, context, args.batch_size, version=4, show_progress=show_progress)
+    _load_prefix_from_bgp(pg_conn, context, args.batch_size, version=6, show_progress=show_progress)
+    _load_prefix_from_delegate(pg_conn, context, args.batch_size, version=4, show_progress=show_progress)
+    _load_prefix_from_delegate(pg_conn, context, args.batch_size, version=6, show_progress=show_progress)
+    _load_registry_info(pg_conn, context, args.batch_size, show_progress)
+
+    if args.include_website:
+        _load_website_nodes(pg_conn, context, args.batch_size, show_progress)
+        _load_website_prefix_relations(pg_conn, context, args.batch_size, show_progress)
+    if args.include_industry:
+        org_name_map = _build_org_name_map(pg_conn)
+        _load_industry_graph(pg_conn, context, args.batch_size, org_name_map, show_progress)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Neo4j 图谱导入（Postgres 数据源）")
     parser.add_argument("--postgres-url", default=None, help="Postgres 连接串")
@@ -1040,6 +1089,12 @@ def main() -> None:
     parser.add_argument("--include-industry", action="store_true", help="导入 industry_entity 并构建行业关系")
     parser.add_argument("--no-progress", action="store_true", help="禁用进度条输出")
     parser.add_argument("--skip-as-relations", action="store_true", help="跳过 AS 上下游/对等关系导入")
+    parser.add_argument(
+        "--single-transaction",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否以单个 Neo4j 事务执行整批导入（失败自动整批回滚）",
+    )
     args = parser.parse_args()
 
     cfg = AgentConfig.load()
@@ -1056,38 +1111,20 @@ def main() -> None:
     driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
 
     try:
+        show_progress = not args.no_progress
         with driver.session() as session:
-            _create_constraints(session, args.include_website, args.include_industry)
-
-            show_progress = not args.no_progress
-
-            _load_countries(pg_conn, session, args.batch_size, show_progress)
-            _load_orgs(pg_conn, session, args.batch_size, show_progress)
-            _load_as_nodes(
-                pg_conn,
-                session,
-                args.batch_size,
-                show_progress,
-                include_relations=not args.skip_as_relations,
-            )
-            _load_asn_nodes(pg_conn, session, args.batch_size, show_progress)
-
-            _load_as_org_relations(pg_conn, session, args.batch_size, show_progress)
-            _load_org_country_relations(pg_conn, session, args.batch_size, show_progress)
-            _load_as_country_relations(pg_conn, session, args.batch_size, show_progress)
-
-            _load_prefix_from_bgp(pg_conn, session, args.batch_size, version=4, show_progress=show_progress)
-            _load_prefix_from_bgp(pg_conn, session, args.batch_size, version=6, show_progress=show_progress)
-            _load_prefix_from_delegate(pg_conn, session, args.batch_size, version=4, show_progress=show_progress)
-            _load_prefix_from_delegate(pg_conn, session, args.batch_size, version=6, show_progress=show_progress)
-            _load_registry_info(pg_conn, session, args.batch_size, show_progress)
-
-            if args.include_website:
-                _load_website_nodes(pg_conn, session, args.batch_size, show_progress)
-                _load_website_prefix_relations(pg_conn, session, args.batch_size, show_progress)
-            if args.include_industry:
-                org_name_map = _build_org_name_map(pg_conn)
-                _load_industry_graph(pg_conn, session, args.batch_size, org_name_map, show_progress)
+            if args.single_transaction:
+                tx = session.begin_transaction()
+                try:
+                    _run_import_pipeline(pg_conn, tx, args, show_progress)
+                    tx.commit()
+                    print("Neo4j 单事务导入完成，已提交。")
+                except Exception:
+                    tx.rollback()
+                    print("Neo4j 单事务导入失败，已回滚。")
+                    raise
+            else:
+                _run_import_pipeline(pg_conn, session, args, show_progress)
 
     finally:
         pg_conn.close()

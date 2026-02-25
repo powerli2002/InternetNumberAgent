@@ -267,5 +267,7 @@
 7. **AS 疆域分析目前为国家级**：缺少省市级离线地理库，暂无法输出省/市置信度。
 8. **RAG 增量写入默认去重**：`agent/tools/rag_tool.py` 在写入 Milvus 前按 `source + text` 哈希执行批内与存量去重，避免重复切片污染检索结果。
 9. **chapter_5 示例路径已补齐**：仓库已包含 `agent/knowledge/bgp/hijack_detection.md`，可直接按文档复现索引构建示例。
+10. **Compose 已移除自动 CSV 导入服务**：`docker/docker-compose.yml` 不再包含 `loader`，避免“每次启动都执行导入”；如需导入需手动执行 `python -m agent.scripts.load_all_csv`。
+11. **NL2SQL Prompt 新增注释语义辅助**：`agent/core/schema.py` 会解析 `database/core_schema_comments.review.sql` 中的 `COMMENT ON TABLE/COLUMN`，并在 `agent/tools/nl2sql_tool.py` 组装表上下文时拼接“表说明 + 字段释义”辅助 SQL 生成。
 
 以上即为当前项目的完整数据格式、功能与表间关联说明，可直接用于面试项目讲解或后续 Agent/知识图谱落地。

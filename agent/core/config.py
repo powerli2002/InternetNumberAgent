@@ -82,7 +82,23 @@ class AgentConfig:
     """默认使用的 LLM 模型"""
 
     dashscope_embedding_model: str = "text-embedding-v3"
-    """用于向量嵌入的模型"""
+    """DashScope embedding 模型（在 RAG/NL2SQL 切换到 dashscope 后端时使用）"""
+
+    # RAG 嵌入配置（默认使用本地离线 bge）
+    rag_embedding_backend: str = "local_bge"
+    """RAG 嵌入后端：local_bge/dashscope"""
+
+    rag_embedding_model: str = "BAAI/bge-m3"
+    """本地离线 embedding 模型名或本地模型目录"""
+
+    rag_embedding_device: str = "cpu"
+    """本地 embedding 推理设备：cpu/cuda/mps"""
+
+    rag_embedding_batch_size: int = 16
+    """本地 embedding 批大小"""
+
+    rag_embedding_normalize: bool = True
+    """是否对 embedding 做 L2 归一化（推荐开启）"""
 
     # 记忆系统配置
     working_memory_size: int = 200
@@ -137,13 +153,31 @@ class AgentConfig:
     nl2sql_index_cache_dir: Path = field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store" / "index" / "nl2sql"
     )
-    """NL2SQL 索引缓存目录：存储表结构和列值的向量索引"""
+    """NL2SQL 索引 manifest 目录（向量数据持久化在 Milvus）"""
 
     nl2sql_index_cache_enabled: bool = True
     """是否启用 NL2SQL 索引缓存，提高查询性能"""
 
     nl2sql_index_cache_force_rebuild: bool = False
     """是否强制重建索引缓存，表结构变更时使用"""
+
+    nl2sql_vector_collection: str = "nl2sql_index"
+    """NL2SQL 向量索引在 Milvus 中的集合名称"""
+
+    nl2sql_embedding_backend: str = "local_bge"
+    """NL2SQL 嵌入后端：local_bge/dashscope"""
+
+    nl2sql_embedding_model: str = "BAAI/bge-m3"
+    """NL2SQL 嵌入模型名或本地模型目录"""
+
+    nl2sql_embedding_device: str = "cpu"
+    """NL2SQL 本地嵌入推理设备：cpu/cuda/mps"""
+
+    nl2sql_embedding_batch_size: int = 16
+    """NL2SQL 本地嵌入批大小"""
+
+    nl2sql_embedding_normalize: bool = True
+    """NL2SQL 是否对 embedding 做 L2 归一化"""
 
     nl2sql_max_rows: int = 200
     """NL2SQL 查询最大返回行数，用于强制限制结果规模"""
@@ -182,6 +216,18 @@ class AgentConfig:
 
     vector_collection: str = "fusion_docs"
     """Milvus 中的文档向量集合名称"""
+
+    rag_enable_mqe: bool = True
+    """是否启用 MQE 多查询扩展召回"""
+
+    rag_mqe_max_queries: int = 4
+    """MQE 生成的最大查询条数（含原始查询）"""
+
+    rag_candidate_multiplier: int = 4
+    """每个查询的候选召回放大倍数"""
+
+    rag_rrf_k: int = 60
+    """RRF 融合常数，越大越平滑"""
 
     allowed_tables: List[str] = field(default_factory=list)
     """NL2SQL 允许查询的表名列表，用于安全控制"""
@@ -265,6 +311,50 @@ class AgentConfig:
         cfg.dashscope_base_url = os.environ.get("DASHSCOPE_BASE_URL", cfg.dashscope_base_url)
         cfg.dashscope_model = os.environ.get("DASHSCOPE_MODEL", cfg.dashscope_model)
         cfg.dashscope_embedding_model = os.environ.get("DASHSCOPE_EMBEDDING_MODEL", cfg.dashscope_embedding_model)
+        cfg.rag_embedding_backend = os.environ.get("RAG_EMBEDDING_BACKEND", cfg.rag_embedding_backend)
+        cfg.rag_embedding_model = os.environ.get("RAG_EMBEDDING_MODEL", cfg.rag_embedding_model)
+        cfg.rag_embedding_device = os.environ.get("RAG_EMBEDDING_DEVICE", cfg.rag_embedding_device)
+        rag_embedding_batch_size_value = os.environ.get("RAG_EMBEDDING_BATCH_SIZE")
+        if rag_embedding_batch_size_value:
+            try:
+                cfg.rag_embedding_batch_size = max(1, int(rag_embedding_batch_size_value))
+            except ValueError:
+                pass
+        rag_embedding_normalize_value = os.environ.get("RAG_EMBEDDING_NORMALIZE")
+        if rag_embedding_normalize_value is not None:
+            cfg.rag_embedding_normalize = rag_embedding_normalize_value.strip().lower() in {"1", "true", "yes", "on"}
+
+        # NL2SQL embedding 配置（默认本地离线），并兼容复用 RAG embedding 配置。
+        cfg.nl2sql_embedding_backend = os.environ.get(
+            "NL2SQL_EMBEDDING_BACKEND",
+            os.environ.get("RAG_EMBEDDING_BACKEND", cfg.nl2sql_embedding_backend),
+        )
+        cfg.nl2sql_embedding_model = os.environ.get(
+            "NL2SQL_EMBEDDING_MODEL",
+            os.environ.get("RAG_EMBEDDING_MODEL", cfg.nl2sql_embedding_model),
+        )
+        cfg.nl2sql_embedding_device = os.environ.get(
+            "NL2SQL_EMBEDDING_DEVICE",
+            os.environ.get("RAG_EMBEDDING_DEVICE", cfg.nl2sql_embedding_device),
+        )
+        nl2sql_embedding_batch_size_value = os.environ.get("NL2SQL_EMBEDDING_BATCH_SIZE") or os.environ.get(
+            "RAG_EMBEDDING_BATCH_SIZE"
+        )
+        if nl2sql_embedding_batch_size_value:
+            try:
+                cfg.nl2sql_embedding_batch_size = max(1, int(nl2sql_embedding_batch_size_value))
+            except ValueError:
+                pass
+        nl2sql_embedding_normalize_value = os.environ.get("NL2SQL_EMBEDDING_NORMALIZE")
+        if nl2sql_embedding_normalize_value is None:
+            nl2sql_embedding_normalize_value = os.environ.get("RAG_EMBEDDING_NORMALIZE")
+        if nl2sql_embedding_normalize_value is not None:
+            cfg.nl2sql_embedding_normalize = nl2sql_embedding_normalize_value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
 
         # 统一请求超时配置（秒）
         timeout_value = os.environ.get("REQUEST_TIMEOUT_SECONDS") or os.environ.get("AGENT_REQUEST_TIMEOUT_SECONDS")
@@ -309,6 +399,28 @@ class AgentConfig:
         cfg.mcp_server_url = os.environ.get("MCP_SERVER_URL", cfg.mcp_server_url)
         cfg.a2a_server_url = os.environ.get("A2A_SERVER_URL", cfg.a2a_server_url)
 
+        rag_enable_mqe_value = os.environ.get("RAG_ENABLE_MQE")
+        if rag_enable_mqe_value is not None:
+            cfg.rag_enable_mqe = rag_enable_mqe_value.strip().lower() in {"1", "true", "yes", "on"}
+        rag_mqe_max_queries_value = os.environ.get("RAG_MQE_MAX_QUERIES")
+        if rag_mqe_max_queries_value:
+            try:
+                cfg.rag_mqe_max_queries = max(1, int(rag_mqe_max_queries_value))
+            except ValueError:
+                pass
+        rag_candidate_multiplier_value = os.environ.get("RAG_CANDIDATE_MULTIPLIER")
+        if rag_candidate_multiplier_value:
+            try:
+                cfg.rag_candidate_multiplier = max(1, int(rag_candidate_multiplier_value))
+            except ValueError:
+                pass
+        rag_rrf_k_value = os.environ.get("RAG_RRF_K")
+        if rag_rrf_k_value:
+            try:
+                cfg.rag_rrf_k = max(1, int(rag_rrf_k_value))
+            except ValueError:
+                pass
+
         # 语义记忆配置
         enabled_value = os.environ.get("SEMANTIC_MEMORY_ENABLED")
         if enabled_value is not None:
@@ -330,6 +442,9 @@ class AgentConfig:
         cache_dir_value = os.environ.get("NL2SQL_INDEX_CACHE_DIR")
         if cache_dir_value:
             cfg.nl2sql_index_cache_dir = Path(cache_dir_value)
+        nl2sql_vector_collection_value = os.environ.get("NL2SQL_VECTOR_COLLECTION")
+        if nl2sql_vector_collection_value:
+            cfg.nl2sql_vector_collection = nl2sql_vector_collection_value.strip()
         memory_store_value = os.environ.get("MEMORY_STORE_DIR")
         if memory_store_value:
             cfg.memory_store_dir = Path(memory_store_value)

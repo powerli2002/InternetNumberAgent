@@ -3,7 +3,7 @@ NL2SQL 工具模块 - 自然语言到 SQL 的转换与执行
 
 核心功能：
 1. 基于 LlamaIndex 的 SQL 生成引擎
-2. 支持阿里云百炼嵌入模型进行表/列检索优化
+2. 支持本地离线 bge 与阿里云百炼两类嵌入模型
 3. 向量索引缓存机制，提高查询性能
 4. PostgreSQL 数据库连接和安全查询执行
 5. 表结构和列值的向量化索引
@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextvars
 from dataclasses import dataclass
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -38,12 +39,13 @@ from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.prompts import PromptTemplate
 
 from agent.core.prompts import NL2SQL_TEXT_TO_SQL_PROMPT
-from agent.core.schema import TABLE_CONTEXT_HINTS, TABLE_SCHEMA
+from agent.core.schema import COLUMN_REVIEW_COMMENTS, TABLE_CONTEXT_HINTS, TABLE_REVIEW_COMMENTS, TABLE_SCHEMA
 from src.utils.logging_manager import logger
 
 
 NL2SQL_LOG_ENABLED = os.getenv("NL2SQL_LOG_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 NL2SQL_TRACE_ID_CTX: contextvars.ContextVar[str] = contextvars.ContextVar("nl2sql_trace_id", default="")
+DEFAULT_LOCAL_BGE_MODEL = "/root/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181"
 
 
 def _log_nl2sql(message: str, *args) -> None:
@@ -129,6 +131,250 @@ class DashScopeLlamaEmbedding:
     @property
     def embedding(self):
         return self._embedding
+
+
+class LocalBGELlamaEmbedding:
+    """本地离线 bge embedding 适配器（LlamaIndex 兼容接口）。"""
+
+    def __init__(
+        self,
+        model_name: str = DEFAULT_LOCAL_BGE_MODEL,
+        device: str = "cpu",
+        batch_size: int = 16,
+        normalize: bool = True,
+    ) -> None:
+        try:
+            from llama_index.core.base.embeddings.base import BaseEmbedding  # type: ignore
+            from sentence_transformers import SentenceTransformer  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("未安装 llama-index/sentence-transformers，无法初始化本地 embedding。") from exc
+
+        resolved_model = (model_name or "").strip()
+        if not resolved_model:
+            raise RuntimeError("embedding 模型名不能为空。")
+        safe_batch_size = max(1, int(batch_size))
+
+        class _Embedding(BaseEmbedding):
+            model_name: str = "local-bge-embedding"
+            _model = PrivateAttr()
+            _batch_size = PrivateAttr()
+            _normalize = PrivateAttr()
+            _dim = PrivateAttr(default=0)
+
+            def __init__(self, model_ref: str, run_device: str, run_batch_size: int, run_normalize: bool) -> None:
+                super().__init__(embed_batch_size=run_batch_size)
+                self._batch_size = run_batch_size
+                self._normalize = run_normalize
+                self._model = SentenceTransformer(model_ref, device=run_device)
+                if str(run_device).lower().startswith("cuda"):
+                    # 统一使用固定截断长度，避免超长 schema 文本触发二次方显存膨胀。
+                    max_seq_length = 512
+                    if hasattr(self._model, "max_seq_length"):
+                        current = int(getattr(self._model, "max_seq_length", max_seq_length) or max_seq_length)
+                        self._model.max_seq_length = min(current, max_seq_length)
+                    # CUDA 推理使用半精度，减少显存占用。
+                    self._model.half()
+                dim = self._model.get_sentence_embedding_dimension()
+                self._dim = int(dim) if dim else 0
+
+            def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+                if not texts:
+                    return []
+                vectors = self._model.encode(
+                    texts,
+                    batch_size=max(1, int(self._batch_size)),
+                    normalize_embeddings=self._normalize,
+                    show_progress_bar=False,
+                )
+                outputs: List[List[float]] = []
+                for vector in vectors:
+                    outputs.append([float(x) for x in vector])
+                if outputs:
+                    self._dim = len(outputs[0])
+                return outputs
+
+            def _get_text_embedding(self, text: str) -> List[float]:
+                return self._embed_batch([text])[0]
+
+            def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+                return self._embed_batch(texts)
+
+            def _get_query_embedding(self, query: str) -> List[float]:
+                return self._embed_batch([query])[0]
+
+            async def _aget_query_embedding(self, query: str) -> List[float]:
+                return self._get_query_embedding(query)
+
+        self._embedding = _Embedding(
+            model_ref=resolved_model,
+            run_device=device,
+            run_batch_size=safe_batch_size,
+            run_normalize=bool(normalize),
+        )
+
+    @property
+    def embedding(self):
+        return self._embedding
+
+
+def _resolve_partitioned_milvus_vector_store():
+    """延迟加载 Milvus VectorStore，并扩展分区写入与查询能力。"""
+    try:
+        from llama_index.vector_stores.milvus import MilvusVectorStore  # type: ignore
+        from llama_index.vector_stores.milvus.base import MILVUS_ID_FIELD, _to_milvus_filter, logger  # type: ignore
+        from llama_index.core.vector_stores.types import VectorStoreQueryMode, VectorStoreQueryResult  # type: ignore
+        from llama_index.core.vector_stores.utils import metadata_dict_to_node, node_to_metadata_dict  # type: ignore
+        from llama_index.core.utils import iter_batch  # type: ignore
+        from llama_index.core.schema import TextNode  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("缺少 llama-index-vector-stores-milvus 依赖，无法使用 Milvus 索引。") from exc
+
+    class PartitionedMilvusVectorStore(MilvusVectorStore):
+        """支持分区插入与分区查询的 Milvus VectorStore。"""
+
+        def add(self, nodes: List[Any], **add_kwargs: Any) -> List[str]:
+            partition_name = add_kwargs.get("partition_name")
+            if not partition_name:
+                return super().add(nodes, **add_kwargs)
+
+            insert_list = []
+            insert_ids = []
+
+            if self.enable_sparse is True and self.sparse_embedding_function is None:
+                logger.fatal("sparse_embedding_function is None when enable_sparse is True.")
+
+            for node in nodes:
+                entry = node_to_metadata_dict(node)
+                entry[MILVUS_ID_FIELD] = node.node_id
+                entry[self.embedding_field] = node.embedding
+
+                if self.enable_sparse is True:
+                    entry[self.sparse_embedding_field] = self.sparse_embedding_function.encode_documents([node.text])[0]
+
+                insert_ids.append(node.node_id)
+                insert_list.append(entry)
+
+            for insert_batch in iter_batch(insert_list, self.batch_size):
+                self._collection.insert(insert_batch, partition_name=partition_name)
+            if add_kwargs.get("force_flush", False):
+                self._collection.flush()
+            self._create_index_if_required()
+            logger.debug(
+                "Successfully inserted embeddings into: %s Num Inserted: %d",
+                self.collection_name,
+                len(insert_list),
+            )
+            return insert_ids
+
+        def query(self, query: Any, **kwargs: Any) -> VectorStoreQueryResult:
+            partition_names = kwargs.get("partition_names")
+            if not partition_names:
+                return super().query(query, **kwargs)
+
+            if query.mode != VectorStoreQueryMode.DEFAULT:
+                # 仅默认检索需要分区过滤，其他模式保持原行为
+                return super().query(query, **kwargs)
+
+            expr = []
+            output_fields = ["*"]
+
+            if query.filters is not None or "milvus_scalar_filters" in kwargs:
+                expr.append(
+                    _to_milvus_filter(
+                        query.filters,
+                        kwargs.get("milvus_scalar_filters"),
+                    )
+                )
+
+            if query.doc_ids is not None and len(query.doc_ids) != 0:
+                expr_list = ['"' + entry + '"' for entry in query.doc_ids]
+                expr.append(f"{self.doc_id_field} in [{','.join(expr_list)}]")
+
+            if query.node_ids is not None and len(query.node_ids) != 0:
+                expr_list = ['"' + entry + '"' for entry in query.node_ids]
+                expr.append(f"{MILVUS_ID_FIELD} in [{','.join(expr_list)}]")
+
+            outputs_limited = False
+            if query.output_fields is not None:
+                output_fields = query.output_fields
+                outputs_limited = True
+            elif len(self.output_fields) > 0:
+                output_fields = [*self.output_fields]
+                outputs_limited = True
+
+            if self.text_key and self.text_key not in output_fields and outputs_limited:
+                output_fields.append(self.text_key)
+
+            string_expr = ""
+            if len(expr) != 0:
+                string_expr = " and ".join(expr)
+
+            res = self._milvusclient.search(
+                collection_name=self.collection_name,
+                data=[query.query_embedding],
+                filter=string_expr,
+                limit=query.similarity_top_k,
+                output_fields=output_fields,
+                search_params=self.search_config,
+                anns_field=self.embedding_field,
+                partition_names=partition_names,
+            )
+            logger.debug(
+                "Successfully searched embedding in collection: %s Num Results: %d",
+                self.collection_name,
+                len(res[0]),
+            )
+
+            nodes = []
+            similarities = []
+            ids = []
+            for hit in res[0]:
+                if not self.text_key:
+                    node = metadata_dict_to_node(
+                        {
+                            "_node_content": hit["entity"].get("_node_content", None),
+                            "_node_type": hit["entity"].get("_node_type", None),
+                        }
+                    )
+                else:
+                    text = hit["entity"].get(self.text_key)
+                    metadata = {key: hit["entity"].get(key) for key in self.output_fields}
+                    node = TextNode(text=text, metadata=metadata)
+
+                nodes.append(node)
+                similarities.append(hit["distance"])
+                ids.append(hit["id"])
+
+            return VectorStoreQueryResult(nodes=nodes, similarities=similarities, ids=ids)
+
+    return PartitionedMilvusVectorStore
+
+
+def build_nl2sql_embedding(
+    backend: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    device: str = "cpu",
+    batch_size: int = 16,
+    normalize: bool = True,
+):
+    """按配置构建 NL2SQL embedding，默认使用本地离线 bge。"""
+    backend_value = (backend or "local_bge").strip().lower()
+    if backend_value in {"local_bge", "bge", "local"}:
+        return LocalBGELlamaEmbedding(
+            model_name=model or DEFAULT_LOCAL_BGE_MODEL,
+            device=device,
+            batch_size=batch_size,
+            normalize=normalize,
+        ).embedding
+    if backend_value in {"dashscope", "online"}:
+        return DashScopeLlamaEmbedding(
+            api_key=api_key,
+            base_url=base_url,
+            model=model or "text-embedding-v3",
+        ).embedding
+    raise RuntimeError(f"不支持的 NL2SQL embedding 后端: {backend_value}")
 
 
 class DashScopeLlamaLLM:
@@ -413,6 +659,9 @@ class NL2SQLTool:
     4. 执行验证：在数据库中执行并返回结果
     """
 
+    TABLE_PARTITION = "nl2sql_tables"
+    COLUMN_PARTITION = "nl2sql_columns"
+
     # 默认列索引配置：仅选择相对稳定、类别化程度高的字段
     COLUMN_INDEX_CONFIG: Dict[str, List[str]] = {
         "as_entity": [
@@ -473,10 +722,17 @@ class NL2SQLTool:
         self,
         postgres_url: str,
         allowed_tables: Optional[List[str]] = None,
+        milvus_host: str = "localhost",
+        milvus_port: int = 19530,
+        milvus_collection: str = "nl2sql_index",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: str = "qwen3-max-preview",
+        embedding_backend: str = "local_bge",
         embedding_model: Optional[str] = None,
+        embedding_device: str = "cpu",
+        embedding_batch_size: int = 2,
+        embedding_normalize: bool = True,
         index_cache_dir: Optional[Path] = None,
         enable_index_cache: bool = True,
         force_rebuild_cache: bool = False,
@@ -495,10 +751,22 @@ class NL2SQLTool:
         self.postgres_url = postgres_url
         self.allowed_tables = allowed_tables or []
         self.db = DatabaseClient(postgres_url) if postgres_url else None
+        self.milvus_host = str(milvus_host or "localhost")
+        self.milvus_port = int(milvus_port or 19530)
+        self.milvus_collection = str(milvus_collection or "nl2sql_index")
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
-        self.embedding_model = embedding_model or "text-embedding-v3"
+        self.embedding_backend = str(embedding_backend or "local_bge").strip().lower()
+        if embedding_model:
+            self.embedding_model = embedding_model
+        elif self.embedding_backend in {"local_bge", "bge", "local"}:
+            self.embedding_model = DEFAULT_LOCAL_BGE_MODEL
+        else:
+            self.embedding_model = "text-embedding-v3"
+        self.embedding_device = embedding_device or "cpu"
+        self.embedding_batch_size = max(1, int(embedding_batch_size))
+        self.embedding_normalize = bool(embedding_normalize)
         self.index_cache_dir = Path(index_cache_dir) if index_cache_dir else None
         self.enable_index_cache = enable_index_cache
         self.force_rebuild_cache = force_rebuild_cache
@@ -520,11 +788,15 @@ class NL2SQLTool:
             base_url=self.base_url or "",
             model=self.model,
         ).llm
-        self._embed_model = DashScopeLlamaEmbedding(
+        self._embed_model = build_nl2sql_embedding(
+            backend=self.embedding_backend,
             api_key=self.api_key or "",
             base_url=self.base_url or "",
             model=self.embedding_model,
-        ).embedding
+            device=self.embedding_device,
+            batch_size=self.embedding_batch_size,
+            normalize=self.embedding_normalize,
+        )
         try:
             from llama_index.core import Settings  # type: ignore
         except Exception as exc:
@@ -534,6 +806,7 @@ class NL2SQLTool:
         self._table_retriever_cache = None
         self._cols_retrievers_cache = None
         self._cache_signature = None
+        self._embedding_dim = 0
 
     def query(
         self,
@@ -610,6 +883,8 @@ class NL2SQLTool:
         _log_nl2sql("NL2SQL步骤 检索器准备耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
         step_time = time.monotonic()
+        # 注入自定义 text_to_sql_prompt，显式约束 PostgreSQL 标识符规则。
+        # NLSQLRetriever 在生成 SQL 时会自动注入这些上下文
         nlsql_retriever = NLSQLRetriever(
             sql_database=db,
             llm=llm,
@@ -623,6 +898,7 @@ class NL2SQLTool:
         _log_nl2sql("NL2SQL步骤 SQL生成器初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
         step_time = time.monotonic()
+        # 生成 SQL
         retrieved_nodes, metadata = nlsql_retriever.retrieve_with_metadata(question)
         sql_query = metadata.get("result") if isinstance(metadata, dict) else None
         if not sql_query and retrieved_nodes:
@@ -638,6 +914,7 @@ class NL2SQLTool:
         safe_sql, limit_info = guard.sanitize(sql_query or "")
 
         step_time = time.monotonic()
+        # 执行 SQL
         exec_result = self._execute(safe_sql)
         rows = [list(row) for row in exec_result.get("rows", [])]
         result_payload = {
@@ -714,12 +991,161 @@ class NL2SQLTool:
         """将 summary.md 的字段信息转为 NL2SQL 提示上下文。"""
         context: Dict[str, str] = {}
         for table, columns in self.table_schema.items():
+            # 基础字段清单始终保留，保证模型知道可用字段全集。
+            parts = [f"字段: {', '.join(columns)}"]
+
+            # 表级注释：来自 core_schema_comments.review.sql，提供表语义背景。
+            table_comment = TABLE_REVIEW_COMMENTS.get(table, "")
+            if table_comment:
+                parts.append(f"表说明: {table_comment}")
+
+            # 既有字段口径约束（如国家代码字段规范）。
             hint = TABLE_CONTEXT_HINTS.get(table, "")
             if hint:
-                context[table] = f"字段: {', '.join(columns)}。说明: {hint}"
-            else:
-                context[table] = f"字段: {', '.join(columns)}"
+                parts.append(f"字段约定: {hint}")
+
+            # 字段级注释：按当前表字段顺序拼接，辅助模型理解字段含义。
+            # 为避免 prompt 过长，仅保留前 24 个字段注释。
+            column_comments = COLUMN_REVIEW_COMMENTS.get(table, {})
+            if column_comments:
+                column_hint_items: List[str] = []
+                for column in columns:
+                    comment = column_comments.get(column, "")
+                    if comment:
+                        column_hint_items.append(f"{column}: {comment}")
+                if column_hint_items:
+                    parts.append(f"字段释义: {'；'.join(column_hint_items[:24])}")
+
+            context[table] = "。".join(parts)
         return context
+
+    def _milvus_uri(self) -> str:
+        # 统一转换为 MilvusClient 可识别的 URI。
+        return f"http://{self.milvus_host}:{self.milvus_port}"
+
+    def _resolve_embedding_dim(self, embed_model) -> int:
+        # 尝试从 embedding 实例推断维度，必要时触发一次向量化。
+        if self._embedding_dim > 0:
+            return self._embedding_dim
+        for attr in ("dimension", "embed_dim", "embedding_dimension", "dim"):
+            value = getattr(embed_model, attr, None)
+            if value is None:
+                continue
+            try:
+                dim = int(value() if callable(value) else value)
+            except Exception:
+                continue
+            if dim > 0:
+                self._embedding_dim = dim
+                return dim
+        try:
+            sample = embed_model.get_text_embedding("dimension")
+        except Exception as exc:
+            raise RuntimeError("无法推断 embedding 维度，请检查模型配置。") from exc
+        self._embedding_dim = len(sample)
+        return self._embedding_dim
+
+    def _milvus_collection_exists(self) -> bool:
+        try:
+            from pymilvus import connections, utility  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("缺少 pymilvus，无法检查 Milvus collection。") from exc
+        connections.connect(host=self.milvus_host, port=str(self.milvus_port))
+        return utility.has_collection(self.milvus_collection)
+
+    def _milvus_partition_exists(self, partition_name: str) -> bool:
+        try:
+            from pymilvus import Collection, connections, utility  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("缺少 pymilvus，无法检查 Milvus partition。") from exc
+        connections.connect(host=self.milvus_host, port=str(self.milvus_port))
+        if not utility.has_collection(self.milvus_collection):
+            return False
+        collection = Collection(self.milvus_collection)
+        try:
+            return collection.has_partition(partition_name)
+        except Exception:
+            return False
+
+    def _ensure_milvus_partition(self, partition_name: str) -> None:
+        try:
+            from pymilvus import Collection, connections, utility  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("缺少 pymilvus，无法创建 Milvus partition。") from exc
+        connections.connect(host=self.milvus_host, port=str(self.milvus_port))
+        if not utility.has_collection(self.milvus_collection):
+            return
+        collection = Collection(self.milvus_collection)
+        try:
+            if not collection.has_partition(partition_name):
+                collection.create_partition(partition_name)
+        except Exception:
+            # 分区创建失败时不阻断流程，让向量写入阶段报错提示。
+            return
+
+    def _drop_milvus_partition(self, partition_name: str) -> None:
+        try:
+            from pymilvus import Collection, connections, utility  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("缺少 pymilvus，无法清理 Milvus partition。") from exc
+        connections.connect(host=self.milvus_host, port=str(self.milvus_port))
+        if not utility.has_collection(self.milvus_collection):
+            return
+        collection = Collection(self.milvus_collection)
+        try:
+            if collection.has_partition(partition_name):
+                collection.drop_partition(partition_name)
+        except Exception:
+            return
+
+    def _create_milvus_vector_store(self, embed_model, overwrite: bool = False):
+        # 通过 LlamaIndex MilvusVectorStore 接入，保留向量检索一致性。
+        vector_store_cls = _resolve_partitioned_milvus_vector_store()
+        dim = self._resolve_embedding_dim(embed_model)
+        sig = inspect.signature(vector_store_cls.__init__)
+        kwargs: Dict[str, Any] = {}
+
+        def _set(key: str, value: Any) -> None:
+            if value is None:
+                return
+            if key in sig.parameters:
+                kwargs[key] = value
+
+        _set("collection_name", self.milvus_collection)
+        _set("collection", self.milvus_collection)
+        _set("dim", dim)
+        _set("overwrite", overwrite)
+        _set("uri", self._milvus_uri())
+        if "host" in sig.parameters:
+            _set("host", self.milvus_host)
+        if "port" in sig.parameters:
+            _set("port", str(self.milvus_port))
+        if "connection_args" in sig.parameters:
+            kwargs["connection_args"] = {"host": self.milvus_host, "port": str(self.milvus_port)}
+
+        vector_store = vector_store_cls(**kwargs)
+        # 确保 collection 已加载，避免首次检索报错。
+        try:
+            if hasattr(vector_store, "_collection"):
+                vector_store._collection.load()
+        except Exception:
+            pass
+        return vector_store
+
+    def _milvus_cache_ready(self, build_tables: bool, build_columns: bool) -> bool:
+        if not self._milvus_collection_exists():
+            return False
+        if build_tables and not self._milvus_partition_exists(self.TABLE_PARTITION):
+            return False
+        if build_columns and not self._milvus_partition_exists(self.COLUMN_PARTITION):
+            return False
+        return True
+
+    def _milvus_insert_kwargs(self, partition_name: str) -> Dict[str, Any]:
+        return {"partition_name": partition_name} if partition_name else {}
+
+    def _milvus_query_kwargs(self, partition_name: str) -> Dict[str, Any]:
+        return {"partition_names": [partition_name]} if partition_name else {}
 
     def prepare_index_cache(
         self,
@@ -729,7 +1155,7 @@ class NL2SQLTool:
         force: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """预构建 NL2SQL 的表/列检索索引，供服务启动前调用。"""
-        if not self.enable_index_cache or not self.index_cache_dir:
+        if not self.enable_index_cache:
             return {"status": "disabled"}
         if not self.postgres_url:
             raise RuntimeError("未配置 POSTGRES_URL，无法预构建索引。")
@@ -742,11 +1168,17 @@ class NL2SQLTool:
 
         signature = self._compute_schema_signature(table_names)
         force_rebuild = self.force_rebuild_cache if force is None else force
-        if not force_rebuild and self._is_cache_valid(signature) and self._cache_dirs_ready(build_tables, build_columns):
+        cache_ready = self._is_cache_valid(signature) and self._milvus_cache_ready(build_tables, build_columns)
+        if not force_rebuild and cache_ready:
             return {"status": "skipped", "signature": signature}
 
-        if force_rebuild:
-            self._clear_cache_dir()
+        if force_rebuild or not cache_ready:
+            if build_tables:
+                self._drop_milvus_partition(self.TABLE_PARTITION)
+            if build_columns:
+                self._drop_milvus_partition(self.COLUMN_PARTITION)
+            if force_rebuild:
+                self._clear_cache_dir()
 
         try:
             from llama_index.core import SQLDatabase, VectorStoreIndex  # type: ignore
@@ -774,7 +1206,6 @@ class NL2SQLTool:
                 table_node_mapping=table_node_mapping,
                 embed_model=embed_model,
                 vector_index_cls=VectorStoreIndex,
-                persist_dir=self._table_cache_dir(),
                 table_top_k=self.table_retriever_top_k,
             )
 
@@ -784,7 +1215,6 @@ class NL2SQLTool:
                 embed_model=embed_model,
                 text_node_cls=TextNode,
                 vector_index_cls=VectorStoreIndex,
-                persist_dir=self._columns_cache_dir(),
             )
 
         self._write_index_manifest(signature, table_names, build_columns=build_columns and self.enable_column_retrieval)
@@ -809,24 +1239,37 @@ class NL2SQLTool:
 
         table_retriever = None
         cols_retrievers = None
-        if self.enable_index_cache and self.index_cache_dir and not self.force_rebuild_cache:
-            if self._is_cache_valid(signature):
-                _log_nl2sql("NL2SQL检索器 尝试加载磁盘缓存 signature=%s dir=%s", signature, self.index_cache_dir)
-                table_retriever = self._load_table_retriever_from_cache(table_node_mapping, table_top_k)
+        cache_valid = self._is_cache_valid(signature)
+        if self.enable_index_cache and not self.force_rebuild_cache:
+            if cache_valid and self._milvus_cache_ready(True, enable_columns):
+                _log_nl2sql("NL2SQL检索器 尝试加载 Milvus 缓存 signature=%s", signature)
+                table_retriever = self._load_table_retriever_from_milvus(
+                    table_schema=table_schema,
+                    table_node_mapping=table_node_mapping,
+                    table_top_k=table_top_k,
+                    embed_model=embed_model,
+                )
                 if enable_columns:
-                    cols_retrievers = self._load_column_retrievers_from_cache(table_names)
+                    cols_retrievers = self._load_column_retrievers_from_milvus(
+                        table_names=table_names,
+                        embed_model=embed_model,
+                    )
                     if cols_retrievers is not None and not cols_retrievers:
                         _log_nl2sql("NL2SQL检索器 列索引缓存为空，将仅使用表索引")
                 if table_retriever and (not enable_columns or cols_retrievers is not None):
-                    _log_nl2sql("NL2SQL检索器 磁盘缓存加载成功")
+                    _log_nl2sql("NL2SQL检索器 Milvus 缓存加载成功")
                     self._table_retriever_cache = table_retriever
                     self._cols_retrievers_cache = cols_retrievers
                     self._cache_signature = signature
                     return table_retriever, cols_retrievers
-                _log_nl2sql("NL2SQL检索器 磁盘缓存加载失败，准备重建")
+                _log_nl2sql("NL2SQL检索器 Milvus 缓存加载失败，准备重建")
 
-        if self.enable_index_cache and self.index_cache_dir and self.force_rebuild_cache:
-            self._clear_cache_dir()
+        if self.enable_index_cache and (self.force_rebuild_cache or not cache_valid):
+            if self.force_rebuild_cache:
+                self._clear_cache_dir()
+            self._drop_milvus_partition(self.TABLE_PARTITION)
+            if enable_columns:
+                self._drop_milvus_partition(self.COLUMN_PARTITION)
 
         build_time = time.monotonic()
         table_retriever = self._build_table_retriever(
@@ -834,7 +1277,6 @@ class NL2SQLTool:
             table_node_mapping=table_node_mapping,
             embed_model=embed_model,
             vector_index_cls=vector_index_cls,
-            persist_dir=self._table_cache_dir() if self.enable_index_cache and self.index_cache_dir else None,
             table_top_k=table_top_k,
         )
         _log_nl2sql("NL2SQL检索器 表索引重建耗时=%dms", int((time.monotonic() - build_time) * 1000))
@@ -846,11 +1288,10 @@ class NL2SQLTool:
                 embed_model=embed_model,
                 text_node_cls=text_node_cls,
                 vector_index_cls=vector_index_cls,
-                persist_dir=self._columns_cache_dir() if self.enable_index_cache and self.index_cache_dir else None,
             )
             _log_nl2sql("NL2SQL检索器 列索引重建耗时=%dms", int((time.monotonic() - build_time) * 1000))
 
-        if self.enable_index_cache and self.index_cache_dir:
+        if self.enable_index_cache:
             self._write_index_manifest(signature, table_names, build_columns=enable_columns)
 
         self._table_retriever_cache = table_retriever
@@ -860,51 +1301,74 @@ class NL2SQLTool:
 
     def _build_table_retriever(
         self,
-        table_schema, # 表结构描述列表，每个表的结构信息，包括表名、字段列表和业务语义描述
-        table_node_mapping, # 表节点映射器， LlamaIndex的SQLTableNodeMapping，用于将表映射为节点
+        table_schema,  # 表结构描述列表，每个表的结构信息，包括表名、字段列表和业务语义描述
+        table_node_mapping,  # 表节点映射器， LlamaIndex 的 SQLTableNodeMapping
         embed_model,  # 嵌入模型
-        vector_index_cls, # 向量索引类
-        persist_dir: Optional[Path], 
+        vector_index_cls,  # 向量索引类
         table_top_k: int,
     ):
         # 基于表结构构建向量索引，支持“相关表”检索
         from llama_index.core.objects import ObjectIndex  # type: ignore
-
-        table_index = ObjectIndex.from_objects( 
+        from llama_index.core.storage.storage_context import StorageContext  # type: ignore
+        vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
+        self._ensure_milvus_partition(self.TABLE_PARTITION)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        table_index = ObjectIndex.from_objects(
             table_schema,
             table_node_mapping,
             vector_index_cls,
             embed_model=embed_model,
+            storage_context=storage_context,
+            partition_name=self.TABLE_PARTITION,
         )
-        if persist_dir:
-            persist_dir.mkdir(parents=True, exist_ok=True)
-            table_index.persist(persist_dir=str(persist_dir))
-        return table_index.as_retriever(similarity_top_k=table_top_k)
+        return table_index.as_retriever(
+            similarity_top_k=table_top_k,
+            **self._milvus_query_kwargs(self.TABLE_PARTITION),
+        )
 
-    def _load_table_retriever_from_cache(self, table_node_mapping, table_top_k: int):
-        if not self.index_cache_dir:
-            return None
-        table_dir = self._table_cache_dir()
-        if not table_dir or not table_dir.exists():
+    def _load_table_retriever_from_milvus(
+        self,
+        table_schema,
+        table_node_mapping,
+        table_top_k: int,
+        embed_model,
+    ):
+        if not self._milvus_partition_exists(self.TABLE_PARTITION):
             return None
         try:
+            from llama_index.core.indices.vector_store import VectorStoreIndex  # type: ignore
             from llama_index.core.objects import ObjectIndex  # type: ignore
-            table_index = ObjectIndex.from_persist_dir(str(table_dir), object_node_mapping=table_node_mapping)
-            return table_index.as_retriever(similarity_top_k=table_top_k)
+            vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
+            table_index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+            object_index = ObjectIndex.from_objects_and_index(
+                table_schema,
+                table_index,
+                object_mapping=table_node_mapping,
+            )
+            return object_index.as_retriever(
+                similarity_top_k=table_top_k,
+                **self._milvus_query_kwargs(self.TABLE_PARTITION),
+            )
         except Exception as exc:
             _log_nl2sql("NL2SQL检索器 表索引缓存加载异常=%s", exc)
             return None
 
-    def _load_column_retrievers_from_cache(self, table_names: List[str]) -> Optional[Dict[str, Dict[str, Any]]]:
-        if not self.index_cache_dir:
-            return None
-        columns_dir = self._columns_cache_dir()
-        if not columns_dir or not columns_dir.exists():
+    def _load_column_retrievers_from_milvus(
+        self,
+        table_names: List[str],
+        embed_model,
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        if not self._milvus_partition_exists(self.COLUMN_PARTITION):
             return None
         try:
-            from llama_index.core import StorageContext, load_index_from_storage  # type: ignore
-        except Exception:
+            from llama_index.core.indices.vector_store import VectorStoreIndex  # type: ignore
+            from llama_index.core.vector_stores.types import MetadataFilter, MetadataFilters  # type: ignore
+        except Exception as exc:
+            _log_nl2sql("NL2SQL检索器 列索引加载依赖异常=%s", exc)
             return None
+
+        vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
+        column_index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
 
         cols_retrievers: Dict[str, Dict[str, Any]] = {}
         for table_name in table_names:
@@ -913,23 +1377,22 @@ class NL2SQLTool:
                 continue
             table_retrievers: Dict[str, Any] = {}
             for column_name in column_names:
-                index_dir = columns_dir / table_name / column_name
-                if not index_dir.exists():
-                    _log_nl2sql("NL2SQL检索器 列索引目录缺失 table=%s column=%s", table_name, column_name)
-                    continue
-                try:
-                    storage_context = StorageContext.from_defaults(persist_dir=str(index_dir))
-                    index = load_index_from_storage(storage_context)
-                    table_retrievers[column_name] = index.as_retriever(
-                        similarity_top_k=self.column_retriever_top_k
-                    )
-                except Exception as exc:
-                    _log_nl2sql("NL2SQL检索器 列索引加载异常 table=%s column=%s error=%s", table_name, column_name, exc)
-                    continue
+                filters = MetadataFilters(
+                    filters=[
+                        MetadataFilter(key="table", value=table_name),
+                        MetadataFilter(key="column", value=column_name),
+                    ]
+                )
+                retriever = column_index.as_retriever(
+                    similarity_top_k=self.column_retriever_top_k,
+                    filters=filters,
+                    **self._milvus_query_kwargs(self.COLUMN_PARTITION),
+                )
+                table_retrievers[column_name] = retriever
             if table_retrievers:
                 cols_retrievers[table_name] = table_retrievers
 
-        return cols_retrievers
+        return cols_retrievers or None
 
     def _compute_schema_signature(self, table_names: List[str]) -> str:
         """基于表结构与列配置生成稳定签名。"""
@@ -938,32 +1401,22 @@ class NL2SQLTool:
             "tables": tables,
             "schema": {t: self.table_schema.get(t, []) for t in tables},
             "context": {t: TABLE_CONTEXT_HINTS.get(t, "") for t in tables},
+            "table_review_comments": {t: TABLE_REVIEW_COMMENTS.get(t, "") for t in tables},
+            "column_review_comments": {
+                t: {c: COLUMN_REVIEW_COMMENTS.get(t, {}).get(c, "") for c in self.table_schema.get(t, [])}
+                for t in tables
+            },
             "column_index_config": {t: self.column_index_config.get(t, []) for t in tables},
             "column_index_max_values": self.column_index_max_values,
             "column_index_max_value_length": self.column_index_max_value_length,
+            "embedding_backend": self.embedding_backend,
             "embedding_model": self.embedding_model,
+            "embedding_device": self.embedding_device,
+            "embedding_batch_size": self.embedding_batch_size,
+            "embedding_normalize": self.embedding_normalize,
         }
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()
-
-    def _cache_dirs_ready(self, build_tables: bool, build_columns: bool) -> bool:
-        if not self.index_cache_dir:
-            return False
-        if build_tables and not self._table_cache_dir().exists():
-            return False
-        if build_columns and not self._columns_cache_dir().exists():
-            return False
-        return True
-
-    def _table_cache_dir(self) -> Optional[Path]:
-        if not self.index_cache_dir:
-            return None
-        return self.index_cache_dir / "tables"
-
-    def _columns_cache_dir(self) -> Optional[Path]:
-        if not self.index_cache_dir:
-            return None
-        return self.index_cache_dir / "columns"
 
     def _manifest_path(self) -> Optional[Path]:
         if not self.index_cache_dir:
@@ -987,6 +1440,11 @@ class NL2SQLTool:
             "schema_signature": signature,
             "tables": sorted(table_names),
             "build_columns": build_columns,
+            "collection": self.milvus_collection,
+            "partitions": {
+                "tables": self.TABLE_PARTITION,
+                "columns": self.COLUMN_PARTITION,
+            },
             "updated_at": datetime.utcnow().isoformat(),
         }
         manifest_path = self._manifest_path()
@@ -997,7 +1455,12 @@ class NL2SQLTool:
         manifest = self._load_index_manifest()
         if not manifest:
             return False
-        return manifest.get("schema_signature") == signature
+        if manifest.get("schema_signature") != signature:
+            return False
+        manifest_collection = manifest.get("collection")
+        if manifest_collection and manifest_collection != self.milvus_collection:
+            return False
+        return True
 
     def _clear_cache_dir(self) -> None:
         if not self.index_cache_dir or not self.index_cache_dir.exists():
@@ -1021,19 +1484,20 @@ class NL2SQLTool:
         embed_model,
         text_node_cls,
         vector_index_cls,
-        persist_dir: Optional[Path] = None,
     ) -> Optional[Dict[str, Dict[str, Any]]]:
         """构建列级检索器：按列索引去重后的离散取值。"""
         if not self.db:
             return None
         try:
             from sqlalchemy import MetaData, Table, select  # type: ignore
+            from llama_index.core.vector_stores.types import MetadataFilter, MetadataFilters  # type: ignore
         except Exception as exc:
             raise RuntimeError("未安装 SQLAlchemy，无法构建列索引。") from exc
 
         engine = self.db.get_engine()
         metadata = MetaData()
         cols_retrievers: Dict[str, Dict[str, Any]] = {}
+        all_nodes: List[Any] = []
 
         for table_name in table_names:
             # 根据配置选择“稳定且可枚举”的列来构建向量检索
@@ -1058,16 +1522,39 @@ class NL2SQLTool:
                 )
                 if not nodes:
                     continue
-                column_index = vector_index_cls(nodes, embed_model=embed_model)
-                if persist_dir:
-                    index_dir = persist_dir / table_name / column_name
-                    index_dir.mkdir(parents=True, exist_ok=True)
-                    column_index.storage_context.persist(persist_dir=str(index_dir))
-                table_retrievers[column_name] = column_index.as_retriever(
-                    similarity_top_k=self.column_retriever_top_k
-                )
+                all_nodes.extend(nodes)
+                table_retrievers[column_name] = None
             if table_retrievers:
                 cols_retrievers[table_name] = table_retrievers
+
+        if not cols_retrievers or not all_nodes:
+            return None
+
+        from llama_index.core.storage.storage_context import StorageContext  # type: ignore
+        vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
+        self._ensure_milvus_partition(self.COLUMN_PARTITION)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        column_index = vector_index_cls(
+            all_nodes,
+            embed_model=embed_model,
+            storage_context=storage_context,
+            partition_name=self.COLUMN_PARTITION,
+        )
+        query_kwargs = self._milvus_query_kwargs(self.COLUMN_PARTITION)
+
+        for table_name, table_retrievers in cols_retrievers.items():
+            for column_name in list(table_retrievers.keys()):
+                filters = MetadataFilters(
+                    filters=[
+                        MetadataFilter(key="table", value=table_name),
+                        MetadataFilter(key="column", value=column_name),
+                    ]
+                )
+                table_retrievers[column_name] = column_index.as_retriever(
+                    similarity_top_k=self.column_retriever_top_k,
+                    filters=filters,
+                    **query_kwargs,
+                )
 
         return cols_retrievers or None
 

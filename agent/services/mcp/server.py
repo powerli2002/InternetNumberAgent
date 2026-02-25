@@ -14,7 +14,7 @@ from agent.core.tracing import LangSmithTracer
 from agent.tools.neo4j_query_tool import Neo4jQueryTool
 from agent.tools.nl2sql_tool import NL2SQLTool
 from agent.tools.note_tool import NoteTool
-from agent.tools.rag_tool import DashScopeEmbedding, RAGTool
+from agent.tools.rag_tool import RAGTool, build_rag_embedding
 from agent.tools.todo_tool import TodoTool
 
 
@@ -37,10 +37,17 @@ class _MCPRuntime:
         self.nl2sql_tool = NL2SQLTool(
             postgres_url=self.config.postgres_url or "",
             allowed_tables=self.config.allowed_tables,
+            milvus_host=self.config.milvus_host,
+            milvus_port=self.config.milvus_port,
+            milvus_collection=self.config.nl2sql_vector_collection,
             api_key=self.config.dashscope_api_key,
             base_url=self.config.dashscope_base_url,
             model=self.config.dashscope_model,
-            embedding_model=self.config.dashscope_embedding_model,
+            embedding_backend=self.config.nl2sql_embedding_backend,
+            embedding_model=self.config.nl2sql_embedding_model,
+            embedding_device=self.config.nl2sql_embedding_device,
+            embedding_batch_size=self.config.nl2sql_embedding_batch_size,
+            embedding_normalize=self.config.nl2sql_embedding_normalize,
             index_cache_dir=self.config.nl2sql_index_cache_dir,
             enable_index_cache=self.config.nl2sql_index_cache_enabled,
             force_rebuild_cache=self.config.nl2sql_index_cache_force_rebuild,
@@ -53,11 +60,11 @@ class _MCPRuntime:
             host=self.config.milvus_host,
             port=self.config.milvus_port,
             collection_name=self.config.vector_collection,
-            embedding=DashScopeEmbedding(
-                api_key=self.config.dashscope_api_key or "",
-                base_url=self.config.dashscope_base_url,
-                model=self.config.dashscope_embedding_model,
-            ),
+            embedding=build_rag_embedding(self.config),
+            enable_mqe=self.config.rag_enable_mqe,
+            mqe_max_queries=self.config.rag_mqe_max_queries,
+            candidate_multiplier=self.config.rag_candidate_multiplier,
+            rrf_k=self.config.rag_rrf_k,
         )
         self.graph_tool = Neo4jQueryTool(
             uri=self.config.neo4j_uri,

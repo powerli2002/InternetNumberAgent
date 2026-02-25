@@ -417,7 +417,7 @@ asn,v4Peer,sibling_as
 4134,"[174, 209, 3356, 7018]","[4809, 4811]"
 ```
 
-导入流程（`scripts/load_all_csv.py` 核心逻辑）：
+导入流程（`agent/scripts/load_all_csv.py` 核心逻辑）：
 
 ```python
 import ast

@@ -163,7 +163,7 @@ COMMENT ON COLUMN public."ip_rdap_entity"."org_name" IS '组织名称（英文�
 COMMENT ON COLUMN public."ip_rdap_entity"."org_name_cn" IS '组织名称中文翻译.(示例: {text:APNIC研究与开发})';
 COMMENT ON COLUMN public."ip_rdap_entity"."org_uuid" IS '组织UUID（org uuid，跨表关联键）.(示例: {text:556581e1de0d52468cf0210e64ef4991})';
 
-COMMENT ON TABLE public."ip_route_entity" IS 'IPv4 WHOIS route 对象表（route/origin/mnt-by 等）。';
+COMMENT ON TABLE public."ip_route_entity" IS 'IPv4 WHOIS 路由 对象表（route/origin/mnt-by 等）。';
 COMMENT ON COLUMN public."ip_route_entity"."CIDR" IS 'WHOIS route 对象前缀.(示例: {text:202.36.121.0/24})';
 COMMENT ON COLUMN public."ip_route_entity"."descr" IS '对象描述.(示例: {text:Internet ProLink NZ Limited|PO Box 91235|Auckland|New Zealand})';
 COMMENT ON COLUMN public."ip_route_entity"."origin" IS 'WHOIS route 对象的源AS.(示例: {text:6831})';

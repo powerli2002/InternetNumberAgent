@@ -18,6 +18,7 @@ langgraph
 langgraph-cli
 llama-index
 llama-index-llms-openai
+llama-index-vector-stores-milvus>=0.2.0,<0.3.0
 sqlalchemy
 pymilvus
 python-dotenv
@@ -26,3 +27,5 @@ socksio
 langsmith
 python-docx
 fastmcp
+markitdown
+sentence-transformers

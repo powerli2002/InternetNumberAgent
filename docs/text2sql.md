@@ -12,7 +12,7 @@
 - `agent/core/schema.py`
 - `agent/runtime/fusion_agent.py`
 - `agent/core/config.py`
-- `scripts/build_nl2sql_indexes.py`
+- `agent/scripts/build_nl2sql_indexes.py`
 
 ---
 
@@ -23,7 +23,7 @@
 **默认可用表**由 `AgentConfig.allowed_tables` 指定：
 `as_entity / asn_entity / country_entity / industry_entity / ip_bgp_entity / ip_inetnum_entity / ip_rdap_entity / ip_route_entity / ipv4_entity / ipv6_bgp_entity / ipv6_entity / ipv6_inetnum_entity / ipv6_rdap_entity / ipv6_route_entity / org_entity / website_entity`
 
-**结构化表的统一 DDL**位于 `database/core_schema.sql`，导入时由 `scripts/load_all_csv.py` 自动应用，确保 NL2SQL 与数据一致。
+**结构化表的统一 DDL**位于 `database/core_schema.sql`，导入时由 `agent/scripts/load_all_csv.py` 自动应用，确保 NL2SQL 与数据一致。
 
 ---
 
@@ -34,8 +34,8 @@
 建议先执行统一 DDL，再导入 CSV：
 
 ```bash
-python scripts/ensure_core_schema.py --config conf/config.docker.yaml --root .
-python scripts/load_all_csv.py --config conf/config.docker.yaml --root . --ensure-core
+python -m agent.scripts.ensure_core_schema --config conf/config.docker.yaml --root .
+python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --ensure-core
 ```
 
 ### 2.2 环境变量（conf/.env）
@@ -45,6 +45,15 @@ POSTGRES_URL=postgresql+psycopg2://user:pwd@host:5432/fusionprocessing
 DASHSCOPE_API_KEY=sk-xxxx
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_MODEL=qwen3-max-preview
+
+# NL2SQL embedding（默认本地离线）
+NL2SQL_EMBEDDING_BACKEND=local_bge
+NL2SQL_EMBEDDING_MODEL=BAAI/bge-m3
+NL2SQL_EMBEDDING_DEVICE=cpu
+NL2SQL_EMBEDDING_BATCH_SIZE=16
+NL2SQL_EMBEDDING_NORMALIZE=true
+
+# 仅在 NL2SQL_EMBEDDING_BACKEND=dashscope 时使用
 DASHSCOPE_EMBEDDING_MODEL=text-embedding-v3
 
 # NL2SQL 安全控制
@@ -141,19 +150,20 @@ values = select(column).distinct().limit(column_index_max_values)
 
 ## 7. 索引缓存与预热
 
-NL2SQL 的表/列索引会缓存到磁盘，避免每次启动重建。
+NL2SQL 的表/列索引持久化在 Milvus（单 collection + 分区），本地仅保留轻量 manifest，避免每次启动重建。
 
 配置入口：
-- `AgentConfig.nl2sql_index_cache_dir`
+- `AgentConfig.nl2sql_index_cache_dir`（manifest）
+- `NL2SQL_VECTOR_COLLECTION`
 - `NL2SQL_INDEX_CACHE_ENABLED`
 - `NL2SQL_INDEX_CACHE_FORCE_REBUILD`
 
 手动预构建：
 
 ```bash
-python scripts/build_nl2sql_indexes.py
+python -m agent.scripts.build_nl2sql_indexes
 # 或仅构建表索引
-python scripts/build_nl2sql_indexes.py --skip-columns
+python -m agent.scripts.build_nl2sql_indexes --skip-columns
 ```
 
 ---
