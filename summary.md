@@ -18,24 +18,23 @@
 
 ### 1.1 智能体目录分层（2026-02-06）
 
-为降低耦合并统一工程规范，`agent/` 目录已按分层组织，并在 2026-02-06 完成 **MCP + A2A** 升级：
+为降低耦合并统一工程规范，`agent/` 目录已按分层组织，并在 2026-02-25 完成 **LangGraph + MCP** 升级：
 
 - `agent/core/`：配置、模型、提示词、LLM、追踪、Schema
-- `agent/runtime/`：FusionAgent 运行时编排与主路由协议
-- `agent/interfaces/http/`：FastAPI 接口与线程消息存储
-- `agent/interfaces/mcp/`：FastMCP 服务入口
-- `agent/interfaces/a2a/`：A2A Worker 服务入口
-- `agent/mcp/`：MCP 工具服务与客户端
-- `agent/protocols/a2a/`：A2A 协议模型与客户端
-- `agent/workers/`：A2A Worker 执行器
+- `agent/runtime/`：FusionAgent 运行时编排（LangGraph 主图）
+- `agent/services/http/`：FastAPI 接口与线程消息存储
+- `agent/services/mcp/`：FastMCP 工具服务与客户端
 - `agent/cli/`：命令行入口
 
 当前统一入口：
 
-- MCP：`uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032`
-- A2A：`uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031`
-- API：`uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025`
+- MCP：`uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032`
+- API：`uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025`
 - CLI：`python -m agent.cli.main --once "你的问题"`
+
+本地向量化实现已统一为 `HuggingFaceEmbedding`（RAG/NL2SQL 共用实现口径），但 Milvus 集合保持分离：`fusion_docs`（RAG）与 `nl2sql_index`（NL2SQL）。
+
+图查询链路当前默认使用 `neo4j_llamaindex_query`：由 MCP 工具内部通过 LlamaIndex 读取 Neo4j schema、生成 Cypher 并执行；主编排不再预先生成 Cypher。
 
 ---
 

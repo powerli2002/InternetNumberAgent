@@ -2,24 +2,23 @@
 
 本指南说明如何将 LangChain 的 Agent Chat UI 接入当前“互联网号码资源问答系统”。系统已提供 LangGraph 兼容 API（`agent/services/http/server.py`），前端只需指向该 API 即可。
 
-## 1. 启动后端服务（MCP + A2A + API）
+## 1. 启动后端服务（MCP + API）
 
 方式一：本机运行
 
 ```bash
 uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
-uvicorn agent.services.a2a.server:app --host 0.0.0.0 --port 2031
 uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
 ```
 
 方式二：Docker Compose
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d agent-mcp agent-a2a agent-api
+docker compose -f docker/docker-compose.yml up -d agent-mcp agent-api
 ```
 
 > API 默认监听 `http://localhost:2025`，并提供 LangGraph 风格的 `/threads`、`/threads/search`、`/threads/{id}/runs/stream` 等端点。  
-> 其中 API 依赖 `MCP_SERVER_URL`（默认 `http://localhost:2032/mcp`）和 `A2A_SERVER_URL`（默认 `http://localhost:2031/a2a`）。
+> 其中 API 依赖 `MCP_SERVER_URL`（默认 `http://localhost:2032/mcp`）。
 
 ## 2. 克隆并运行 Agent Chat UI
 

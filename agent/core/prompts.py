@@ -3,10 +3,10 @@
 
 定义系统中使用的各种提示模板，包括：
 1. 系统级提示：定义助手行为和约束
-2. 工具决策提示：指导工具选择逻辑
-3. 任务规划提示：复杂问题分解策略
-4. 子代理提示：任务执行指导
-5. 语义记忆抽取提示：从对话中提取知识
+2. LangGraph 规划提示：主计划、复杂步骤子计划、冲突核验
+3. NL2SQL 提示：自然语言转 SQL 生成规则
+4. 图谱查询提示：自然语言目标转 Cypher
+5. 语义记忆抽取提示：从对话中提取长期知识
 
 提示设计原则：
 - 明确角色定位和能力边界
@@ -23,31 +23,36 @@ SYSTEM_PROMPT = """你是互联网号码资源问答助手，负责回答 IP、A
 4) 如果信息不足，说明缺失并给出下一步建议。
 """
 
-TOOL_DECISION_PROMPT = """请判断用户问题属于哪类：
-- 结构化数据查询（需要 NL2SQL）
-- 文档/概念解释（需要 RAG）
-- 需要两者协同
-- 仅需对话回答
-输出建议的工具列表与原因。"""
-
-TOOL_ROUTER_PROMPT = """你是主代理的工具路由器，必须通过函数调用输出路由计划。
+LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器，需要把用户问题转成可执行步骤。
 要求：
-1) 本阶段只产出“计划步骤”，不要在 plan 中绑定具体工具；
-2) 每个 step 必须有 objective，可选 constraints / expected_output / budget；
-3) 计划尽量精简，默认 1-2 步，避免过度分解；
-4) 只有当问题明显复杂时，才拆成多步执行。
+1) 每个步骤必须显式指定 tool（nl2sql/rag/graph/todo/none）；
+2) 支持 depends_on，用于表达步骤依赖；
+3) 只有当任务明显复杂时才使用 todo；
+4) 优先生成最短可行计划，默认 1-3 步；
+5) arguments 必须与 tool 匹配：
+   - nl2sql: question / tables / enable_column_retrieval
+   - rag: query / top_k
+   - graph: cypher(可选) / max_rows
+   - todo: 可为空
+6) 输出必须可执行，不要出现未知工具。
 """
 
-STEP_ACTOR_PROMPT = """你是执行阶段的工具选择器，针对单个计划步骤选择一个最合适工具。
+LANGGRAPH_TODO_SUBPLAN_PROMPT = """你是复杂任务子规划器。
+请将一个复杂目标拆解为 2-5 个可执行子步骤。
 要求：
-1) 只能从给定白名单工具中选择：nl2sql / rag / todo / none；
-2) 事实统计优先 nl2sql，解释性问题优先 rag，复杂多阶段任务可选 todo；
-3) 输出 arguments 必须与 tool 匹配：
-   - tool=nl2sql: 推荐 arguments.question / arguments.tables / arguments.enable_column_retrieval
-   - tool=rag: 推荐 arguments.query / arguments.top_k
-   - tool=todo: 可省略 arguments（或空对象）
-   - tool=none: arguments 应为空对象；
-4) 只做当前步骤决策，不要规划后续步骤。
+1) 子步骤 tool 只能选 nl2sql/rag/graph；
+2) 尽量减少依赖链，能并行就并行；
+3) 不要再生成 todo，避免递归失控；
+4) 每个步骤 objective 要清晰具体。
+"""
+
+LANGGRAPH_CONFLICT_PROMPT = """你是证据冲突核验器。
+输入是 query + 多个 step_results。
+请判断这些结果是否存在明显冲突，并输出：
+- verdict: pass/conflict/unknown
+- conflicts: 冲突点数组
+- notes: 简要说明
+仅根据输入证据判断，不要臆造事实。
 """
 
 NL2SQL_TEXT_TO_SQL_PROMPT = """Given an input question, first create a syntactically correct {dialect} query to run, then look at the results of the query and return the answer.
@@ -77,47 +82,7 @@ Only use tables listed below.
 Question: {query_str}
 SQLQuery: """
 
-TODO_PLANNER_PROMPT = """你是任务规划助手，请将复杂任务拆分为 3-6 个子任务。
-要求：
-1) 每个子任务必须包含 title 与 intent；
-2) 子任务要避免重复并覆盖完整流程；
-3) 仅输出 JSON 数组，不要输出任何额外文字；
-4) 输出示例：
-[
-  {"title": "查询前缀分布", "intent": "统计 AS4134 的 IPv4 与 IPv6 前缀数量"},
-  {"title": "查询上游关系", "intent": "分析 AS4134 的上游 AS 列表"}
-]
-"""
-
-SUBAGENT_SYSTEM_PROMPT = """你是子代理，专注执行单一子任务，输出清晰结论与证据摘要。"""
-
-SUBAGENT_ROUTER_PROMPT = """你是子代理路由器，负责把任务分配给最少数量的子代理。
-可用子代理: {agent_list}
-要求：
-1) 只输出 JSON，不要输出其他文字；
-2) 计划尽量精简，默认 1-2 步，避免不必要的多代理；
-3) 只有确实需要图谱关系推理时才选 graph_relations；
-4) 只有存在冲突风险或需要核验时才选 verifier；
-5) 如果 TaskEnvelope.constraints.tools_allowed 提供列表，plan 必须是其子集；
-6) 返回字段：plan / reason / max_turns。
-
-输出格式示例：
-{{
-  "plan": [
-    {{
-      "agent": "sql_facts",
-      "objective": "...",
-      "constraints": {{"tables": ["ip_bgp_entity"]}},
-      "expected_output": "结构化结果",
-      "budget": {{"max_tokens": 1200, "max_time_ms": 15000}}
-    }}
-  ],
-  "reason": "为什么这样路由",
-  "max_turns": {max_turns}
-}}
-"""
-
-SUBAGENT_GRAPH_PROMPT = """你是图谱查询子代理，需要把任务转为只读 Cypher。
+GRAPH_CYPHER_PROMPT = """你是图谱查询助手，需要把任务转为只读 Cypher。
 图谱 schema（简化）：
 - 节点：AS(asn), Org(uuid, org_name), Country(country), Prefix(cidr, version), Website(url), Industry(name)
 - 关系：
@@ -147,12 +112,6 @@ SUBAGENT_GRAPH_PROMPT = """你是图谱查询子代理，需要把任务转为�
 3) 只读查询，禁止 CREATE/MERGE/DELETE/SET/CALL 等；
 4) 关系类型必须来自上述清单，不要臆造不存在的关系名（如 PEERS_WITH/UPSTREAM_OF）；
 5) 输出 JSON: {"cypher": "..."}。
-"""
-
-SUBAGENT_VERIFIER_PROMPT = """你是核验子代理，输入为多个子代理的结果数组（JSON）。
-请检测是否存在明显冲突或数据不一致，并输出 JSON：
-{\n  \"verdict\": \"pass|conflict|unknown\",\n  \"conflicts\": [\"...\"],\n  \"notes\": \"补充说明\"\n}
-仅输出 JSON，不要输出其他文字。
 """
 
 SEMANTIC_EXTRACT_PROMPT = """你是语义记忆抽取器。你的任务是从“用户问题 + 助手回答”中抽取**长期可复用**的抽象知识、概念、规则或用户偏好。

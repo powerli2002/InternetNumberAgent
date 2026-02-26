@@ -107,9 +107,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="qwen-turbo", help="覆盖 LLM 模型名。")
     parser.add_argument(
         "--embedding-backend",
-        choices=["local_bge", "dashscope"],
+        choices=["local_bge"],
         default="local_bge",
-        help="embedding 后端。",
+        help="embedding 后端（固定 local_bge，不支持百炼 embedding）。",
     )
     parser.add_argument(
         "--embedding-model",
@@ -166,7 +166,6 @@ def main() -> int:
         allowed_tables=allowed_tables,
         milvus_host=str(args.milvus_host or DEFAULT_MILVUS_HOST),
         milvus_port=int(args.milvus_port or DEFAULT_MILVUS_PORT),
-        visualize_pipeline=False,
         enable_column_retrieval=bool(args.column_retrieval),
         max_rows=cfg.nl2sql_max_rows,
         statement_timeout_ms=cfg.nl2sql_statement_timeout_ms,

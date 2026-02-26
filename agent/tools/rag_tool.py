@@ -135,7 +135,7 @@ class LocalBGEEmbedding(EmbeddingProvider):
                 if cached_snapshot:
                     self._resolved_model_path = cached_snapshot
                     return self._resolved_model_path
-                # 下载失败时回退到 sentence-transformers 默认加载逻辑，保留原始报错信息。
+                # 下载失败时回退到 HuggingFaceEmbedding 默认加载逻辑，保留原始报错信息。
                 pass
         self._resolved_model_path = self.model_name
         return self._resolved_model_path
@@ -146,7 +146,7 @@ class LocalBGEEmbedding(EmbeddingProvider):
 
         设计目的：
         - 当镜像地址异常或离线时，若本机已缓存模型，则直接复用；
-        - 避免再次触发 sentence-transformers 的在线下载逻辑。
+        - 避免再次触发 HuggingFaceEmbedding 的在线下载逻辑。
         """
         repo = self.model_name.strip().replace("/", "--")
         if not repo:
@@ -170,30 +170,33 @@ class LocalBGEEmbedding(EmbeddingProvider):
         if self._model is not None:
             return
         try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
+            from llama_index.embeddings.huggingface import HuggingFaceEmbedding  # type: ignore
         except Exception as exc:
             raise RuntimeError(
-                "缺少 sentence-transformers，无法使用本地 bge embedding。"
-                "请先执行: pip install sentence-transformers"
+                "缺少 llama-index-embeddings-huggingface，无法使用本地 bge embedding。"
+                "请先安装相关依赖。"
             ) from exc
 
         model_ref = self._resolve_model_path()
-        # 仅加载本地模型，不依赖在线 embedding API。
-        self._model = SentenceTransformer(model_ref, device=self.device)
-        dim = self._model.get_sentence_embedding_dimension()
-        self._dim = int(dim) if dim else 0
+        # 统一使用 HuggingFaceEmbedding，减少不同模块间 embedding 行为差异。
+        kwargs: Dict[str, Any] = {
+            "model_name": model_ref,
+            "device": self.device,
+            "embed_batch_size": self.batch_size,
+            "normalize": self.normalize,
+            "show_progress_bar": False,
+        }
+        if str(self.device).lower().startswith("cuda"):
+            # 限制最大长度，避免超长文本在 GPU 场景下触发显存放大。
+            kwargs["max_length"] = 512
+        self._model = HuggingFaceEmbedding(**kwargs)
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
         self._ensure_model()
         assert self._model is not None
-        vectors = self._model.encode(
-            texts,
-            batch_size=self.batch_size,
-            normalize_embeddings=self.normalize,
-            show_progress_bar=False,
-        )
+        vectors = self._model.get_text_embedding_batch(texts)
         outputs: List[List[float]] = []
         for vector in vectors:
             outputs.append([float(x) for x in vector])
@@ -349,10 +352,10 @@ class RAGTool:
         }
 
     def search(self, query: str, top_k: int = 5) -> List[DocumentChunk]:
-        self._collection = self._connect()
         cleaned_query = query.strip()
         if not cleaned_query:
             return []
+        self._collection = self._connect()
         top_k = max(1, int(top_k))
 
         if not self.enable_mqe:

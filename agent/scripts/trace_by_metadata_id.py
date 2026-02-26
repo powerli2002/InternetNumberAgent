@@ -4,8 +4,8 @@
 
 功能：
 1. 从指定项目读取最近一段时间内的 runs。
-2. 使用 metadata.trace_id 过滤关联 runs（跨 fusion/mcp/a2a）。
-3. 输出工具计划（tool_router/subagent_router）、时间线、错误摘要。
+2. 使用 metadata.trace_id 过滤关联 runs（跨 langgraph/mcp）。
+3. 输出计划节点（graph_node:plan）、时间线、错误摘要。
 4. 可选输出关键节点的输入输出预览，便于定位问题。
 """
 
@@ -84,6 +84,12 @@ def _extract_plan_payload(run: Any) -> Optional[Dict[str, Any]]:
     outputs = getattr(run, "outputs", None)
     if not isinstance(outputs, dict):
         return None
+    # LangGraph 新版追踪：plan/reason 直接挂在 outputs 顶层
+    if isinstance(outputs.get("plan"), list):
+        return {
+            "plan": outputs.get("plan", []),
+            "reason": outputs.get("reason", ""),
+        }
     payload = outputs.get("payload")
     if isinstance(payload, dict) and isinstance(payload.get("plan"), list):
         return payload
@@ -119,9 +125,9 @@ def _collect_runs(client: Client, project: str, limit: int, since_hours: float) 
 
 
 def _print_plan_section(runs: List[Any]) -> None:
-    plan_runs = [run for run in runs if run.name in {"tool_router", "subagent_router"}]
+    plan_runs = [run for run in runs if str(getattr(run, "name", "")).startswith("graph_node:plan")]
     if not plan_runs:
-        print("未发现 tool_router/subagent_router 计划节点。")
+        print("未发现 graph_node:plan 计划节点。")
         return
     for run in sorted(plan_runs, key=_extract_start_time):
         payload = _extract_plan_payload(run)
@@ -171,11 +177,10 @@ def _print_errors(runs: List[Any]) -> None:
 
 def _print_io_preview(runs: List[Any], io_limit: int) -> None:
     important_prefixes = (
-        "tool_router",
-        "subagent_router",
+        "graph_node:",
+        "langgraph_agent",
         "mcp_tool:",
         "mcp_server:",
-        "a2a_",
     )
     for run in sorted(runs, key=_extract_start_time):
         name = str(getattr(run, "name", ""))

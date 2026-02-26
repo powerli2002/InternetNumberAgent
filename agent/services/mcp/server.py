@@ -11,6 +11,7 @@ from fastmcp import FastMCP
 from agent.core.config import AgentConfig
 from agent.core.models import TodoItem
 from agent.core.tracing import LangSmithTracer
+from agent.tools.neo4j_llamaindex_tool import Neo4jLlamaIndexTool
 from agent.tools.neo4j_query_tool import Neo4jQueryTool
 from agent.tools.nl2sql_tool import NL2SQLTool
 from agent.tools.note_tool import NoteTool
@@ -73,6 +74,18 @@ class _MCPRuntime:
             max_rows=self.config.graph_max_rows,
             max_cypher_length=self.config.graph_max_cypher_length,
         )
+        self.graph_llamaindex_tool = Neo4jLlamaIndexTool(
+            uri=self.config.neo4j_uri,
+            user=self.config.neo4j_user,
+            password=self.config.neo4j_password,
+            api_key=self.config.dashscope_api_key or "",
+            base_url=self.config.dashscope_base_url,
+            model=self.config.dashscope_model,
+            database=self.config.neo4j_database,
+            max_rows=self.config.graph_max_rows,
+            max_cypher_length=self.config.graph_max_cypher_length,
+            refresh_schema_each_query=self.config.graph_refresh_schema_each_query,
+        )
         self.note_tool = NoteTool(self.config.notes_dir)
         self.todo_tool = TodoTool(self.config.project_root / "agent" / "todo.json")
 
@@ -82,7 +95,7 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
     cfg = config or AgentConfig.load()
     tracer = LangSmithTracer()
     runtime = _MCPRuntime(cfg)
-    mcp = FastMCP(name="fusion-tools", instructions="Fusion 工具层（NL2SQL / RAG / Neo4j / Note / Todo）")
+    mcp = FastMCP(name="fusion-tools", instructions="Fusion 工具层（NL2SQL / RAG / Neo4j/Cypher / Neo4j-LlamaIndex / Note / Todo）")
 
     def _trace_tool(name: str, trace_id: str, inputs: Dict[str, Any], fn):
         run_ctx = (
@@ -168,6 +181,20 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
             "neo4j_query",
             trace_id,
             {"cypher": cypher, "max_rows": max_rows},
+            _run,
+        )
+
+    @mcp.tool
+    def neo4j_llamaindex_query(question: str, max_rows: Optional[int] = None, trace_id: str = "") -> Dict[str, Any]:
+        """使用 LlamaIndex 自动读取图结构并生成 Cypher 执行查询。"""
+
+        def _run() -> Dict[str, Any]:
+            return runtime.graph_llamaindex_tool.query(question, max_rows=max_rows, trace_id=trace_id)
+
+        return _trace_tool(
+            "neo4j_llamaindex_query",
+            trace_id,
+            {"question": question, "max_rows": max_rows},
             _run,
         )
 

@@ -19,7 +19,5 @@ packages = [
   "agent.services",
   "agent.services.http",
   "agent.services.mcp",
-  "agent.services.a2a",
   "agent.tools",
-  "agent.subagents",
 ]

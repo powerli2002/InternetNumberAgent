@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import inspect
 import json
 import re
 import sys
@@ -76,99 +75,35 @@ def build_text2sql_embedding(
     batch_size: int = 16,
     normalize: bool = True,
 ):
-    """按配置构建 Text2SQL embedding，默认本地离线 bge。"""
+    """按配置构建 Text2SQL embedding，仅支持本地离线 bge。"""
     backend_value = (backend or "local_bge").strip().lower()
-    if backend_value in {"local_bge", "bge", "local"}:
-        try:
-            from llama_index.embeddings.huggingface import HuggingFaceEmbedding  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("缺少 llama-index-embeddings-huggingface 依赖，无法初始化本地 embedding。") from exc
-        return HuggingFaceEmbedding(
-            model_name=model or DEFAULT_LOCAL_BGE_MODEL,
-            device=device,
-            embed_batch_size=max(1, int(batch_size)),
-            normalize=bool(normalize),
-        )
-    if backend_value in {"dashscope", "online"}:
-        try:
-            from llama_index.embeddings.openai import OpenAIEmbedding  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("缺少 llama-index-embeddings-openai 依赖，无法初始化在线 embedding。") from exc
-        return OpenAIEmbedding(
-            api_key=api_key,
-            api_base=base_url,
-            model=model or "text-embedding-v3",
-            embed_batch_size=max(1, int(batch_size)),
-        )
-    raise RuntimeError(f"不支持的 Text2SQL embedding 后端: {backend_value}")
+    if backend_value not in {"local_bge", "bge", "local"}:
+        raise RuntimeError(f"Text2SQL Demo 仅支持本地 embedding，当前后端不受支持: {backend_value}")
+    try:
+        from llama_index.embeddings.huggingface import HuggingFaceEmbedding  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("缺少 llama-index-embeddings-huggingface 依赖，无法初始化本地 embedding。") from exc
+    return HuggingFaceEmbedding(
+        model_name=model or DEFAULT_LOCAL_BGE_MODEL,
+        device=device,
+        embed_batch_size=max(1, int(batch_size)),
+        normalize=bool(normalize),
+    )
 
 
 def build_text2sql_llm(api_key: str, base_url: str, model: str):
-    """使用官方 OpenAI LLM 适配器（通过 api_base 兼容百炼）。"""
+    """使用项目内 DashScope LlamaIndex 适配器构建 LLM。"""
     if not api_key:
         raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用 LLM。")
     try:
-        import llama_index.llms.openai.base as openai_base  # type: ignore
-        import llama_index.llms.openai.utils as openai_utils  # type: ignore
-        from llama_index.llms.openai import OpenAI  # type: ignore
+        from agent.tools.nl2sql_tool import DashScopeLlamaLLM
     except Exception as exc:
-        raise RuntimeError("缺少 llama-index-llms-openai 依赖，无法初始化 LLM。") from exc
-    # 百炼模型名（如 qwen3-max）不在 OpenAI 预置白名单中，这里做最小补丁：
-    # 1) 未知模型默认给出大上下文窗口，避免初始化时报错；
-    # 2) 未知模型按 chat model 处理，强制走 chat.completions（百炼兼容模式常见要求）；
-    # 3) tokenizer 回退到 cl100k_base，避免编码器推断失败。
-    if not getattr(openai_base, "_text2sql_demo_model_patch", False):
-        original_fn = openai_base.openai_modelname_to_contextsize
-        original_is_chat_model = openai_base.is_chat_model
-        original_is_function_calling_model = openai_base.is_function_calling_model
-
-        def _patched_context_window(model_name: str) -> int:
-            try:
-                return original_fn(model_name)
-            except Exception:
-                return 131072
-
-        def _patched_is_chat_model(model_name: Optional[str] = None, **kwargs: Any) -> bool:
-            model_name = model_name or str(kwargs.get("model") or "")
-            try:
-                is_chat = bool(original_is_chat_model(model_name))
-            except Exception:
-                # 对第三方 OpenAI 兼容模型默认视为 chat model，避免误走 completion 端点。
-                return True
-            if is_chat:
-                return True
-            if model_name not in getattr(openai_utils, "ALL_AVAILABLE_MODELS", {}):
-                return True
-            return False
-
-        def _patched_is_function_calling_model(model_name: Optional[str] = None, **kwargs: Any) -> bool:
-            model_name = model_name or str(kwargs.get("model") or "")
-            try:
-                return original_is_function_calling_model(model_name)
-            except Exception:
-                return False
-
-        openai_base.openai_modelname_to_contextsize = _patched_context_window
-        openai_base.is_chat_model = _patched_is_chat_model
-        openai_base.is_function_calling_model = _patched_is_function_calling_model
-        original_tokenizer = openai_base.OpenAI._tokenizer.fget  # type: ignore[attr-defined]
-
-        def _patched_tokenizer(self):
-            try:
-                return original_tokenizer(self)
-            except Exception:
-                import tiktoken  # type: ignore
-
-                return tiktoken.get_encoding("cl100k_base")
-
-        openai_base.OpenAI._tokenizer = property(_patched_tokenizer)  # type: ignore[assignment]
-        openai_base._text2sql_demo_model_patch = True
-    return OpenAI(
+        raise RuntimeError("缺少 DashScopeLlamaLLM 依赖，无法初始化 LLM。") from exc
+    return DashScopeLlamaLLM(
         api_key=api_key,
-        api_base=base_url,
+        base_url=base_url,
         model=model,
-        temperature=0.0,
-    )
+    ).llm
 
 
 class DatabaseClient:
@@ -492,10 +427,7 @@ class Text2SQLEngine:
             from llama_index.core import SQLDatabase, VectorStoreIndex  # type: ignore
             from llama_index.core.prompts import PromptTemplate  # type: ignore
             from llama_index.core.schema import QueryBundle, TextNode  # type: ignore
-            try:
-                from llama_index.core.indices.struct_store.sql_retriever import NLSQLRetriever  # type: ignore
-            except Exception:
-                from llama_index.core.indices.struct_store import NLSQLRetriever  # type: ignore
+            from llama_index.core.indices.struct_store.sql_retriever import NLSQLRetriever  # type: ignore
         except Exception as exc:
             raise RuntimeError("缺少 llama-index 依赖，无法执行 Text2SQL。") from exc
 
@@ -547,7 +479,9 @@ class Text2SQLEngine:
             )
         # 先执行一次真实检索并缓存命中，后续 SQL 生成直接复用，避免“为了打印再查一遍”。
         debug_info = self._collect_selected_candidates(question, table_retriever, cols_retrievers)
-        selected_tables = debug_info.selected_tables or table_names
+        selected_tables = debug_info.selected_tables
+        if not selected_tables:
+            raise RuntimeError("表检索未命中任何候选表。")
         selected_context = {name: table_context[name] for name in selected_tables if name in table_context}
 
         if self.settings.print_llama_context:
@@ -579,11 +513,13 @@ class Text2SQLEngine:
         else:
             query_bundle = QueryBundle(question)
             table_desc_str = retriever._get_table_context(query_bundle)  # type: ignore[attr-defined]
-        nodes, metadata = retriever.retrieve_with_metadata(question)
-        # 优先从 metadata.result 取 SQL，兼容不同版本 LlamaIndex 的返回格式。
-        sql_query = metadata.get("result") if isinstance(metadata, dict) else ""
-        if not sql_query and nodes:
-            sql_query = getattr(nodes[0].node, "text", "") or ""
+        _, metadata = retriever.retrieve_with_metadata(question)
+        # 严格要求 SQL 从 metadata.result 返回，不再做节点文本兜底。
+        if not isinstance(metadata, dict):
+            raise RuntimeError("NLSQLRetriever 返回 metadata 格式错误。")
+        sql_query = str(metadata.get("result") or "").strip()
+        if not sql_query:
+            raise RuntimeError("NLSQLRetriever 未返回 SQL 结果。")
 
         guard = SQLGuard(
             allowed_tables=table_names,
@@ -648,24 +584,12 @@ class Text2SQLEngine:
         return f"http://{self.milvus_host}:{self.milvus_port}"
 
     def _resolve_embedding_dim(self, embed_model) -> int:
-        # 尝试从 embedding 实例推断维度，必要时触发一次向量化。
+        # 通过一次实际 embedding 推断维度，避免多分支兼容逻辑。
         if self._embedding_dim > 0:
             return self._embedding_dim
-        for attr in ("dimension", "embed_dim", "embedding_dimension", "dim"):
-            value = getattr(embed_model, attr, None)
-            if value is None:
-                continue
-            try:
-                dim = int(value() if callable(value) else value)
-            except Exception:
-                continue
-            if dim > 0:
-                self._embedding_dim = dim
-                return dim
-        try:
-            sample = embed_model.get_text_embedding("dimension")
-        except Exception as exc:
-            raise RuntimeError("无法推断 embedding 维度，请检查模型配置。") from exc
+        sample = embed_model.get_text_embedding("dimension")
+        if not sample:
+            raise RuntimeError("embedding 维度推断失败，返回向量为空。")
         self._embedding_dim = len(sample)
         return self._embedding_dim
 
@@ -676,13 +600,10 @@ class Text2SQLEngine:
             raise RuntimeError("缺少 pymilvus，无法创建 Milvus partition。") from exc
         connections.connect(host=self.milvus_host, port=str(self.milvus_port))
         if not utility.has_collection(self.milvus_collection):
-            return
+            raise RuntimeError(f"Milvus collection 不存在: {self.milvus_collection}")
         collection = Collection(self.milvus_collection)
-        try:
-            if not collection.has_partition(partition_name):
-                collection.create_partition(partition_name)
-        except Exception:
-            return
+        if not collection.has_partition(partition_name):
+            collection.create_partition(partition_name)
 
     def _create_milvus_vector_store(self, embed_model):
         # 通过 LlamaIndex MilvusVectorStore 接入，保留向量检索一致性。
@@ -690,37 +611,14 @@ class Text2SQLEngine:
             from llama_index.vector_stores.milvus import MilvusVectorStore  # type: ignore
         except Exception as exc:
             raise RuntimeError("缺少 llama-index-vector-stores-milvus 依赖，无法使用 Milvus 索引。") from exc
-        vector_store_cls = MilvusVectorStore
         dim = self._resolve_embedding_dim(embed_model)
-        sig = inspect.signature(vector_store_cls.__init__)
-        kwargs: Dict[str, Any] = {}
-
-        def _set(key: str, value: Any) -> None:
-            if value is None:
-                return
-            if key in sig.parameters:
-                kwargs[key] = value
-
-        _set("collection_name", self.milvus_collection)
-        _set("collection", self.milvus_collection)
-        _set("dim", dim)
-        _set("overwrite", False)
-        _set("uri", self._milvus_uri())
-        _set("use_async_client", False)
-        if "host" in sig.parameters:
-            _set("host", self.milvus_host)
-        if "port" in sig.parameters:
-            _set("port", str(self.milvus_port))
-        if "connection_args" in sig.parameters:
-            kwargs["connection_args"] = {"host": self.milvus_host, "port": str(self.milvus_port)}
-
-        vector_store = vector_store_cls(**kwargs)
-        try:
-            if hasattr(vector_store, "_collection"):
-                vector_store._collection.load()
-        except Exception:
-            pass
-        return vector_store
+        return MilvusVectorStore(
+            uri=self._milvus_uri(),
+            collection_name=self.milvus_collection,
+            dim=dim,
+            overwrite=False,
+            use_async_client=False,
+        )
 
     def _milvus_query_kwargs(self, partition_name: str) -> Dict[str, Any]:
         return {"milvus_partition_names": [partition_name]} if partition_name else {}
@@ -809,7 +707,7 @@ class Text2SQLEngine:
         table_names: List[str],
         text_node_cls,
         vector_index_cls,
-    ) -> Tuple[Optional[Dict[str, Dict[str, Any]]], IndexBuildInfo]:
+    ) -> Tuple[Dict[str, Dict[str, Any]], IndexBuildInfo]:
         # 列索引：首次写入 Milvus，后续优先复用内存，再复用 Milvus 分区。
         try:
             from llama_index.core.storage.storage_context import StorageContext  # type: ignore
@@ -855,10 +753,10 @@ class Text2SQLEngine:
             for table_name in table_names:
                 column_names = self.COLUMN_INDEX_CONFIG.get(table_name, [])
                 if not column_names:
-                    continue
+                    raise RuntimeError(f"列索引配置缺失: {table_name}")
                 valid_columns = [name for name in column_names if name in self.table_schema.get(table_name, [])]
                 if not valid_columns:
-                    continue
+                    raise RuntimeError(f"列索引配置与表结构不一致: {table_name}")
                 table_retrievers: Dict[str, Any] = {}
                 for column_name in valid_columns:
                     filters = MetadataFilters(
@@ -874,10 +772,11 @@ class Text2SQLEngine:
                     )
                 if table_retrievers:
                     cols_retrievers[table_name] = table_retrievers
-            result = cols_retrievers or None
-            self._column_retriever_cache[cache_key] = result
+            if not cols_retrievers:
+                raise RuntimeError("列检索器构建失败：Milvus 复用模式未生成任何列检索器。")
+            self._column_retriever_cache[cache_key] = cols_retrievers
             elapsed = time.perf_counter() - build_start
-            return result, IndexBuildInfo(elapsed, False, True)
+            return cols_retrievers, IndexBuildInfo(elapsed, False, True)
         else:
             try:
                 from sqlalchemy import MetaData, Table, select  # type: ignore
@@ -891,15 +790,15 @@ class Text2SQLEngine:
             for table_name in table_names:
                 column_names = self.COLUMN_INDEX_CONFIG.get(table_name, [])
                 if not column_names:
-                    continue
+                    raise RuntimeError(f"列索引配置缺失: {table_name}")
                 try:
                     table = Table(table_name, metadata, autoload_with=engine)
-                except Exception:
-                    continue
+                except Exception as exc:
+                    raise RuntimeError(f"加载表结构失败: {table_name}") from exc
                 table_retrievers: Dict[str, Any] = {}
                 for column_name in column_names:
                     if column_name not in table.c:
-                        continue
+                        raise RuntimeError(f"列索引配置与数据库字段不一致: {table_name}.{column_name}")
                     column = table.c[column_name]
                     stmt = select(column).distinct().limit(self.settings.column_index_max_values)
                     values = self._fetch_distinct_values(engine, stmt)
@@ -916,7 +815,7 @@ class Text2SQLEngine:
                     cols_retrievers[table_name] = table_retrievers
 
             if not cols_retrievers or not all_nodes:
-                return None, IndexBuildInfo(time.perf_counter() - build_start, False, False)
+                raise RuntimeError("列检索器构建失败：未生成任何可索引列值。")
 
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
             column_index = vector_index_cls(
@@ -962,8 +861,8 @@ class Text2SQLEngine:
             return {}
         try:
             return json.loads(self._manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        except Exception as exc:
+            raise RuntimeError(f"索引 manifest 解析失败: {self._manifest_path}") from exc
 
     def _save_index_manifest(self, data: Dict[str, Any]) -> None:
         self._manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -972,48 +871,39 @@ class Text2SQLEngine:
     def _partition_entity_count(self, partition_name: str) -> int:
         try:
             from pymilvus import Collection, connections, utility  # type: ignore
-        except Exception:
-            return 0
-        try:
-            connections.connect(host=self.milvus_host, port=str(self.milvus_port))
-            if not utility.has_collection(self.milvus_collection):
-                return 0
-            collection = Collection(self.milvus_collection)
-            for partition in collection.partitions:
-                if partition.name == partition_name:
-                    return int(getattr(partition, "num_entities", 0) or 0)
-            return 0
-        except Exception:
-            return 0
+        except Exception as exc:
+            raise RuntimeError("缺少 pymilvus，无法统计 Milvus partition 实体数量。") from exc
+        connections.connect(host=self.milvus_host, port=str(self.milvus_port))
+        if not utility.has_collection(self.milvus_collection):
+            raise RuntimeError(f"Milvus collection 不存在: {self.milvus_collection}")
+        collection = Collection(self.milvus_collection)
+        for partition in collection.partitions:
+            if partition.name == partition_name:
+                return int(partition.num_entities)
+        return 0
 
     def _collect_selected_candidates(self, question: str, table_retriever, cols_retrievers) -> RetrievalDebugInfo:
         # 在主链路前执行一次检索，后续逻辑直接复用这次结果，避免重复检索。
-        try:
-            from llama_index.core.schema import QueryBundle  # type: ignore
-        except Exception:
-            return RetrievalDebugInfo(table_scores=[], selected_tables=[], column_hits={})
+        from llama_index.core.schema import QueryBundle  # type: ignore
+
         if not question:
-            return RetrievalDebugInfo(table_scores=[], selected_tables=[], column_hits={})
+            raise RuntimeError("问题不能为空。")
 
+        # 将自然语言问题封装为标准查询对象，供表检索与列检索复用。
         query_bundle = QueryBundle(question)
+        # 记录表候选及其相关性分数，格式: [(table_name, score), ...]。
         table_scores: List[Tuple[str, float]] = []
-        if table_retriever is not None:
-            try:
-                base_retriever = getattr(table_retriever, "retriever", table_retriever)
-                nodes = base_retriever.retrieve(query_bundle)
-                for node in nodes:
-                    name = ""
-                    if hasattr(node, "node") and getattr(node.node, "metadata", None):
-                        name = str(node.node.metadata.get("name") or "")
-                    if not name:
-                        name = str(getattr(node, "table_name", "") or "")
-                    if not name:
-                        continue
-                    score = float(getattr(node, "score", 0.0) or 0.0)
-                    table_scores.append((name, score))
-            except Exception:
-                table_scores = []
+        nodes = table_retriever.retrieve(query_bundle)
+        for node in nodes:
+            # 严格要求表名来自节点元数据的 name 字段。
+            name = str(node.node.metadata["name"]).strip()
+            if not name:
+                raise RuntimeError("表检索结果缺少表名。")
+            # 使用检索返回分数，不做默认值回退。
+            score = float(node.score)
+            table_scores.append((name, score))
 
+        # 按检索顺序做表名去重，保留首个命中对应的优先级。
         seen = set()
         selected_tables: List[str] = []
         for name, _ in table_scores:
@@ -1021,29 +911,32 @@ class Text2SQLEngine:
                 continue
             seen.add(name)
             selected_tables.append(name)
-        if not selected_tables and isinstance(table_retriever, list):
-            selected_tables = [name for name in table_retriever if name]
 
+        # 保存每张表的列候选命中，格式: {table: [(column, best_score), ...]}。
         column_hits_by_table: Dict[str, List[Tuple[str, float]]] = {}
-        if cols_retrievers:
-            selected_set = set(selected_tables) if selected_tables else set(cols_retrievers.keys())
+        if cols_retrievers and selected_tables:
+            # 仅在已选中的表内执行列检索，不做“未命中时全表扫描”兜底。
+            selected_set = set(selected_tables)
             for table_name, table_retrievers in cols_retrievers.items():
-                if selected_set and table_name not in selected_set:
+                if table_name not in selected_set:
                     continue
                 column_hits: List[Tuple[str, float]] = []
                 for column_name, retriever in table_retrievers.items():
-                    try:
-                        nodes = retriever.retrieve(query_bundle)
-                    except Exception:
-                        continue
+                    # 执行列值向量检索，命中结果用于估计该列与问题的相关性。
+                    nodes = retriever.retrieve(query_bundle)
                     if not nodes:
+                        # 未命中则不纳入候选列。
                         continue
-                    best_score = max(float(getattr(node, "score", 0.0) or 0.0) for node in nodes)
+                    # 以该列命中结果中的最高分作为列级相关性代表分数。
+                    best_score = max(float(node.score) for node in nodes)
                     column_hits.append((column_name, best_score))
                 if not column_hits:
+                    # 当前表没有任何列命中时，不写入调试结果。
                     continue
+                # 按分数从高到低排序，便于后续打印与排查。
                 column_hits.sort(key=lambda item: item[1], reverse=True)
                 column_hits_by_table[table_name] = column_hits
+        # 统一返回表级与列级候选信息，供后续打印和链路复用。
         return RetrievalDebugInfo(
             table_scores=table_scores,
             selected_tables=selected_tables,
@@ -1128,9 +1021,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="qwen-turbo", help="覆盖 LLM 模型名。")
     parser.add_argument(
         "--embedding-backend",
-        choices=["local_bge", "dashscope"],
+        choices=["local_bge"],
         default="local_bge",
-        help="覆盖 embedding 后端（默认 local_bge）。",
+        help="embedding 后端（固定 local_bge，不支持百炼 embedding）。",
     )
     parser.add_argument(
         "--embedding-model",

@@ -54,6 +54,33 @@ def _log_nl2sql(message: str, *args) -> None:
         logger.info(message, *args)
 
 
+def _normalize_hf_endpoint_env() -> None:
+    """
+    规范化 HF_ENDPOINT 环境变量，避免无协议地址导致本地 embedding 初始化失败。
+
+    典型错误输入：
+    - HF_ENDPOINT=HF-Mirror
+    - HF_ENDPOINT=hf-mirror
+    - HF_ENDPOINT=mirror-host
+    """
+    raw_hf_endpoint = (os.environ.get("HF_ENDPOINT") or "").strip()
+    if not raw_hf_endpoint:
+        return
+
+    lowered = raw_hf_endpoint.lower().strip().strip("/")
+    if lowered in {"hf-mirror", "hf_mirror", "hf-mirror.com"}:
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+        return
+    if "://" in raw_hf_endpoint:
+        return
+
+    normalized = raw_hf_endpoint.lstrip("/")
+    # 针对 HF-Mirror 这类别名，统一映射到可访问域名。
+    if normalized.lower().startswith("hf-mirror"):
+        normalized = "hf-mirror.com"
+    os.environ["HF_ENDPOINT"] = f"https://{normalized}"
+
+
 class DashScopeLlamaEmbedding:
     """
     阿里云百炼嵌入模型适配器
@@ -143,73 +170,30 @@ class LocalBGELlamaEmbedding:
         batch_size: int = 16,
         normalize: bool = True,
     ) -> None:
+        # 先规范化 HF_ENDPOINT，确保后续导入的 huggingface_hub 读取到正确配置。
+        _normalize_hf_endpoint_env()
+
         try:
-            from llama_index.core.base.embeddings.base import BaseEmbedding  # type: ignore
-            from sentence_transformers import SentenceTransformer  # type: ignore
+            from llama_index.embeddings.huggingface import HuggingFaceEmbedding  # type: ignore
         except Exception as exc:
-            raise RuntimeError("未安装 llama-index/sentence-transformers，无法初始化本地 embedding。") from exc
+            raise RuntimeError("未安装 llama-index-embeddings-huggingface，无法初始化本地 embedding。") from exc
 
         resolved_model = (model_name or "").strip()
         if not resolved_model:
             raise RuntimeError("embedding 模型名不能为空。")
         safe_batch_size = max(1, int(batch_size))
+        model_kwargs: Dict[str, Any] = {}
+        if str(device).lower().startswith("cuda"):
+            # 统一固定长度，避免超长 schema 文本导致显存异常增长。
+            model_kwargs["max_length"] = 512
 
-        class _Embedding(BaseEmbedding):
-            model_name: str = "local-bge-embedding"
-            _model = PrivateAttr()
-            _batch_size = PrivateAttr()
-            _normalize = PrivateAttr()
-            _dim = PrivateAttr(default=0)
-
-            def __init__(self, model_ref: str, run_device: str, run_batch_size: int, run_normalize: bool) -> None:
-                super().__init__(embed_batch_size=run_batch_size)
-                self._batch_size = run_batch_size
-                self._normalize = run_normalize
-                self._model = SentenceTransformer(model_ref, device=run_device)
-                if str(run_device).lower().startswith("cuda"):
-                    # 统一使用固定截断长度，避免超长 schema 文本触发二次方显存膨胀。
-                    max_seq_length = 512
-                    if hasattr(self._model, "max_seq_length"):
-                        current = int(getattr(self._model, "max_seq_length", max_seq_length) or max_seq_length)
-                        self._model.max_seq_length = min(current, max_seq_length)
-                    # CUDA 推理使用半精度，减少显存占用。
-                    self._model.half()
-                dim = self._model.get_sentence_embedding_dimension()
-                self._dim = int(dim) if dim else 0
-
-            def _embed_batch(self, texts: List[str]) -> List[List[float]]:
-                if not texts:
-                    return []
-                vectors = self._model.encode(
-                    texts,
-                    batch_size=max(1, int(self._batch_size)),
-                    normalize_embeddings=self._normalize,
-                    show_progress_bar=False,
-                )
-                outputs: List[List[float]] = []
-                for vector in vectors:
-                    outputs.append([float(x) for x in vector])
-                if outputs:
-                    self._dim = len(outputs[0])
-                return outputs
-
-            def _get_text_embedding(self, text: str) -> List[float]:
-                return self._embed_batch([text])[0]
-
-            def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
-                return self._embed_batch(texts)
-
-            def _get_query_embedding(self, query: str) -> List[float]:
-                return self._embed_batch([query])[0]
-
-            async def _aget_query_embedding(self, query: str) -> List[float]:
-                return self._get_query_embedding(query)
-
-        self._embedding = _Embedding(
-            model_ref=resolved_model,
-            run_device=device,
-            run_batch_size=safe_batch_size,
-            run_normalize=bool(normalize),
+        self._embedding = HuggingFaceEmbedding(
+            model_name=resolved_model,
+            device=device,
+            embed_batch_size=safe_batch_size,
+            normalize=bool(normalize),
+            show_progress_bar=False,
+            **model_kwargs,
         )
 
     @property

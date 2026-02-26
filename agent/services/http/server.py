@@ -466,7 +466,7 @@ async def info() -> Dict[str, Any]:
         "assistant_id": "fusion-agent",
         "graph_id": "fusion-agent",
         "mcp_server_url": config.mcp_server_url,
-        "a2a_server_url": config.a2a_server_url,
+        "orchestrator": "langgraph",
         "version": "local",
         "time": _now_iso(),
     }

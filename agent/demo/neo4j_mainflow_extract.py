@@ -2,7 +2,7 @@
 从主调用链抽取的 Neo4j 图查询单文件 Demo（直连驱动版）。
 
 目标：
-1. 复用 graph_relations 子代理的 Cypher 生成逻辑；
+1. 复用主流程图谱查询的 Cypher 生成逻辑；
 2. 复用关系白名单校验与 fallback 策略；
 3. 通过 Neo4jQueryTool 直接执行只读查询；
 4. 提供 CLI 入口，输出统一 JSON 结果。
@@ -57,7 +57,7 @@ _neo4j_tool_module = _load_module_from_path(
 AgentConfig = _config_module.AgentConfig
 LLMClient = _llm_module.LLMClient
 LLMMessage = _llm_module.LLMMessage
-SUBAGENT_GRAPH_PROMPT = _prompts_module.SUBAGENT_GRAPH_PROMPT
+GRAPH_CYPHER_PROMPT = _prompts_module.GRAPH_CYPHER_PROMPT
 Neo4jQueryTool = _neo4j_tool_module.Neo4jQueryTool
 
 
@@ -171,7 +171,7 @@ class Neo4jMainFlowExtractor:
             return self._fallback_cypher(payload), True, "llm_disabled"
 
         messages = [
-            LLMMessage(role="system", content=SUBAGENT_GRAPH_PROMPT),
+            LLMMessage(role="system", content=GRAPH_CYPHER_PROMPT),
             LLMMessage(role="user", content=json.dumps(payload.to_dict(), ensure_ascii=False)),
         ]
         try:

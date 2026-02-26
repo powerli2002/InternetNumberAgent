@@ -7,17 +7,15 @@
 - `agent/core/`
   - 纯核心能力：配置、模型、提示词、LLM 客户端、追踪、NL2SQL schema。
 - `agent/runtime/`
-  - 运行时编排：`FusionAgent` 主流程、主代理工具路由协议、上下文构建器。
+  - 运行时编排：`FusionAgent`（LangGraph 主图）、上下文构建器。
 - `agent/services/http/`
   - HTTP 接口层：FastAPI 服务与线程/消息存储。
 - `agent/services/mcp/`
   - MCP 服务与客户端（FastMCP HTTP）。
-- `agent/services/a2a/`
-  - A2A 协议模型、客户端、Worker 执行器与服务（HTTP+SSE）。
 - `agent/cli/`
   - 命令行入口。
-- `agent/memory/`、`agent/tools/`、`agent/subagents/`
-  - 记忆系统、底层工具实现、子代理路由协议。
+- `agent/memory/`、`agent/tools/`
+  - 记忆系统与底层工具实现。
 - `agent/store/`
   - 统一运行时存储目录（`memory/`、`index/`、`notes/`）。
 
@@ -25,7 +23,6 @@
 
 - HTTP 服务入口：`agent/services/http/server.py`
 - MCP 服务入口：`agent/services/mcp/server.py`
-- A2A 服务入口：`agent/services/a2a/server.py`
 - 运行时主编排入口：`agent/runtime/fusion_agent.py`
 - CLI 入口：`agent/cli/main.py`
 
@@ -42,7 +39,7 @@
 
 1. **统一转换**：`agent/tools/rag_ingest_pipeline.py` 使用 `MarkItDown` 将文档统一转为 Markdown。  
 2. **智能分块**：按 Markdown 标题层级 + 段落/代码块边界切分，并保留重叠窗口。  
-3. **离线向量化**：默认使用本地 `bge`（`BAAI/bge-m3`），不依赖在线 embedding API。  
+3. **离线向量化**：默认使用本地 `bge`（`BAAI/bge-m3`），底层统一采用 `HuggingFaceEmbedding`，不依赖在线 embedding API。  
 4. **召回策略**：检索阶段默认启用 **MQE + RRF**（多查询扩展 + 融合排序），提升复杂问法召回稳定性。  
 5. **增量去重**：写入 Milvus 前按 `source + text` 哈希去重（批内 + 存量）。
 

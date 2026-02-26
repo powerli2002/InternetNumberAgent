@@ -1,18 +1,23 @@
 # 互联网号码资源问答系统（fusionprocessing）
 
-本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**工具层 FastMCP（HTTP） + 代理协同 A2A（HTTP+SSE） + 全链路 LangSmith 追踪**。主代理仍使用 Function Calling 做工具路由，但工具执行与子代理执行已全部协议化。
+本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**LangGraph 主编排 + FastMCP 工具层（HTTP） + 全链路 LangSmith 追踪**。复杂任务通过 LangGraph 子图执行，不再依赖 A2A/子代理服务。
+
+## 图查询链路升级（2026-02-25）
+
+1. 新增 MCP 工具 `neo4j_llamaindex_query`：由工具内部通过 LlamaIndex 读取 Neo4j 当前 schema，生成 Cypher 并执行返回结果。
+2. LangGraph `graph` 步骤不再在主流程预生成 Cypher，而是直接把自然语言问题交给 `neo4j_llamaindex_query`。
+3. 保留 `neo4j_query` 作为显式 Cypher 只读执行工具，便于测试与运维排障。
 
 ## 稳定性修复（2026-02-08）
 
-本次针对多代理与记忆链路完成了以下修复：
+本次针对编排与记忆链路完成了以下修复：
 
-1. 修复 A2A supervisor 路由提示模板格式化异常，恢复 `supervisor -> 子代理` 主链路。
-2. 修复语义记忆写入 Neo4j 的类型错误（map 属性），改为 `metadata_json + 结构化字段` 存储并支持反序列化检索。
-3. 增强 Todo 解析，兼容 `subtasks/items/todos/plan` 输出结构，避免退化为单任务。
-4. 增强图谱子代理 Cypher 后验校验，关系类型越界时自动走兜底查询模板。
-5. 增强 NL2SQL 超时退化：列检索超时时自动降级为表级检索重试。
-6. RAG 索引写入支持增量去重：按 `source + text` 哈希过滤批内与存量重复切片，避免重复入库。
-7. 补齐 `agent/knowledge/bgp/hijack_detection.md` 示例文件，chapter_5 路径可直接复现。
+1. 修复语义记忆写入 Neo4j 的类型错误（map 属性），改为 `metadata_json + 结构化字段` 存储并支持反序列化检索。
+2. 增强 Todo 解析，兼容 `subtasks/items/todos/plan` 输出结构，避免退化为单任务。
+3. 增强图谱查询 Cypher 后验校验，关系类型越界时自动走兜底查询模板。
+4. 增强 NL2SQL 超时退化：列检索超时时自动降级为表级检索重试。
+5. RAG 索引写入支持增量去重：按 `source + text` 哈希过滤批内与存量重复切片，避免重复入库。
+6. 补齐 `agent/knowledge/bgp/hijack_detection.md` 示例文件，chapter_5 路径可直接复现。
 
 ## RAG 升级（2026-02-22）
 
@@ -21,6 +26,7 @@
 3. 召回策略默认启用 `MQE + RRF`（多查询扩展 + 融合排序），提高复杂查询的覆盖率。
 4. 入库脚本与 MCP 检索统一复用同一 embedding 构造逻辑，避免“入库模型/查询模型”不一致。
 5. NL2SQL 表/列检索 embedding 默认改为本地离线 `BAAI/bge-m3`，与 RAG 一致。
+6. RAG 与 NL2SQL 的本地 embedding 实现统一为 `HuggingFaceEmbedding`；Milvus 存储仍可分离（`fusion_docs` 与 `nl2sql_index`）。
 
 ## 启动与部署（简版）
 
@@ -58,16 +64,16 @@
    ```
    - NL2SQL 表/列索引将写入 Milvus（单 collection + 分区），本地仅保留轻量 manifest
 
-5. 启动智能体三层服务（MCP / A2A / API）
+5. 启动智能体服务（MCP / API）
    ```bash
-   docker compose -f docker/docker-compose.yml up -d agent-mcp agent-a2a agent-api
+   docker compose -f docker/docker-compose.yml up -d agent-mcp agent-api
    ```
 
 > API 默认端口：`2025`（访问 `http://localhost:2025/info` 验证）
 
 ### 方式二：本地运行（开发）
 
-1. 安装依赖并启动三层服务
+1. 安装依赖并启动服务
    ```bash
    python -m venv .venv
    source .venv/bin/activate
@@ -75,7 +81,6 @@
    # 可选：预构建 NL2SQL 索引
    python -m agent.scripts.build_nl2sql_indexes
    uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
-   uvicorn agent.services.a2a.server:app --host 0.0.0.0 --port 2031
    uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
    ```
 
@@ -91,7 +96,6 @@
 ## 常用端口
 
 - API：`2025`
-- A2A Worker：`2031`
 - MCP Tool Server：`2032`
 - PostgreSQL：`5432`
 - Neo4j：`7474/7687`
@@ -100,7 +104,6 @@
 
 关键环境变量：
 - `MCP_SERVER_URL`（默认 `http://127.0.0.1:2032/mcp`）
-- `A2A_SERVER_URL`（默认 `http://127.0.0.1:2031/a2a`）
 - `AGENT_STORE_DIR`（统一存储根目录，默认 `agent/store`）
 - `MEMORY_STORE_DIR`（情景记忆本地目录，默认 `agent/store/memory`）
 - `NOTES_DIR`（笔记目录，默认 `agent/store/notes`）
@@ -109,8 +112,6 @@
 - `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `180` 秒）
 - `CLI_TIMEOUT_SECONDS`（CLI 外层超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
-- `A2A_TIMEOUT_SECONDS`（A2A 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
-- `A2A_EVENT_POLL_TIMEOUT_SECONDS`（A2A Worker SSE 轮询超时/心跳间隔，默认 `15` 秒）
 - `RAG_EMBEDDING_BACKEND`（默认 `local_bge`）
 - `RAG_EMBEDDING_MODEL`（默认 `BAAI/bge-m3`，也可填本地模型目录）
 - `RAG_EMBEDDING_DEVICE`（默认 `cpu`）
@@ -120,6 +121,8 @@
 - `NL2SQL_EMBEDDING_BATCH_SIZE`（默认 `16`）
 - `NL2SQL_EMBEDDING_NORMALIZE`（默认 `true`）
 - `RAG_ENABLE_MQE`（默认 `true`）
+- `NEO4J_DATABASE`（默认 `neo4j`）
+- `GRAPH_REFRESH_SCHEMA_EACH_QUERY`（默认 `true`，图查询前刷新 schema）
 
 ## 运行时表说明
 
@@ -142,7 +145,7 @@ FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张�
 - `MODULE_LOG_BODY_LIMIT`：模块日志中单字段最大长度（默认 `2000` 字符）
 - `MODULE_LOG_MAX_ITEMS`：模块日志最多记录的返回项数量（默认 `5`）
 
-按 `metadata.trace_id` 拼接 LangSmith 跨服务链路（推荐用于排查 `tool_router plan`、MCP/A2A 断点）：
+按 `metadata.trace_id` 拼接 LangSmith 跨服务链路（推荐用于排查 `graph_node:plan` 与 MCP 断点）：
 
 ```bash
 python -m agent.scripts.trace_by_metadata_id \
@@ -157,12 +160,11 @@ python -m agent.scripts.trace_by_metadata_id \
 为降低耦合并便于扩展，`agent/` 已按分层重构：
 
 - `agent/core/`：配置、模型、提示词、LLM、追踪、Schema
-- `agent/runtime/`：FusionAgent 运行时编排、主路由协议
+- `agent/runtime/`：FusionAgent 运行时编排（LangGraph 主图）
 - `agent/services/http/`：FastAPI 接口与线程消息存储
 - `agent/services/mcp/`：MCP 服务与客户端
-- `agent/services/a2a/`：A2A 协议模型、客户端、Worker 执行器与服务
 - `agent/cli/`：命令行入口
-- `agent/runtime/context_builder.py`、`agent/memory/`、`agent/tools/`、`agent/subagents/`：上下文、记忆、工具、子代理
+- `agent/runtime/context_builder.py`、`agent/memory/`、`agent/tools/`：上下文、记忆、工具
 - `agent/store/`：统一运行时存储目录（memory/index/notes）
 
 注意：旧入口文件已移除，需统一使用新分层路径。
@@ -172,6 +174,5 @@ python -m agent.scripts.trace_by_metadata_id \
 - 项目目标与数据结构：`summary.md`
 - 部署与导入：`docs/部署.md`
 - 系统技术文档：`docs/互联网号码资源问答系统技术文档.md`
-- 子代理方案：`docs/子代理构建.md`
 - Agent 目录说明：`agent/README.md`
 - 面试深潜文档：`agent/docs/system_architecture_deep_dive/README.md`
