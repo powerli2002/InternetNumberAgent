@@ -2,32 +2,18 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-import json
+import os
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 
 from agent.core.config import AgentConfig
 from agent.core.models import TodoItem
-from agent.core.tracing import LangSmithTracer
 from agent.tools.neo4j_llamaindex_tool import Neo4jLlamaIndexTool
-from agent.tools.neo4j_query_tool import Neo4jQueryTool
 from agent.tools.nl2sql_tool import NL2SQLTool
 from agent.tools.note_tool import NoteTool
 from agent.tools.rag_tool import RAGTool, build_rag_embedding
 from agent.tools.todo_tool import TodoTool
-
-
-def _preview(value: Any, limit: int = 2000) -> Any:
-    """避免将超大结果写入 trace。"""
-    try:
-        raw = json.dumps(value, ensure_ascii=False)
-    except Exception:
-        raw = str(value)
-    if len(raw) <= limit:
-        return value
-    return {"preview": f"{raw[:limit]}...<truncated {len(raw)} chars>"}
 
 
 class _MCPRuntime:
@@ -67,13 +53,6 @@ class _MCPRuntime:
             candidate_multiplier=self.config.rag_candidate_multiplier,
             rrf_k=self.config.rag_rrf_k,
         )
-        self.graph_tool = Neo4jQueryTool(
-            uri=self.config.neo4j_uri,
-            user=self.config.neo4j_user,
-            password=self.config.neo4j_password,
-            max_rows=self.config.graph_max_rows,
-            max_cypher_length=self.config.graph_max_cypher_length,
-        )
         self.graph_llamaindex_tool = Neo4jLlamaIndexTool(
             uri=self.config.neo4j_uri,
             user=self.config.neo4j_user,
@@ -92,28 +71,18 @@ class _MCPRuntime:
 
 def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
     """创建 FastMCP server。"""
+    # MCP 服务端进程默认关闭 LangSmith/LangChain tracing，避免产生噪声埋点。
+    os.environ["LANGSMITH_TRACING"] = "false"
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
     cfg = config or AgentConfig.load()
-    tracer = LangSmithTracer()
     runtime = _MCPRuntime(cfg)
-    mcp = FastMCP(name="fusion-tools", instructions="Fusion 工具层（NL2SQL / RAG / Neo4j/Cypher / Neo4j-LlamaIndex / Note / Todo）")
+    mcp = FastMCP(name="fusion-tools", instructions="Fusion 工具层（NL2SQL / RAG / Neo4j-LlamaIndex / Note / Todo）")
 
     def _trace_tool(name: str, trace_id: str, inputs: Dict[str, Any], fn):
-        run_ctx = (
-            tracer.start_run(
-                name=f"mcp_server:{name}",
-                run_type="tool",
-                inputs=inputs,
-                tags=["mcp", "server", f"tool:{name}"],
-                metadata={"trace_id": trace_id},
-            )
-            if tracer.enabled
-            else nullcontext()
-        )
-        with run_ctx as run:
-            output = fn()
-            if run:
-                run.add_outputs({"result": _preview(output)})
-            return output
+        """统一工具包装：服务端不再写入 LangSmith，仅执行工具函数。"""
+        # 保留函数签名，避免调用侧改动；参数仅用于兼容。
+        _ = (name, trace_id, inputs)
+        return fn()
 
     @mcp.tool
     def health() -> Dict[str, Any]:
@@ -169,20 +138,6 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
             }
 
         return _trace_tool("rag_search", trace_id, {"query": query, "top_k": top_k}, _run)
-
-    @mcp.tool
-    def neo4j_query(cypher: str, max_rows: Optional[int] = None, trace_id: str = "") -> Dict[str, Any]:
-        """执行只读 Cypher 查询。"""
-
-        def _run() -> Dict[str, Any]:
-            return runtime.graph_tool.query(cypher, max_rows=max_rows)
-
-        return _trace_tool(
-            "neo4j_query",
-            trace_id,
-            {"cypher": cypher, "max_rows": max_rows},
-            _run,
-        )
 
     @mcp.tool
     def neo4j_llamaindex_query(question: str, max_rows: Optional[int] = None, trace_id: str = "") -> Dict[str, Any]:

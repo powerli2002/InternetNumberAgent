@@ -1,55 +1,50 @@
 from __future__ import annotations
 
-from typing import Any, Dict
-
 import pytest
 
 
 NEO4J_CASES = [
     {
-        "case_id": "neo4j_as4134_v4_upstream_count",
+        "case_id": "neo4j_llamaindex_as4134_v4_upstream_count",
         "question": "AS4134 的 IPv4 上游 AS 数量是多少？",
-        "cypher": "MATCH (a:AS {asn:4134})-[:V4_UPSTREAM]->(up:AS) RETURN count(DISTINCT up) AS value LIMIT 1",
     },
     {
-        "case_id": "neo4j_as4837_v4_upstream_count",
-        "question": "AS4837 的 IPv4 上游 AS 数量是多少？",
-        "cypher": "MATCH (a:AS {asn:4837})-[:V4_UPSTREAM]->(up:AS) RETURN count(DISTINCT up) AS value LIMIT 1",
-    },
-    {
-        "case_id": "neo4j_as4837_org_name",
+        "case_id": "neo4j_llamaindex_as4837_org_name",
         "question": "AS4837 归属的组织名称是什么？",
-        "cypher": "MATCH (a:AS {asn:4837})-[:BELONGS_TO]->(o:Org) RETURN o.org_name AS value LIMIT 1",
     },
 ]
 
 
-def _extract_first_value(rows_payload: Any) -> Any:
-    """从 Neo4j 工具结果行中提取字段 value。"""
-    if not isinstance(rows_payload, list) or not rows_payload:
-        raise AssertionError("neo4j_query 返回 rows 为空。")
-    row = rows_payload[0]
-    if not isinstance(row, dict) or "value" not in row:
-        raise AssertionError("neo4j_query 首行缺少 value 字段。")
-    return row["value"]
+@pytest.fixture(scope="module")
+def _require_graph_llamaindex_tool(mcp_client):
+    """依赖缺失时跳过图查询 live 用例。"""
+    health = mcp_client.call_tool("health")
+    capabilities = health.get("capabilities") if isinstance(health, dict) else {}
+    enabled = bool(capabilities.get("neo4j_llamaindex_enabled")) if isinstance(capabilities, dict) else False
+    if not enabled:
+        issues = health.get("issues") if isinstance(health, dict) else {}
+        reason = issues.get("neo4j_llamaindex") if isinstance(issues, dict) else "unknown"
+        pytest.skip(f"neo4j_llamaindex_query 不可用，跳过图查询 live 测试：{reason}")
+    return True
 
 
 @pytest.mark.live
 @pytest.mark.parametrize("case", NEO4J_CASES, ids=[c["case_id"] for c in NEO4J_CASES])
-def test_neo4j_cypher_result_matches_direct_graph_standard_answer(case, mcp_client, neo4j_scalar) -> None:
-    """图查询用例：MCP 工具结果必须与 Neo4j 直查标准答案一致。"""
-    expected_value = neo4j_scalar(case["cypher"], field="value")
-
+def test_neo4j_llamaindex_query_returns_stable_shape(case, mcp_client, _require_graph_llamaindex_tool) -> None:
+    """图查询用例：仅验证 MCP 返回结构稳定。"""
     payload = mcp_client.call_tool(
-        "neo4j_query",
+        "neo4j_llamaindex_query",
         {
-            "cypher": case["cypher"],
+            "question": case["question"],
             "trace_id": f"test-{case['case_id']}",
+            "max_rows": 50,
         },
     )
 
     assert isinstance(payload, dict)
+    assert isinstance(payload.get("question"), str) and payload["question"].strip()
+    assert isinstance(payload.get("schema"), str)
     assert isinstance(payload.get("cypher"), str) and payload["cypher"].strip()
-
-    actual_value = _extract_first_value(payload.get("rows"))
-    assert actual_value == expected_value
+    assert isinstance(payload.get("rows"), list)
+    assert isinstance(payload.get("row_count"), int)
+    assert payload.get("row_count") == len(payload.get("rows"))

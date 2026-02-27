@@ -599,3 +599,20 @@ class RAGTool:
             if len(deduped) >= self.mqe_max_queries:
                 break
         return deduped
+
+
+# def _prompt_mqe(query: str, n: int) -> List[str]:
+#     """使用LLM生成多样化的查询扩展"""
+#     try:
+#         from ...core.llm import HelloAgentsLLM
+#         llm = HelloAgentsLLM()
+#         prompt = [
+#             {"role": "system", "content": "你是检索查询扩展助手。生成语义等价或互补的多样化查询。使用中文，简短，避免标点。"},
+#             {"role": "user", "content": f"原始查询：{query}\n请给出{n}个不同表述的查询，每行一个。"}
+#         ]
+#         text = llm.invoke(prompt)
+#         lines = [ln.strip("- \t") for ln in (text or "").splitlines()]
+#         outs = [ln for ln in lines if ln]
+#         return outs[:n] or [query]
+#     except Exception:
+#         return [query]

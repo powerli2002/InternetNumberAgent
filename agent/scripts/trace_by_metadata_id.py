@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-按 metadata.trace_id 拼接 LangSmith 跨服务链路。
+按 trace_id / metadata.trace_id 拼接 LangSmith 跨服务链路。
 
 功能：
 1. 从指定项目读取最近一段时间内的 runs。
-2. 使用 metadata.trace_id 过滤关联 runs（跨 langgraph/mcp）。
-3. 输出计划节点（graph_node:plan）、时间线、错误摘要。
+2. 优先使用 run.trace_id 聚合，并兼容 metadata.trace_id 过滤。
+3. 输出计划节点、时间线、错误摘要与多 trace 告警。
 4. 可选输出关键节点的输入输出预览，便于定位问题。
 """
 
@@ -39,6 +39,14 @@ def _extract_start_time(run: Any) -> datetime:
     if isinstance(start_time, datetime):
         return start_time
     return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _extract_trace_id(run: Any) -> str:
+    """提取 LangSmith 内部 trace_id。"""
+    trace_id = getattr(run, "trace_id", None)
+    if trace_id is None:
+        return ""
+    return str(trace_id)
 
 
 def _short_id(value: Any) -> str:
@@ -125,9 +133,16 @@ def _collect_runs(client: Client, project: str, limit: int, since_hours: float) 
 
 
 def _print_plan_section(runs: List[Any]) -> None:
-    plan_runs = [run for run in runs if str(getattr(run, "name", "")).startswith("graph_node:plan")]
+    plan_runs = []
+    for run in runs:
+        name = str(getattr(run, "name", "")).strip().lower()
+        payload = _extract_plan_payload(run)
+        if payload is None:
+            continue
+        if name == "plan" or name.startswith("graph_node:plan") or "plan" in name:
+            plan_runs.append(run)
     if not plan_runs:
-        print("未发现 graph_node:plan 计划节点。")
+        print("未发现可识别的计划节点。")
         return
     for run in sorted(plan_runs, key=_extract_start_time):
         payload = _extract_plan_payload(run)
@@ -176,15 +191,26 @@ def _print_errors(runs: List[Any]) -> None:
 
 
 def _print_io_preview(runs: List[Any], io_limit: int) -> None:
+    important_names = {
+        "langgraph_agent",
+        "plan",
+        "validate_plan",
+        "dispatch",
+        "execute_ready",
+        "collect_memory_notes",
+        "conflict_check",
+        "build_context",
+        "generate_answer",
+        "write_memory",
+    }
     important_prefixes = (
         "graph_node:",
-        "langgraph_agent",
         "mcp_tool:",
         "mcp_server:",
     )
     for run in sorted(runs, key=_extract_start_time):
         name = str(getattr(run, "name", ""))
-        if not name.startswith(important_prefixes):
+        if name not in important_names and not name.startswith(important_prefixes):
             continue
         inputs = getattr(run, "inputs", None)
         outputs = getattr(run, "outputs", None)
@@ -215,8 +241,8 @@ def _to_serializable_runs(runs: List[Any]) -> List[Dict[str, Any]]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="按 metadata.trace_id 聚合 LangSmith runs。")
-    parser.add_argument("--trace-id", required=True, help="要拼接的 metadata.trace_id")
+    parser = argparse.ArgumentParser(description="按 run.trace_id / metadata.trace_id 聚合 LangSmith runs。")
+    parser.add_argument("--trace-id", required=True, help="优先匹配 run.trace_id，未命中则回退 metadata.trace_id")
     parser.add_argument(
         "--project",
         default=os.getenv("LANGSMITH_PROJECT", "internet-number-qa"),
@@ -234,12 +260,16 @@ def main() -> int:
     args = parse_args()
     client = Client()
     runs = _collect_runs(client, args.project, args.limit, args.since_hours)
-    matched = [run for run in runs if _extract_metadata(run).get("trace_id") == args.trace_id]
+    matched_by_run_trace = [run for run in runs if _extract_trace_id(run) == args.trace_id]
+    matched_by_metadata = [run for run in runs if _extract_metadata(run).get("trace_id") == args.trace_id]
+    matched = matched_by_run_trace if matched_by_run_trace else matched_by_metadata
     matched = sorted(matched, key=_extract_start_time)
+    match_mode = "run.trace_id" if matched_by_run_trace else "metadata.trace_id"
 
     print("=== 查询参数 ===")
     print(f"project={args.project}")
     print(f"trace_id={args.trace_id}")
+    print(f"match_mode={match_mode}")
     print(f"total_runs={len(runs)} matched_runs={len(matched)}")
 
     if not matched:
@@ -251,6 +281,13 @@ def main() -> int:
     print(f"root_count={len(roots)}")
     for root in roots:
         print(f"  - root={root}")
+
+    trace_ids = sorted({_extract_trace_id(run) for run in matched if _extract_trace_id(run)})
+    print(f"trace_count={len(trace_ids)}")
+    for trace in trace_ids:
+        print(f"  - trace={trace}")
+    if len(trace_ids) > 1:
+        print("告警：当前匹配结果包含多个 LangSmith trace_id，存在链路拆分风险。")
 
     print("\n=== 计划节点 ===")
     _print_plan_section(matched)
@@ -269,6 +306,9 @@ def main() -> int:
         payload = {
             "project": args.project,
             "metadata_trace_id": args.trace_id,
+            "match_mode": match_mode,
+            "trace_count": len(trace_ids),
+            "trace_ids": trace_ids,
             "matched_count": len(matched),
             "runs": _to_serializable_runs(matched),
         }

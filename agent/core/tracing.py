@@ -17,12 +17,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import contextvars
 import os
 import random
 from typing import Any, Dict, List, Optional
 
 from langsmith import Client
 from langsmith.run_helpers import trace
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - Python < 3.9 兼容兜底
+    ZoneInfo = None  # type: ignore
 
 
 class LangSmithTracer:
@@ -32,6 +39,9 @@ class LangSmithTracer:
         # 通过环境变量统一开关，避免生产环境无意开销
         self.enabled = os.getenv("LANGSMITH_TRACING", "").lower() == "true"
         self.project_name = project_name or os.getenv("LANGSMITH_PROJECT", "internet-number-qa")
+        # 追踪时区，默认北京时间（Asia/Shanghai）
+        self.timezone = (os.getenv("LANGSMITH_TIMEZONE") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+        self._tzinfo = self._resolve_timezone(self.timezone)
         # 采样率（0-1），用于降低追踪成本
         try:
             self.sample_rate = float(os.getenv("LANGSMITH_SAMPLE_RATE", "1.0"))
@@ -41,7 +51,7 @@ class LangSmithTracer:
         # 默认标签便于集中筛选
         raw_tags = os.getenv("LANGSMITH_DEFAULT_TAGS", "")
         self.default_tags = [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
-        self.default_metadata = {"service": "fusion-agent"}
+        self.default_metadata = {"service": "fusion-agent", "timezone": self.timezone}
         self.client: Optional[Client] = None
         if self.enabled:
             # 必须配置 API key 与 workspace，否则直接报错
@@ -56,6 +66,21 @@ class LangSmithTracer:
             return True
         return random.random() <= self.sample_rate
 
+    def _resolve_timezone(self, timezone_name: str):
+        """解析时区名称，异常时回退 UTC。"""
+        if ZoneInfo is None:
+            return None
+        try:
+            return ZoneInfo(timezone_name)
+        except Exception:
+            return ZoneInfo("UTC")
+
+    def _now_local_iso(self) -> str:
+        """生成带时区信息的本地时间戳，写入 LangSmith metadata。"""
+        if self._tzinfo is None:
+            return datetime.utcnow().isoformat()
+        return datetime.now(self._tzinfo).isoformat()
+
     def start_run(
         self,
         name: str,
@@ -67,16 +92,28 @@ class LangSmithTracer:
     ):
         if not self.enabled:
             raise RuntimeError("LangSmith 追踪未启用，无法创建 run。")
-        if not self._should_sample():
+        request_sampled = _REQUEST_SAMPLED_CTX.get()
+        is_root = parent is None
+        token: Optional[contextvars.Token] = None
+        if is_root:
+            request_sampled = self._should_sample()
+            token = _REQUEST_SAMPLED_CTX.set(request_sampled)
+        elif request_sampled is None:
+            # 未绑定根上下文时，不允许子 run 独立采样，避免孤儿 trace。
             return _NoopRun()
+
+        if request_sampled is False:
+            return _NoopRun(reset_token=token)
         merged_tags = list(self.default_tags)
         if tags:
             merged_tags.extend(tags)
         merged_metadata = dict(self.default_metadata)
         if metadata:
             merged_metadata.update(metadata)
+        # 每个 run 记录本地时间，便于在控制台与 UTC 时间对照定位问题。
+        merged_metadata["local_time"] = self._now_local_iso()
         # 统一封装 trace，调用方只需关心 name/run_type/inputs
-        return trace(
+        run_ctx = trace(
             name=name,
             run_type=run_type,
             inputs=inputs,
@@ -86,16 +123,46 @@ class LangSmithTracer:
             project_name=self.project_name,
             client=self.client,
         )
+        return _ScopedRun(run_ctx, reset_token=token)
 
 
 class _NoopRun:
     """采样关闭时的空 run，保持上下文管理器接口。"""
 
+    def __init__(self, reset_token: Optional[contextvars.Token] = None) -> None:
+        self._reset_token = reset_token
+
     def __enter__(self):  # noqa: D401
         return self
 
     def __exit__(self, exc_type, exc, tb):  # noqa: D401
+        if self._reset_token is not None:
+            _REQUEST_SAMPLED_CTX.reset(self._reset_token)
         return False
 
     def add_outputs(self, _outputs: Optional[Dict[str, Any]] = None) -> None:
         return None
+
+
+class _ScopedRun:
+    """包装 LangSmith run 上下文，确保请求级采样上下文在退出时恢复。"""
+
+    def __init__(self, inner: Any, reset_token: Optional[contextvars.Token] = None) -> None:
+        self._inner = inner
+        self._reset_token = reset_token
+
+    def __enter__(self):
+        return self._inner.__enter__()
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return self._inner.__exit__(exc_type, exc, tb)
+        finally:
+            if self._reset_token is not None:
+                _REQUEST_SAMPLED_CTX.reset(self._reset_token)
+
+
+_REQUEST_SAMPLED_CTX: contextvars.ContextVar[Optional[bool]] = contextvars.ContextVar(
+    "langsmith_request_sampled",
+    default=None,
+)

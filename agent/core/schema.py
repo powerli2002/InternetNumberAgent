@@ -53,16 +53,16 @@ TABLE_SCHEMA = {
         "export",
         "import_as",
         "export_as",
-        "v4Upstream",
-        "v4Peer",
-        "v4Downstream",
-        "v4Propagation",
-        "v4Prefixes",
-        "v6Upstream",
-        "v6Peer",
-        "v6Downstream",
-        "v6Propagation",
-        "v6Prefixes",
+        "v4upstream",
+        "v4peer",
+        "v4downstream",
+        "v4propagation",
+        "v4prefixes",
+        "v6upstream",
+        "v6peer",
+        "v6downstream",
+        "v6propagation",
+        "v6prefixes",
     ],
     "asn_entity": ["asn", "source", "country", "opq_id", "date", "status", "org_name", "uuid"],
     "country_entity": [
@@ -71,17 +71,17 @@ TABLE_SCHEMA = {
         "country_cn",
         "region",
         "population",
-        "Internet_users",
-        "Internet_users_percentage",
-        "GDP_per_capita(CNY)",
+        "internet_users",
+        "internet_users_percentage",
+        "gdp_per_capita_cny",
         "asns",
         "asns_number",
         "route_asns",
         "route_asns_number",
-        "v4Prefixes",
-        "v4Prefixes_number",
-        "v6Prefixes",
-        "v6Prefixes_number",
+        "v4prefixes",
+        "v4prefixes_number",
+        "v6prefixes",
+        "v6prefixes_number",
         "orgs",
         "orgs_number",
     ],
@@ -130,9 +130,9 @@ TABLE_SCHEMA = {
         "domain_auth",
         "domain_auth_num",
     ],
-    "ip_inetnum_entity": ["CIDR", "netname", "descr", "country", "source", "admin-c", "tech-c", "abuse-c", "org", "org_name", "org_name_cn", "org_uuid"],
-    "ip_rdap_entity": ["CIDR", "netname", "descr", "country", "source", "admin-c", "tech-c", "abuse-c", "org", "org_name", "org_name_cn", "org_uuid"],
-    "ip_route_entity": ["CIDR", "descr", "origin", "mnt-by", "last-modified", "source"],
+    "ip_inetnum_entity": ["cidr", "netname", "descr", "country", "source", "admin_c", "tech_c", "abuse_c", "org", "org_name", "org_name_cn", "org_uuid"],
+    "ip_rdap_entity": ["cidr", "netname", "descr", "country", "source", "admin_c", "tech_c", "abuse_c", "org", "org_name", "org_name_cn", "org_uuid"],
+    "ip_route_entity": ["cidr", "descr", "origin", "mnt_by", "last_modified", "source"],
     "ipv4_entity": ["prefix", "prefix_len", "source", "country", "org_id", "date", "status", "org_name", "sibling_as", "uuid"],
     "ipv6_bgp_entity": [
         "prefix",
@@ -160,10 +160,10 @@ TABLE_SCHEMA = {
         "rpki",
     ],
     "ipv6_entity": ["prefix", "prefix_len", "source", "country", "org_id", "date", "status", "org_name", "sibling_as", "uuid"],
-    "ipv6_inetnum_entity": ["CIDR", "netname", "descr", "country", "source", "admin-c", "tech-c", "abuse-c", "org", "org_name", "org_name_cn", "org_uuid"],
-    "ipv6_rdap_entity": ["CIDR", "netname", "descr", "country", "source", "admin-c", "tech-c", "abuse-c", "org", "org_name", "org_name_cn", "org_uuid"],
-    "ipv6_route_entity": ["CIDR", "descr", "origin", "mnt-by", "last-modified", "source"],
-    "org_entity": ["uuid", "org_country", "org_country_cn", "org_name", "org_name_cn", "sibling_as", "v4Prefixes", "v6Prefixes", "sibling_as_num", "v4Prefixes_num", "v6Prefixes_num"],
+    "ipv6_inetnum_entity": ["cidr", "netname", "descr", "country", "source", "admin_c", "tech_c", "abuse_c", "org", "org_name", "org_name_cn", "org_uuid"],
+    "ipv6_rdap_entity": ["cidr", "netname", "descr", "country", "source", "admin_c", "tech_c", "abuse_c", "org", "org_name", "org_name_cn", "org_uuid"],
+    "ipv6_route_entity": ["cidr", "descr", "origin", "mnt_by", "last_modified", "source"],
+    "org_entity": ["uuid", "org_country", "org_country_cn", "org_name", "org_name_cn", "sibling_as", "v4prefixes", "v6prefixes", "sibling_as_num", "v4prefixes_num", "v6prefixes_num"],
     "website_entity": ["url", "title", "key", "description", "industry", "ip", "ip_prefix", "auth_ip", "auth_ip_prefix"],
 }
 
@@ -182,6 +182,14 @@ TABLE_CONTEXT_HINTS = {
 _TABLE_COMMENT_RE = re.compile(r'^COMMENT ON TABLE public\."([^"]+)" IS \'(.*)\';\s*$')
 _COLUMN_COMMENT_RE = re.compile(r'^COMMENT ON COLUMN public\."([^"]+)"\."([^"]+)" IS \'(.*)\';\s*$')
 _SCHEMA_COMMENTS_FILE = Path(__file__).resolve().parents[2] / "database" / "core_schema_comments.review.sql"
+
+
+def _normalize_identifier(name: str) -> str:
+    """将数据库标识符标准化为小写下划线风格。"""
+    text = str(name).strip().lower()
+    text = re.sub(r"[^0-9a-z_]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text
 
 
 def _compact_comment(raw_text: str, max_len: int = 96) -> str:
@@ -231,14 +239,16 @@ def _load_review_comments(path: Path) -> Tuple[Dict[str, str], Dict[str, Dict[st
         table_match = _TABLE_COMMENT_RE.match(stmt)
         if table_match:
             table_name, raw_comment = table_match.groups()
-            table_comments[table_name] = _compact_comment(raw_comment)
+            table_comments[_normalize_identifier(table_name)] = _compact_comment(raw_comment)
             continue
 
         column_match = _COLUMN_COMMENT_RE.match(stmt)
         if column_match:
             table_name, column_name, raw_comment = column_match.groups()
-            table_columns = column_comments.setdefault(table_name, {})
-            table_columns[column_name] = _compact_comment(raw_comment)
+            normalized_table = _normalize_identifier(table_name)
+            normalized_column = _normalize_identifier(column_name)
+            table_columns = column_comments.setdefault(normalized_table, {})
+            table_columns[normalized_column] = _compact_comment(raw_comment)
 
     return table_comments, column_comments
 

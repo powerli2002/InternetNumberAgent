@@ -11,7 +11,7 @@
 | 引擎 | 数据类型 | 查询特点 | 典型场景 | 代码入口 |
 |------|---------|---------|---------|---------|
 | **PostgreSQL** | 结构化表格 | 精确过滤、聚合统计 | "AS4134有多少前缀" | `agent/tools/nl2sql_tool.py` |
-| **Neo4j** | 属性图谱 | 多跳关系推理 | "查找AS4134的上游传输路径" | `agent/tools/neo4j_graph_loader.py` |
+| **Neo4j** | 属性图谱 | 多跳关系推理 | "查找AS4134的上游传输路径" | `agent/scripts/neo4j_graph_loader.py` |
 | **Milvus** | 向量文档 | 语义相似检索 | "解释BGP劫持的原理" | `agent/tools/rag_tool.py` |
 
 **设计理论基础：Polyglot Persistence（多语言持久化）**
@@ -212,7 +212,7 @@ Assistant: "博彩行业主要集中在..."
 
 ### 2.3 图谱索引与优化策略
 
-**索引创建**（`agent/tools/neo4j_graph_loader.py:133-140`）：
+**索引创建**（`agent/scripts/neo4j_graph_loader.py:133-140`）：
 ```python
 def _create_constraints(session, include_website: bool, include_industry: bool) -> None:
     # 唯一约束（自动创建索引）
@@ -236,7 +236,7 @@ def _create_constraints(session, include_website: bool, include_industry: bool) 
 
 ### 2.1 图谱装载流程
 
-**核心入口**：`agent/tools/neo4j_graph_loader.py`
+**核心入口**：`agent/scripts/neo4j_graph_loader.py`
 
 **数据流水线**：
 ```
@@ -249,7 +249,7 @@ PostgreSQL (16张核心表)
 [Website] → _load_website_* → Neo4j (:Website)
 ```
 
-**批量写入优化**（`agent/tools/neo4j_graph_loader.py:115-123`）：
+**批量写入优化**（`agent/scripts/neo4j_graph_loader.py:115-123`）：
 ```python
 def _write_nodes(session, label: str, key: str, rows: List[Dict[str, Any]]) -> None:
     """
@@ -270,7 +270,7 @@ def _write_nodes(session, label: str, key: str, rows: List[Dict[str, Any]]) -> N
     session.execute_write(lambda tx: tx.run(cypher, rows=rows))
 ```
 
-**关系写入示例**（`agent/tools/neo4j_graph_loader.py:287-301`）：
+**关系写入示例**（`agent/scripts/neo4j_graph_loader.py:287-301`）：
 ```python
 def _flush_as_relations(session, rows: List[Dict[str, Any]]) -> None:
     """

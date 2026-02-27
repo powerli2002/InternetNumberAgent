@@ -50,7 +50,7 @@ Also, qualify column names with table aliases when needed.
 Important identifier rules for PostgreSQL:
 1) Unquoted identifiers are folded to lowercase.
 2) If a table/column name in schema contains uppercase letters or special characters, you MUST wrap it in double quotes exactly as shown in schema.
-3) When using aliases, keep quoting, e.g. a."v6Prefixes", a."v6Upstream", a."v6Downstream".
+3) When using aliases, keep quoting when needed, e.g. a."gdp_per_capita_cny", a."admin_c", a."last_modified".
 4) Never change identifier spelling or letter case.
 
 You are required to use the following format, each taking one line:

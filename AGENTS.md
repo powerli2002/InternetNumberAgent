@@ -32,7 +32,7 @@
 - A2A Worker 服务：`uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031`
 - API：`uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025`
 - 向量索引：`python agent/knowledge_ingest.py --root . --path agent/knowledge --reset`
-- Neo4j 图谱：`python -m agent.tools.neo4j_graph_loader --batch-size 1000`
+- Neo4j 图谱：`python -m agent.scripts.neo4j_graph_loader --batch-size 1000`
 - AS 疆域分析：`python agent/tools/as_territory_tools.py --config conf/config.docker.yaml --root . [--load-neo4j]`
 
 ## 开发规范

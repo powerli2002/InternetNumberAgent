@@ -51,6 +51,7 @@
 - **多值字段**：通常是 Python 列表字面量字符串（如 `"[1, 2, 3]"`），落库为数组类型（如 `text[]`、`bigint[]`）。
 - **联系信息**：`admin_info/tech_info/abuse_info` 为 JSON 字符串，落库为 `json`。
 - **IP 类型**：前缀字段为 `cidr/inet`，IP 列表以字符串数组保存。
+- **列名规范化**：导入阶段统一执行 `lowercase + 特殊字符转下划线`（例如 `v4Prefixes -> v4prefixes`、`CIDR -> cidr`、`admin-c -> admin_c`）。
 - **分隔符**：`website_entity_base.csv` 使用 `;` 分隔，其余多为 `,` 分隔。
 
 ### 2.3 运行时/辅助表（非 16 核心表）
@@ -65,7 +66,7 @@
 
 ## 3. 数据库 16 张核心表（字段与含义）
 
-> 说明：以下字段为实际 CSV 列头，表字段与 CSV 一一对应。数据库表名固定为下列 16 张。
+> 说明：以下字段为**数据库落库字段名**（已做列名规范化：小写+下划线）。数据库表名固定为下列 16 张。
 
 ### 3.1 `as_entity`
 
@@ -80,7 +81,7 @@
   - AS画像：`as_rank, type, type_cn, is_ddos_provider, is_route`
   - 地理信息：`as_longitude, as_latitude, geo_country_list, geo_city_list, geo_latitude_longitude, geo_country_list_num, geo_city_list_num, geo_latitude_longitude_num, as_country, as_country_cn`
   - 路由策略：`import, export, import_as, export_as`
-  - BGP 拓扑：`v4Upstream, v4Peer, v4Downstream, v4Propagation, v4Prefixes, v6Upstream, v6Peer, v6Downstream, v6Propagation, v6Prefixes`
+  - BGP 拓扑：`v4upstream, v4peer, v4downstream, v4propagation, v4prefixes, v6upstream, v6peer, v6downstream, v6propagation, v6prefixes`
 
 ### 3.2 `asn_entity`
 
@@ -94,8 +95,8 @@
 - **来源**：`data/format/country_entity_YYYY-MM-DD.csv`
 - **字段说明**：
   - 基础：`country_en, country, country_cn, region`
-  - 宏观统计：`population, Internet_users, Internet_users_percentage, GDP_per_capita(CNY)`
-  - 聚合统计：`asns, asns_number, route_asns, route_asns_number, v4Prefixes, v4Prefixes_number, v6Prefixes, v6Prefixes_number, orgs, orgs_number`
+  - 宏观统计：`population, internet_users, internet_users_percentage, gdp_per_capita_cny`
+  - 聚合统计：`asns, asns_number, route_asns, route_asns_number, v4prefixes, v4prefixes_number, v6prefixes, v6prefixes_number, orgs, orgs_number`
 
 ### 3.4 `industry_entity`
 
@@ -117,21 +118,21 @@
 
 ### 3.6 `ip_inetnum_entity`
 
-- **主键**：`CIDR`
+- **主键**：`cidr`
 - **来源**：`data/format/ip_inetnum_entity.csv`
-- **字段说明**：`CIDR, netname, descr, country, source, admin-c, tech-c, abuse-c, org, org_name, org_name_cn, org_uuid`
+- **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.7 `ip_rdap_entity`
 
-- **主键**：`CIDR`
+- **主键**：`cidr`
 - **来源**：`data/format/ip_rdap_entity.csv`
-- **字段说明**：`CIDR, netname, descr, country, source, admin-c, tech-c, abuse-c, org, org_name, org_name_cn, org_uuid`
+- **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.8 `ip_route_entity`
 
-- **主键**：`CIDR`
+- **主键**：`cidr`
 - **来源**：`data/format/ip_route_entity.csv`
-- **字段说明**：`CIDR, descr, origin, mnt-by, last-modified, source`
+- **字段说明**：`cidr, descr, origin, mnt_by, last_modified, source`
 
 ### 3.9 `ipv4_entity`
 
@@ -153,27 +154,27 @@
 
 ### 3.12 `ipv6_inetnum_entity`
 
-- **主键**：`CIDR`
+- **主键**：`cidr`
 - **来源**：`data/format/ipv6_inetnum_entity.csv`
-- **字段说明**：`CIDR, netname, descr, country, source, admin-c, tech-c, abuse-c, org, org_name, org_name_cn, org_uuid`
+- **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.13 `ipv6_rdap_entity`
 
-- **主键**：`CIDR`
+- **主键**：`cidr`
 - **来源**：`data/format/ipv6_rdap_entity.csv`
-- **字段说明**：`CIDR, netname, descr, country, source, admin-c, tech-c, abuse-c, org, org_name, org_name_cn, org_uuid`
+- **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.14 `ipv6_route_entity`
 
-- **主键**：`CIDR`
+- **主键**：`cidr`
 - **来源**：`data/format/ipv6_route_entity.csv`
-- **字段说明**：`CIDR, descr, origin, mnt-by, last-modified, source`
+- **字段说明**：`cidr, descr, origin, mnt_by, last_modified, source`
 
 ### 3.15 `org_entity`
 
 - **主键**：`uuid`
 - **来源**：`data/format/org_entity_YYYY-MM-DD.csv`
-- **字段说明**：`uuid, org_country, org_country_cn, org_name, org_name_cn, sibling_as, v4Prefixes, v6Prefixes, sibling_as_num, v4Prefixes_num, v6Prefixes_num`
+- **字段说明**：`uuid, org_country, org_country_cn, org_name, org_name_cn, sibling_as, v4prefixes, v6prefixes, sibling_as_num, v4prefixes_num, v6prefixes_num`
 
 ### 3.16 `website_entity`
 
@@ -210,8 +211,8 @@
    - 说明：委托前缀与组织、AS 家族建立映射。
 
 7. **INETNUM/RDAP/ROUTE 三类注册信息对齐**
-   - 关联键：`CIDR`
-   - 说明：`ip_inetnum_entity`、`ip_rdap_entity`、`ip_route_entity`（IPv6 对应表）可通过 `CIDR` 对齐进行差异比对。
+   - 关联键：`cidr`
+   - 说明：`ip_inetnum_entity`、`ip_rdap_entity`、`ip_route_entity`（IPv6 对应表）可通过 `cidr` 对齐进行差异比对。
 
 8. **网站/域名 ↔ IP/前缀 ↔ AS**
    - 关联链路：`website_entity.ip/auth_ip` → IP 前缀（匹配 `ip_bgp_entity.prefix`）→ `bgp/route` → `as_entity`
@@ -257,7 +258,7 @@
 
 ## 7. 导入策略与注意事项
 
-1. **默认只落 16 张实体表**，并清理非核心表，保持数据库结构最小化。
+1. **结构化事实源仍为 16 张核心表**：默认先导入 PostgreSQL，再同步导入 Neo4j 图谱。
 2. **日期快照只保留一份**：数据库表名不带日期，需选择最新或指定日期导入。
 3. **无数据才重新导入**：如 16 表已存在且有数据，导入流程会跳过。
 4. **多值字段需要解析**：例如 `sibling_as`、`geo_country_list`、`ip_prefix` 等。
@@ -268,5 +269,8 @@
 9. **chapter_5 示例路径已补齐**：仓库已包含 `agent/knowledge/bgp/hijack_detection.md`，可直接按文档复现索引构建示例。
 10. **Compose 已移除自动 CSV 导入服务**：`docker/docker-compose.yml` 不再包含 `loader`，避免“每次启动都执行导入”；如需导入需手动执行 `python -m agent.scripts.load_all_csv`。
 11. **NL2SQL Prompt 新增注释语义辅助**：`agent/core/schema.py` 会解析 `database/core_schema_comments.review.sql` 中的 `COMMENT ON TABLE/COLUMN`，并在 `agent/tools/nl2sql_tool.py` 组装表上下文时拼接“表说明 + 字段释义”辅助 SQL 生成。
+12. **双库一致性导入已并入 `load_all_csv`**：默认执行 PostgreSQL + Neo4j，Neo4j 失败会重试一次，仍失败则回滚到旧快照（PG prepared transaction + Neo4j 单事务）。
+13. **Neo4j 主图导入入口迁移**：标准入口为 `python -m agent.scripts.neo4j_graph_loader`；`agent.tools.neo4j_graph_loader` 仅保留兼容转调。
+14. **MCP 图查询对外收敛**：仅暴露 `neo4j_llamaindex_query`，不再对外暴露 `neo4j_query`。
 
 以上即为当前项目的完整数据格式、功能与表间关联说明，可直接用于面试项目讲解或后续 Agent/知识图谱落地。

@@ -2,6 +2,17 @@
 
 本目录按分层方式整理，目标是降低耦合并提升可维护性。
 
+## 快速启动
+
+启动 mcp服务
+python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
+
+启动 cli
+python agent/cli/main.py
+
+说明：CLI 默认不设置外层超时；工具执行期间会输出开始/结束日志与耗时。
+
+
 ## 分层结构（推荐新代码落点）
 
 - `agent/core/`

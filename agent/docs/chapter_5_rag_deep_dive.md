@@ -1699,7 +1699,7 @@ AS4134 与 AS174 有两条主要连接路径：
 - 需要定义节点类型（AS/Org/Prefix/Country）和关系类型（BELONGS_TO/V4_UPSTREAM/...）
 - 数据规模大（200 万节点 + 500 万关系），导入耗时长
 
-解决方案（agent/tools/neo4j_graph_loader.py）：
+解决方案（agent/scripts/neo4j_graph_loader.py）：
 1. 批量写入（batch_size=1000）
 2. 使用 UNWIND + MERGE 优化性能
 3. 预建立唯一约束（自动创建索引）

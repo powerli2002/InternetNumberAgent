@@ -1,12 +1,18 @@
 # 互联网号码资源问答系统（fusionprocessing）
 
-本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**LangGraph 主编排 + FastMCP 工具层（HTTP） + 全链路 LangSmith 追踪**。复杂任务通过 LangGraph 子图执行，不再依赖 A2A/子代理服务。
+本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**LangGraph 主编排 + FastMCP 工具层（HTTP） + LangSmith 追踪（编排层与 MCP 客户端）**。复杂任务通过 LangGraph 子图执行，不再依赖 A2A/子代理服务。
 
 ## 图查询链路升级（2026-02-25）
 
 1. 新增 MCP 工具 `neo4j_llamaindex_query`：由工具内部通过 LlamaIndex 读取 Neo4j 当前 schema，生成 Cypher 并执行返回结果。
 2. LangGraph `graph` 步骤不再在主流程预生成 Cypher，而是直接把自然语言问题交给 `neo4j_llamaindex_query`。
-3. 保留 `neo4j_query` 作为显式 Cypher 只读执行工具，便于测试与运维排障。
+3. MCP 对外仅暴露 `neo4j_llamaindex_query`，不再公开 `neo4j_query`。
+
+## 编排链路简化（2026-02-26）
+
+1. LangGraph 主图移除 `classify` 节点，入口节点调整为 `plan`。
+2. `available_tools` 探测下沉到 `plan` 节点，并在每轮重规划前重新探测。
+3. 运行时 metadata 不再输出 `question_type`，统一聚焦计划与执行证据。
 
 ## 稳定性修复（2026-02-08）
 
@@ -37,7 +43,7 @@
    docker compose -f docker/docker-compose.yml up -d postgres etcd minio milvus neo4j
    ```
 
-2. 导入 CSV（仅 16 张核心表，手动触发）
+2. 导入 CSV（默认同时导入 PostgreSQL + Neo4j，手动触发）
    ```bash
    # 本机执行
    python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --date 2024-08-12 --ensure-core
@@ -47,24 +53,26 @@
      python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root /work --date 2024-08-12 --ensure-core
    ```
    - 导入流程会自动应用统一 DDL：`database/core_schema.sql`
-   - `python -m agent.scripts.load_all_csv` 默认启用 `--single-transaction`，16 张核心表导入失败或核心 CSV 缺失会整批回滚
+   - 导入入库时会统一规范化列名：`lowercase + underscore`（如 `v4Prefixes -> v4prefixes`、`CIDR -> cidr`、`admin-c -> admin_c`）
+   - `python -m agent.scripts.load_all_csv` 默认启用 PostgreSQL + Neo4j 双库导入；Neo4j 默认不含 `website/industry`，可用 `--include-website/--include-industry` 开启
+   - 双库一致性基于 PostgreSQL prepared transaction + Neo4j 单事务；Neo4j 失败会重试一次，重试耗尽则回滚到旧快照
+   - 若只导入 PostgreSQL，可追加 `--no-neo4j`
+   - 若异常中断后需排查 prepared 事务：
+     ```sql
+     SELECT gid, prepared FROM pg_prepared_xacts;
+     -- 按 gid 处理
+     COMMIT PREPARED '<gid>';
+     ROLLBACK PREPARED '<gid>';
+     ```
    - 如需单独执行：`python -m agent.scripts.ensure_core_schema --config conf/config.docker.yaml --root .`
 
-3. （可选）一体化顺序导入 PostgreSQL + Neo4j
-   ```bash
-   python -m agent.scripts.load_network_data_atomic --root . --config conf/config.docker.yaml --ensure-core
-   ```
-   - 执行顺序：先 PostgreSQL（单事务）→ 后 Neo4j
-   - PostgreSQL 失败时不会触发 Neo4j 导入
-   - Neo4j 可通过 `--neo4j-single-transaction` 控制是否整批事务写入
-
-4. （可选）预构建 NL2SQL 索引
+3. （可选）预构建 NL2SQL 索引
    ```bash
    python -m agent.scripts.build_nl2sql_indexes
    ```
    - NL2SQL 表/列索引将写入 Milvus（单 collection + 分区），本地仅保留轻量 manifest
 
-5. 启动智能体服务（MCP / API）
+4. 启动智能体服务（MCP / API）
    ```bash
    docker compose -f docker/docker-compose.yml up -d agent-mcp agent-api
    ```
@@ -110,7 +118,7 @@
 - `NL2SQL_INDEX_CACHE_DIR`（NL2SQL 索引 manifest 目录，默认 `agent/store/index/nl2sql`）
 - `NL2SQL_VECTOR_COLLECTION`（NL2SQL 向量索引的 Milvus collection 名称，默认 `nl2sql_index`）
 - `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `180` 秒）
-- `CLI_TIMEOUT_SECONDS`（CLI 外层超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
+- `CLI_TIMEOUT_SECONDS`（保留配置；当前 CLI 不设置外层超时，持续执行直到任务结束）
 - `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
 - `RAG_EMBEDDING_BACKEND`（默认 `local_bge`）
 - `RAG_EMBEDDING_MODEL`（默认 `BAAI/bge-m3`，也可填本地模型目录）
@@ -144,16 +152,25 @@ FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张�
 - `MODULE_LOG_ENABLED`：是否记录模块输入/输出（默认 `true`）
 - `MODULE_LOG_BODY_LIMIT`：模块日志中单字段最大长度（默认 `2000` 字符）
 - `MODULE_LOG_MAX_ITEMS`：模块日志最多记录的返回项数量（默认 `5`）
+- MCP 工具调用会输出开始/结束（成功/失败）日志，并带 `elapsed` 耗时
 
-按 `metadata.trace_id` 拼接 LangSmith 跨服务链路（推荐用于排查 `graph_node:plan` 与 MCP 断点）：
+MCP 服务端默认不写 LangSmith 运行记录；当前默认采用“自动追踪优先”模式：
+
+- 每次提问应只生成一个 LangSmith trace；
+- trace 下会有多个自动 run（LangGraph 节点、LLM 调用等）；
+- 不再依赖手工 `graph_node:*` 与 `mcp_tool:*` run。
+
+按 `run.trace_id`（优先）或 `metadata.trace_id`（兼容）聚合链路：
 
 ```bash
 python -m agent.scripts.trace_by_metadata_id \
   --project "${LANGSMITH_PROJECT}" \
-  --trace-id "<metadata.trace_id>" \
+  --trace-id "<run.trace_id 或 metadata.trace_id>" \
   --since-hours 24 \
   --show-io
 ```
+
+更多监控与排障细节见：`docs/LangSmith监控指南.md`。
 
 ## Agent 目录分层（2026-02-06）
 
@@ -174,5 +191,6 @@ python -m agent.scripts.trace_by_metadata_id \
 - 项目目标与数据结构：`summary.md`
 - 部署与导入：`docs/部署.md`
 - 系统技术文档：`docs/互联网号码资源问答系统技术文档.md`
+- LangSmith 监控指南：`docs/LangSmith监控指南.md`
 - Agent 目录说明：`agent/README.md`
 - 面试深潜文档：`agent/docs/system_architecture_deep_dive/README.md`

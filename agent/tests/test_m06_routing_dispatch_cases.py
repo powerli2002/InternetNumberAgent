@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-import pytest
-
 from agent.runtime.langgraph_orchestrator import LangGraphOrchestrator
 
 
@@ -35,19 +33,6 @@ class _ExecuteRouterFake:
     def _run_todo_subgraph(self, *args, **kwargs):
         self.called.append("todo")
         return {"status": "ok", "result": {"tool": "todo"}, "evidences": [], "sources": ["todo"]}
-
-
-CLASSIFY_CASES = [
-    ("AS4134有多少IPv6前缀", "ip_query"),
-    ("ASN 4837 的上游有哪些", "as_query"),
-    ("这个域名属于哪个组织", "domain_query"),
-]
-
-
-@pytest.mark.parametrize("query,expected", CLASSIFY_CASES)
-def test_classify_question_records(query: str, expected: str) -> None:
-    """自然语言分类结果应稳定，便于路由规划。"""
-    assert LangGraphOrchestrator._classify_question(query) == expected
 
 
 def test_validate_plan_downgrade_unavailable_tools() -> None:

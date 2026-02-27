@@ -52,6 +52,25 @@ class EntityPersistence(DB_Tool):
             return result if result else None
         return None
 
+    @staticmethod
+    def normalize_cidr(value):
+        """
+        将前缀字符串规范化为网络地址形式。
+
+        例如：
+        - 193.23.230.0/21 -> 193.23.224.0/21
+        - 非法或空值 -> None
+        """
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        text = str(value).strip()
+        if not text or text.lower() in ('', 'nan', 'none', 'null'):
+            return None
+        try:
+            return str(ipaddress.ip_network(text, strict=False))
+        except Exception:
+            return None
+
     def iter_csv(self, filename, chunksize=None, **kwargs):
         # chunksize 为空时返回单个 DataFrame，避免整体逻辑重复
         if chunksize and chunksize > 0:
@@ -193,6 +212,10 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IP 地址前缀 inetnum 分配实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'CIDR' in df.columns:
+                df['CIDR'] = df['CIDR'].apply(self.normalize_cidr)
+            elif 'cidr' in df.columns:
+                df['cidr'] = df['cidr'].apply(self.normalize_cidr)
             self.df_to_DB(df, 'ip_inetnum_entity', truncate=first)
             first = False
 
@@ -202,6 +225,10 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IPv6 地址前缀 inetnum 分配实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'CIDR' in df.columns:
+                df['CIDR'] = df['CIDR'].apply(self.normalize_cidr)
+            elif 'cidr' in df.columns:
+                df['cidr'] = df['cidr'].apply(self.normalize_cidr)
             self.df_to_DB(df, 'ipv6_inetnum_entity', truncate=first)
             first = False
 
@@ -211,6 +238,10 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IP 地址前缀 RDAP 分配实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'CIDR' in df.columns:
+                df['CIDR'] = df['CIDR'].apply(self.normalize_cidr)
+            elif 'cidr' in df.columns:
+                df['cidr'] = df['cidr'].apply(self.normalize_cidr)
             self.df_to_DB(df, 'ip_rdap_entity', truncate=first)
             first = False
 
@@ -220,6 +251,10 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IPv6 地址前缀 RDAP 分配实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'CIDR' in df.columns:
+                df['CIDR'] = df['CIDR'].apply(self.normalize_cidr)
+            elif 'cidr' in df.columns:
+                df['cidr'] = df['cidr'].apply(self.normalize_cidr)
             self.df_to_DB(df, 'ipv6_rdap_entity', truncate=first)
             first = False
 
@@ -229,6 +264,10 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IP 地址前缀 route 实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'CIDR' in df.columns:
+                df['CIDR'] = df['CIDR'].apply(self.normalize_cidr)
+            elif 'cidr' in df.columns:
+                df['cidr'] = df['cidr'].apply(self.normalize_cidr)
             self.df_to_DB(df, 'ip_route_entity', truncate=first)
             first = False
 
@@ -238,6 +277,10 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IPv6 地址前缀 route 实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'CIDR' in df.columns:
+                df['CIDR'] = df['CIDR'].apply(self.normalize_cidr)
+            elif 'cidr' in df.columns:
+                df['cidr'] = df['cidr'].apply(self.normalize_cidr)
             self.df_to_DB(df, 'ipv6_route_entity', truncate=first)
             first = False
 
@@ -257,6 +300,8 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IP 地址前缀 delegate 委托实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, keep_default_na=False, na_values=['']):
+            if 'prefix' in df.columns:
+                df['prefix'] = df['prefix'].apply(self.normalize_cidr)
             df['sibling_as'] = df['sibling_as'].apply(self.parse_sibling_as)
             df = df.convert_dtypes()
             self.df_to_DB(df, 'ipv4_entity', ['prefix'], {'prefix':'inet', 'prefix_len':'integer',
@@ -270,6 +315,8 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IPv6 地址前缀 delegate 委托实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, keep_default_na=False, na_values=['']):
+            if 'prefix' in df.columns:
+                df['prefix'] = df['prefix'].apply(self.normalize_cidr)
             df['sibling_as'] = df['sibling_as'].apply(self.parse_sibling_as)
             df = df.convert_dtypes()
             self.df_to_DB(df, 'ipv6_entity', ['prefix'], {'prefix':'inet', 'prefix_len':'integer',
@@ -283,6 +330,8 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IP 地址前缀 BGP 路由实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'prefix' in df.columns:
+                df['prefix'] = df['prefix'].apply(self.normalize_cidr)
             df['route'] = df['route'].apply(
                 lambda x: [int(i) for i in x.split('|')] if pd.notna(x) and x != '' else [])
             df['admin_route'] = df['admin_route'].apply(
@@ -307,6 +356,8 @@ class EntityPersistence(DB_Tool):
         logger.info(f'IPv6 地址前缀 BGP 路由实体持久化 {filename}')
         first = True
         for df in self.iter_csv(filename, chunksize=chunksize, dtype=str, keep_default_na=False, na_values=['']):
+            if 'prefix' in df.columns:
+                df['prefix'] = df['prefix'].apply(self.normalize_cidr)
             df['route'] = df['route'].apply(
                 lambda x: [int(i) for i in x.split('|')] if pd.notna(x) and x != '' else [])
             df['admin_route'] = df['admin_route'].apply(

@@ -24,7 +24,6 @@ def test_mcp_required_tools_present(mcp_client) -> None:
         "health",
         "nl2sql_query",
         "rag_search",
-        "neo4j_query",
         "neo4j_llamaindex_query",
         "note_search",
         "todo_add",
@@ -32,6 +31,20 @@ def test_mcp_required_tools_present(mcp_client) -> None:
     }
     missing = sorted(required - names)
     assert not missing, f"缺少 MCP 工具: {missing}"
+    assert "neo4j_query" not in names, "neo4j_query 不应再对外暴露。"
+
+
+@pytest.mark.live
+def test_mcp_neo4j_query_is_not_exposed(mcp_client) -> None:
+    """外部调用 neo4j_query 应报工具不存在。"""
+    with pytest.raises(Exception):
+        mcp_client.call_tool(
+            "neo4j_query",
+            {
+                "cypher": "MATCH (n) RETURN count(n) AS value LIMIT 1",
+                "trace_id": "test-neo4j-query-removed",
+            },
+        )
 
 
 @pytest.mark.live

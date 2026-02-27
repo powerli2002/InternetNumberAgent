@@ -202,136 +202,12 @@ class LocalBGELlamaEmbedding:
 
 
 def _resolve_partitioned_milvus_vector_store():
-    """延迟加载 Milvus VectorStore，并扩展分区写入与查询能力。"""
+    """延迟加载 Milvus VectorStore（使用官方分区参数）。"""
     try:
         from llama_index.vector_stores.milvus import MilvusVectorStore  # type: ignore
-        from llama_index.vector_stores.milvus.base import MILVUS_ID_FIELD, _to_milvus_filter, logger  # type: ignore
-        from llama_index.core.vector_stores.types import VectorStoreQueryMode, VectorStoreQueryResult  # type: ignore
-        from llama_index.core.vector_stores.utils import metadata_dict_to_node, node_to_metadata_dict  # type: ignore
-        from llama_index.core.utils import iter_batch  # type: ignore
-        from llama_index.core.schema import TextNode  # type: ignore
     except Exception as exc:
         raise RuntimeError("缺少 llama-index-vector-stores-milvus 依赖，无法使用 Milvus 索引。") from exc
-
-    class PartitionedMilvusVectorStore(MilvusVectorStore):
-        """支持分区插入与分区查询的 Milvus VectorStore。"""
-
-        def add(self, nodes: List[Any], **add_kwargs: Any) -> List[str]:
-            partition_name = add_kwargs.get("partition_name")
-            if not partition_name:
-                return super().add(nodes, **add_kwargs)
-
-            insert_list = []
-            insert_ids = []
-
-            if self.enable_sparse is True and self.sparse_embedding_function is None:
-                logger.fatal("sparse_embedding_function is None when enable_sparse is True.")
-
-            for node in nodes:
-                entry = node_to_metadata_dict(node)
-                entry[MILVUS_ID_FIELD] = node.node_id
-                entry[self.embedding_field] = node.embedding
-
-                if self.enable_sparse is True:
-                    entry[self.sparse_embedding_field] = self.sparse_embedding_function.encode_documents([node.text])[0]
-
-                insert_ids.append(node.node_id)
-                insert_list.append(entry)
-
-            for insert_batch in iter_batch(insert_list, self.batch_size):
-                self._collection.insert(insert_batch, partition_name=partition_name)
-            if add_kwargs.get("force_flush", False):
-                self._collection.flush()
-            self._create_index_if_required()
-            logger.debug(
-                "Successfully inserted embeddings into: %s Num Inserted: %d",
-                self.collection_name,
-                len(insert_list),
-            )
-            return insert_ids
-
-        def query(self, query: Any, **kwargs: Any) -> VectorStoreQueryResult:
-            partition_names = kwargs.get("partition_names")
-            if not partition_names:
-                return super().query(query, **kwargs)
-
-            if query.mode != VectorStoreQueryMode.DEFAULT:
-                # 仅默认检索需要分区过滤，其他模式保持原行为
-                return super().query(query, **kwargs)
-
-            expr = []
-            output_fields = ["*"]
-
-            if query.filters is not None or "milvus_scalar_filters" in kwargs:
-                expr.append(
-                    _to_milvus_filter(
-                        query.filters,
-                        kwargs.get("milvus_scalar_filters"),
-                    )
-                )
-
-            if query.doc_ids is not None and len(query.doc_ids) != 0:
-                expr_list = ['"' + entry + '"' for entry in query.doc_ids]
-                expr.append(f"{self.doc_id_field} in [{','.join(expr_list)}]")
-
-            if query.node_ids is not None and len(query.node_ids) != 0:
-                expr_list = ['"' + entry + '"' for entry in query.node_ids]
-                expr.append(f"{MILVUS_ID_FIELD} in [{','.join(expr_list)}]")
-
-            outputs_limited = False
-            if query.output_fields is not None:
-                output_fields = query.output_fields
-                outputs_limited = True
-            elif len(self.output_fields) > 0:
-                output_fields = [*self.output_fields]
-                outputs_limited = True
-
-            if self.text_key and self.text_key not in output_fields and outputs_limited:
-                output_fields.append(self.text_key)
-
-            string_expr = ""
-            if len(expr) != 0:
-                string_expr = " and ".join(expr)
-
-            res = self._milvusclient.search(
-                collection_name=self.collection_name,
-                data=[query.query_embedding],
-                filter=string_expr,
-                limit=query.similarity_top_k,
-                output_fields=output_fields,
-                search_params=self.search_config,
-                anns_field=self.embedding_field,
-                partition_names=partition_names,
-            )
-            logger.debug(
-                "Successfully searched embedding in collection: %s Num Results: %d",
-                self.collection_name,
-                len(res[0]),
-            )
-
-            nodes = []
-            similarities = []
-            ids = []
-            for hit in res[0]:
-                if not self.text_key:
-                    node = metadata_dict_to_node(
-                        {
-                            "_node_content": hit["entity"].get("_node_content", None),
-                            "_node_type": hit["entity"].get("_node_type", None),
-                        }
-                    )
-                else:
-                    text = hit["entity"].get(self.text_key)
-                    metadata = {key: hit["entity"].get(key) for key in self.output_fields}
-                    node = TextNode(text=text, metadata=metadata)
-
-                nodes.append(node)
-                similarities.append(hit["distance"])
-                ids.append(hit["id"])
-
-            return VectorStoreQueryResult(nodes=nodes, similarities=similarities, ids=ids)
-
-    return PartitionedMilvusVectorStore
+    return MilvusVectorStore
 
 
 def build_nl2sql_embedding(
@@ -1078,6 +954,11 @@ class NL2SQLTool:
         collection = Collection(self.milvus_collection)
         try:
             if collection.has_partition(partition_name):
+                # Milvus 要求分区被释放后才能删除；否则会报“partition is loaded”。
+                try:
+                    collection.release()
+                except Exception:
+                    pass
                 collection.drop_partition(partition_name)
         except Exception:
             return
@@ -1100,6 +981,13 @@ class NL2SQLTool:
         _set("dim", dim)
         _set("overwrite", overwrite)
         _set("uri", self._milvus_uri())
+        # 统一保留关键元字段，兼容历史缓存中缺少 _node_content 的场景。
+        _set("output_fields", ["name", "context", "table", "column"])
+        # 编排链路在同步线程中执行，显式关闭异步 Milvus 客户端，
+        # 避免触发“no running event loop”异常。
+        _set("use_async_client", False)
+        # 兼容少数版本中的历史拼写（use_asyc_client）。
+        _set("use_asyc_client", False)
         if "host" in sig.parameters:
             _set("host", self.milvus_host)
         if "port" in sig.parameters:
@@ -1108,9 +996,12 @@ class NL2SQLTool:
             kwargs["connection_args"] = {"host": self.milvus_host, "port": str(self.milvus_port)}
 
         vector_store = vector_store_cls(**kwargs)
-        # 确保 collection 已加载，避免首次检索报错。
+        # 确保 collection 已加载，避免检索阶段出现“collection not loaded”。
         try:
-            if hasattr(vector_store, "_collection"):
+            if hasattr(vector_store, "client"):
+                vector_store.client.load_collection(self.milvus_collection)
+            elif hasattr(vector_store, "_collection"):
+                # 兼容旧版本实现。
                 vector_store._collection.load()
         except Exception:
             pass
@@ -1126,10 +1017,22 @@ class NL2SQLTool:
         return True
 
     def _milvus_insert_kwargs(self, partition_name: str) -> Dict[str, Any]:
-        return {"partition_name": partition_name} if partition_name else {}
+        # 兼容新旧实现：优先使用官方参数名 milvus_partition_name。
+        if not partition_name:
+            return {}
+        return {
+            "milvus_partition_name": partition_name,
+            "partition_name": partition_name,
+        }
 
     def _milvus_query_kwargs(self, partition_name: str) -> Dict[str, Any]:
-        return {"partition_names": [partition_name]} if partition_name else {}
+        # 兼容新旧实现：优先使用官方参数名 milvus_partition_names。
+        if not partition_name:
+            return {}
+        return {
+            "milvus_partition_names": [partition_name],
+            "partition_names": [partition_name],
+        }
 
     def prepare_index_cache(
         self,
@@ -1303,11 +1206,11 @@ class NL2SQLTool:
             vector_index_cls,
             embed_model=embed_model,
             storage_context=storage_context,
-            partition_name=self.TABLE_PARTITION,
+            **self._milvus_insert_kwargs(self.TABLE_PARTITION),
         )
         return table_index.as_retriever(
             similarity_top_k=table_top_k,
-            **self._milvus_query_kwargs(self.TABLE_PARTITION),
+            vector_store_kwargs=self._milvus_query_kwargs(self.TABLE_PARTITION),
         )
 
     def _load_table_retriever_from_milvus(
@@ -1331,7 +1234,7 @@ class NL2SQLTool:
             )
             return object_index.as_retriever(
                 similarity_top_k=table_top_k,
-                **self._milvus_query_kwargs(self.TABLE_PARTITION),
+                vector_store_kwargs=self._milvus_query_kwargs(self.TABLE_PARTITION),
             )
         except Exception as exc:
             _log_nl2sql("NL2SQL检索器 表索引缓存加载异常=%s", exc)
@@ -1370,7 +1273,7 @@ class NL2SQLTool:
                 retriever = column_index.as_retriever(
                     similarity_top_k=self.column_retriever_top_k,
                     filters=filters,
-                    **self._milvus_query_kwargs(self.COLUMN_PARTITION),
+                    vector_store_kwargs=self._milvus_query_kwargs(self.COLUMN_PARTITION),
                 )
                 table_retrievers[column_name] = retriever
             if table_retrievers:
@@ -1522,7 +1425,7 @@ class NL2SQLTool:
             all_nodes,
             embed_model=embed_model,
             storage_context=storage_context,
-            partition_name=self.COLUMN_PARTITION,
+            **self._milvus_insert_kwargs(self.COLUMN_PARTITION),
         )
         query_kwargs = self._milvus_query_kwargs(self.COLUMN_PARTITION)
 
@@ -1537,7 +1440,7 @@ class NL2SQLTool:
                 table_retrievers[column_name] = column_index.as_retriever(
                     similarity_top_k=self.column_retriever_top_k,
                     filters=filters,
-                    **query_kwargs,
+                    vector_store_kwargs=query_kwargs,
                 )
 
         return cols_retrievers or None

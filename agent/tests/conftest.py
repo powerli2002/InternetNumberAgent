@@ -23,10 +23,11 @@ def _is_truthy(value: str | None) -> bool:
 
 def pytest_collection_modifyitems(config: pytest.Config, items: List[pytest.Item]) -> None:
     """未开启 live 模式时跳过所有 live 测试。"""
-    if _is_truthy(os.getenv("FUSION_RUN_LIVE", "0")):
+    # 默认开启 live：未显式设置时按 FUSION_RUN_LIVE=1 处理。
+    if _is_truthy(os.getenv("FUSION_RUN_LIVE", "1")):
         return
 
-    skip_live = pytest.mark.skip(reason="未设置 FUSION_RUN_LIVE=1，跳过 live 测试。")
+    skip_live = pytest.mark.skip(reason="FUSION_RUN_LIVE=0，跳过 live 测试。")
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip_live)

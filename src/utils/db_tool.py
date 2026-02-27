@@ -172,6 +172,19 @@ class DB_Tool():
             logger.error('PostgreSQL 检查表格 %s 是否存在失败：%s' % (table_name, e))
             raise
 
+    @staticmethod
+    def _normalize_identifier(name: str) -> str:
+        """
+        统一规范化数据库标识符：
+        1) 转小写；
+        2) 非字母数字下划线字符替换为下划线；
+        3) 压缩多余下划线并去掉首尾下划线。
+        """
+        text = str(name).strip().lower()
+        text = re.sub(r'[^0-9a-z_]+', '_', text)
+        text = re.sub(r'_+', '_', text).strip('_')
+        return text
+
     def df_to_DB(self, df: pd.DataFrame, table_name: str, primary: list = None, ctype: dict = None,
                  truncate: bool = True):
         '''
@@ -194,15 +207,29 @@ class DB_Tool():
             None
         '''
 
+        # 导入阶段统一将列名转换为小写，避免 PostgreSQL 大小写折叠导致字段找不到。
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError('df_to_DB 仅支持 pandas.DataFrame 输入')
+        df = df.copy()
+        normalized_columns = [self._normalize_identifier(col) for col in df.columns]
+        if any(not col for col in normalized_columns):
+            raise RuntimeError(f'存在无法规范化的空列名，无法入库: {df.columns.tolist()}')
+        if len(set(normalized_columns)) != len(normalized_columns):
+            raise RuntimeError(f'列名小写化后发生冲突，无法入库: {df.columns.tolist()}')
+        df.columns = normalized_columns
+
+        normalized_primary = [self._normalize_identifier(col) for col in (primary or []) if str(col).strip()]
+        normalized_ctype = {self._normalize_identifier(k): v for k, v in (ctype or {}).items() if str(k).strip()}
+
         with self._managed_connection() as (conn, auto_commit_mode):
-            table_name = re.sub('[^0-9a-zA-Z_]+', '_', table_name)
+            table_name = self._normalize_identifier(table_name)
             if not self.__check_table_exist(conn, table_name):
                 self.__creat_table(
                     conn,
                     table_name=table_name,
                     col_list=df.columns.to_list(),
-                    primary=primary,
-                    ctype=ctype,
+                    primary=normalized_primary,
+                    ctype=normalized_ctype,
                     auto_commit=auto_commit_mode,
                 )
 
@@ -210,7 +237,7 @@ class DB_Tool():
                 conn,
                 df,
                 table_name,
-                primary=primary,
+                primary=normalized_primary,
                 truncate=truncate,
                 auto_commit=auto_commit_mode,
             )
