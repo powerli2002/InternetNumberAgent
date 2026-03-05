@@ -1,8 +1,8 @@
 rir_format_dir: "../rirdata/data/format/"
 logging_dir: "./logs/"
-output_dir: "./data/"
-rib_dir: "./bgp_data/data/"
-caida_dir: "./src/caida/data/"
+output_dir: "./fusiondata/data/"
+rib_dir: "./fusiondata/bgp_data/data/"
+caida_dir: "./fusiondata/src/caida/data/"
 
 postgresql_database: "fusionprocessing"
 postgresql_user: "admin"

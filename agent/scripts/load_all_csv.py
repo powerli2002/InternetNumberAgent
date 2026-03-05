@@ -44,9 +44,9 @@ except ModuleNotFoundError:
 from agent.core.config import AgentConfig
 from agent.scripts.neo4j_graph_loader import Neo4jImportOptions, run_import_pipeline
 
-from src.utils.entity_persistence import EntityPersistence
-from src.utils.logging_manager import logger
-from src.utils.schema_manager import apply_core_ddl, resolve_core_ddl_path
+from fusiondata.src.utils.entity_persistence import EntityPersistence
+from fusiondata.src.utils.logging_manager import logger
+from fusiondata.src.utils.schema_manager import apply_core_ddl, resolve_core_ddl_path
 
 CORE_TABLES = [
     "as_entity",
@@ -332,7 +332,7 @@ def main() -> None:
     config_path = Path(args.config).resolve()
     cfg = load_yaml_config(config_path)
     date = args.date or cfg.get("current_date") or datetime.now().strftime("%Y-%m-%d")
-    output_dir = resolve_project_path(root_dir, cfg.get("output_dir", "./data/"))
+    output_dir = resolve_project_path(root_dir, cfg.get("output_dir", "./fusiondata/data/"))
     ddl_path = resolve_project_path(root_dir, args.ddl_path) if args.ddl_path else resolve_core_ddl_path(root_dir)
     logger.info("导入阶段启用列名规范化策略：lowercase + underscore")
     if args.skip_website or args.skip_industry:

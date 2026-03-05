@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
 
 import agent.core.tracing as tracing_module
+import agent.services.mcp.client as mcp_client_module
 from agent.core.tracing import LangSmithTracer
 from agent.runtime.langgraph_orchestrator import LangGraphOrchestrator, _NODE_RECORDS_CTX
 from agent.services.mcp.client import MCPToolClient
@@ -43,6 +45,39 @@ class _DummyRun:
 
     def add_outputs(self, _outputs=None):
         return None
+
+
+class _RecordingRun:
+    """记录 add_outputs 调用的测试 run。"""
+
+    def __init__(self) -> None:
+        self.outputs: List[Dict[str, Any]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def add_outputs(self, outputs=None):
+        if isinstance(outputs, dict):
+            self.outputs.append(outputs)
+
+
+class _FakeTracer:
+    """用于验证 MCP 子 run parent 绑定关系。"""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.calls: List[Dict[str, Any]] = []
+        self.runs: List[_RecordingRun] = []
+
+    def start_run(self, **kwargs):
+        self.calls.append(kwargs)
+        run = _RecordingRun()
+        self.runs.append(run)
+        return run
 
 
 def test_trace_node_collects_records_without_manual_subrun() -> None:
@@ -120,6 +155,59 @@ def test_mcp_run_sync_preserves_context_in_running_loop() -> None:
             _MCP_CTX.reset(token)
 
     assert asyncio.run(_outer()) == "trace-parent"
+
+
+def test_mcp_tool_run_uses_root_parent_and_avoids_orphan_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP 客户端子 run 仅在存在 root_run 时创建，且必须绑定 parent。"""
+
+    class _FakeClient:
+        calls: List[Dict[str, Any]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def call_tool(self, **kwargs):
+            _FakeClient.calls.append(kwargs)
+            return SimpleNamespace(data={"ok": True, "tool": kwargs.get("name")})
+
+    monkeypatch.setattr(mcp_client_module, "Client", _FakeClient)
+
+    tracer = _FakeTracer()
+    client = MCPToolClient(server_url="http://127.0.0.1:2032/mcp", tracer=tracer)
+    root_run = SimpleNamespace(id="root-run-id")
+
+    payload = client.call_tool(
+        name="rag_search",
+        arguments={"query": "测试"},
+        trace_id="trace-1",
+        root_run=root_run,
+    )
+    assert payload["ok"] is True
+    assert payload["tool"] == "rag_search"
+    assert len(tracer.calls) == 1
+    assert tracer.calls[0]["name"] == "mcp_tool:rag_search"
+    assert tracer.calls[0]["parent"] is root_run
+    assert tracer.calls[0]["metadata"]["trace_id"] == "trace-1"
+    assert len(tracer.runs[0].outputs) == 1
+    assert _FakeClient.calls[0]["meta"]["trace_id"] == "trace-1"
+
+    tracer.calls.clear()
+    _FakeClient.calls.clear()
+    payload_no_parent = client.call_tool(
+        name="rag_search",
+        arguments={"query": "测试"},
+        trace_id="trace-2",
+        root_run=None,
+    )
+    assert payload_no_parent["ok"] is True
+    assert len(tracer.calls) == 0
+    assert _FakeClient.calls[0]["meta"]["trace_id"] == "trace-2"
 
 
 def test_tracer_sampling_is_request_scoped(monkeypatch: pytest.MonkeyPatch) -> None:

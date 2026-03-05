@@ -39,3 +39,6 @@ conf/.env
 agent-chat-ui/*
 agent/store/memory/*.sqlite
 agent-chat-ui
+
+.pytest_cache
+__pycache__

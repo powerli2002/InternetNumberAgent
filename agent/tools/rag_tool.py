@@ -192,6 +192,9 @@ class LocalBGEEmbedding(EmbeddingProvider):
         self._model = HuggingFaceEmbedding(**kwargs)
 
     def embed(self, texts: List[str]) -> List[List[float]]:
+        """ 
+        文本向量化
+        """
         if not texts:
             return []
         self._ensure_model()
@@ -304,7 +307,8 @@ class RAGTool:
             {
                 "index_type": "HNSW",
                 "metric_type": "COSINE",
-                "params": {"M": 32, "efConstruction": 200},
+                "params": {"M": 32, "efConstruction": 200}, 
+                # M: 每个叶子节点的最大邻居数，efConstruction: 邻居的候选池大小。
             },
         )
         collection.load()
@@ -477,12 +481,15 @@ class RAGTool:
         per_query_limit = max(top_k, min(100, top_k * self.candidate_multiplier))
 
         fused: Dict[str, Dict[str, Any]] = {}
+        # 多扩展查询+倒数排名融合
+        # RRF：Reciprocal Rank Fusion，倒数排名融合。把这些查询各自的检索结果按排名做融合，得到最终排序。
         for variant in expanded_queries:
             rows = self._search_rows(variant, limit=per_query_limit)
             for row in rows:
                 key = hashlib.sha256(f"{row['source']}\n{row['text']}".encode("utf-8")).hexdigest()
                 rank = int(row["rank"])
                 raw_score = float(row["score"])
+                
                 # RRF 为主，向量原始分数为辅，兼顾稳定性与可解释性
                 fused_score = 1.0 / (self.rrf_k + rank) + (max(raw_score, 0.0) * 0.05)
 

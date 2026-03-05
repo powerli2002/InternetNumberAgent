@@ -2,6 +2,31 @@
 
 本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**LangGraph 主编排 + FastMCP 工具层（HTTP） + LangSmith 追踪（编排层与 MCP 客户端）**。复杂任务通过 LangGraph 子图执行，不再依赖 A2A/子代理服务。
 
+## 数据层目录迁移（2026-03-04）
+
+融合数据处理相关目录已统一迁入 `fusiondata/`：
+
+- `fusiondata/src/`
+- `fusiondata/data/`
+- `fusiondata/bgp_data/`
+- `fusiondata/export_as_entity.py`
+- `fusiondata/setup.py`
+
+如需执行融合 CLI，请使用：
+
+```bash
+python fusiondata/setup.py {run|db|auto} -h
+```
+
+## 快速启动
+
+启动cli
+python agent/cli/main.py
+
+启动mcp
+python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
+
+
 ## 图查询链路升级（2026-02-25）
 
 1. 新增 MCP 工具 `neo4j_llamaindex_query`：由工具内部通过 LlamaIndex 读取 Neo4j 当前 schema，生成 Cypher 并执行返回结果。
@@ -14,6 +39,20 @@
 2. `available_tools` 探测下沉到 `plan` 节点，并在每轮重规划前重新探测。
 3. 运行时 metadata 不再输出 `question_type`，统一聚焦计划与执行证据。
 
+## 重规划去重优化（2026-02-27）
+
+1. `plan` 节点新增输入：`previous_plan_steps` 与 `previous_step_summaries`，重规划时可感知历史执行结果。
+2. `LANGGRAPH_PLAN_PROMPT` 增加“基于历史结果补缺、不重复生成已完成步骤”的约束。
+3. 执行层新增步骤签名去重：同工具+同目标+同参数命中历史成功步骤时直接复用结果，避免重复查询。
+
+## 规划驱动 `query_mode` 与 LLM 上下文压缩（2026-02-27）
+
+1. NL2SQL 意图收敛为单一真值位 `query_mode=COUNT|GROUP_BY|EXISTS|OTHER`，由 `plan` 阶段一次性产出。
+2. `execute` 阶段不再做规则式意图判断，只消费并透传 `query_mode` 到 MCP/NL2SQL。
+3. NL2SQL 不再执行“聚合硬拦截+重生”；改为在同次 SQL 生成 prompt 中按 `query_mode` 引导 SQL 形态。
+4. MCP `nl2sql_query` 新增 `query_mode`；`intent_policy/intent_labels_required` 进入兼容保留（deprecated）状态。
+5. ContextBuilder 新增 LLM 压缩能力：`CONTEXT_COMPRESS_MODE=llm|truncate|hybrid`，LLM 失败自动回退截断。
+
 ## 稳定性修复（2026-02-08）
 
 本次针对编排与记忆链路完成了以下修复：
@@ -24,6 +63,7 @@
 4. 增强 NL2SQL 超时退化：列检索超时时自动降级为表级检索重试。
 5. RAG 索引写入支持增量去重：按 `source + text` 哈希过滤批内与存量重复切片，避免重复入库。
 6. 补齐 `agent/knowledge/bgp/hijack_detection.md` 示例文件，chapter_5 路径可直接复现。
+7. LangGraph 执行层新增 `nl2sql/graph` 首错入上下文重试机制，并支持 `question/questions` 列表串行执行。
 
 ## RAG 升级（2026-02-22）
 
@@ -92,7 +132,17 @@
    uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
    ```
 
-2. 启动前端（Agent Chat UI）
+2. （可选）本机启动 vLLM（OpenAI 兼容接口）
+   ```bash
+   python -m agent.scripts.start_vllm --model Qwen/Qwen3-4B --port 2222 --api-key your-local-key
+   ```
+   - 然后在 `conf/.env` 中设置：
+     - `LLM_BACKEND=local`
+     - `LOCAL_LLM_API_KEY=your-local-key`
+     - `LOCAL_LLM_BASE_URL=http://127.0.0.1:2222/v1`
+     - `LOCAL_LLM_MODEL=Qwen/Qwen3-4B`
+
+3. 启动前端（Agent Chat UI）
    ```bash
    cd agent-chat-ui
    pnpm install
@@ -120,6 +170,11 @@
 - `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `180` 秒）
 - `CLI_TIMEOUT_SECONDS`（保留配置；当前 CLI 不设置外层超时，持续执行直到任务结束）
 - `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
+- `MAX_CONTEXT_TOKENS`（上下文窗口上限，默认 `4096`）
+- `LLM_BACKEND`（`cloud|local`，默认 `cloud`）
+- `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` / `DASHSCOPE_MODEL`（`LLM_BACKEND=cloud` 时必填）
+- `LOCAL_LLM_API_KEY` / `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL`（`LLM_BACKEND=local` 时必填）
+- `WORKING_MEMORY_SIZE` / `EPISODIC_MEMORY_SIZE` / `SEMANTIC_MEMORY_SIZE`（三层记忆容量）
 - `RAG_EMBEDDING_BACKEND`（默认 `local_bge`）
 - `RAG_EMBEDDING_MODEL`（默认 `BAAI/bge-m3`，也可填本地模型目录）
 - `RAG_EMBEDDING_DEVICE`（默认 `cpu`）
@@ -129,8 +184,13 @@
 - `NL2SQL_EMBEDDING_BATCH_SIZE`（默认 `16`）
 - `NL2SQL_EMBEDDING_NORMALIZE`（默认 `true`）
 - `RAG_ENABLE_MQE`（默认 `true`）
+- `VECTOR_COLLECTION`（RAG 向量集合，默认 `fusion_docs`）
 - `NEO4J_DATABASE`（默认 `neo4j`）
+- `GRAPH_MAX_ROWS` / `GRAPH_MAX_CYPHER_LENGTH`（图查询行数与 Cypher 长度上限）
 - `GRAPH_REFRESH_SCHEMA_EACH_QUERY`（默认 `true`，图查询前刷新 schema）
+- `CONTEXT_COMPRESS_MODE`（`llm|truncate|hybrid`，默认 `hybrid`）
+- `CONTEXT_COMPRESS_TARGET_RATIO`（LLM 压缩目标比例，默认 `0.7`）
+- `ALLOWED_TABLES`（NL2SQL 白名单，逗号分隔）
 
 ## 运行时表说明
 
@@ -154,11 +214,12 @@ FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张�
 - `MODULE_LOG_MAX_ITEMS`：模块日志最多记录的返回项数量（默认 `5`）
 - MCP 工具调用会输出开始/结束（成功/失败）日志，并带 `elapsed` 耗时
 
-MCP 服务端默认不写 LangSmith 运行记录；当前默认采用“自动追踪优先”模式：
+MCP 服务端默认不写 LangSmith 运行记录；当前采用“单 trace + 客户端子 run”模式：
 
 - 每次提问应只生成一个 LangSmith trace；
 - trace 下会有多个自动 run（LangGraph 节点、LLM 调用等）；
-- 不再依赖手工 `graph_node:*` 与 `mcp_tool:*` run。
+- MCP 客户端会写 `mcp_tool:*` / `mcp_list_tools` 子 run，但仅在检测到有效 `root_run` 时创建，强制挂到同一 trace；
+- 不再依赖手工 `graph_node:*` run。
 
 按 `run.trace_id`（优先）或 `metadata.trace_id`（兼容）聚合链路：
 
@@ -186,6 +247,38 @@ python -m agent.scripts.trace_by_metadata_id \
 
 注意：旧入口文件已移除，需统一使用新分层路径。
 
+## OpenJudge 评测流水线（2026-03-03）
+
+项目已提供数据驱动评测入口，目录在 `agent/evaluate/`，支持：
+
+1. 生成起步评测题（默认 30 题）
+2. 调用 FusionAgent 自动补齐答案并提取 trace
+3. 生成 Rubric（Simple / Iterative）
+4. 运行多维评分并写入 LangSmith Experiment
+5. 人工修订 `gold.readable.yaml` 后转换为 `gold.jsonl`（仅作为 grader 范例集）
+
+起步题集已生成：`agent/evaluate/data/queries_seed_30.jsonl`（兼容保留 `queries_seed_26.jsonl`）。
+当前默认分布：`20 RAG（仅 Milvus 可答） + 5 NL2SQL + 5 Neo4j`。
+
+常用命令：
+
+```bash
+python -m agent.evaluate.pipelines.generate_queries --count 30 --out agent/evaluate/data/queries.jsonl
+python -m agent.evaluate.pipelines.fill_answers --in agent/evaluate/data/queries.jsonl --out agent/evaluate/data/answers.jsonl
+python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json
+python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith
+python -m agent.evaluate.pipelines.convert_gold_readable --readable agent/evaluate/data/gold.readable.yaml --out agent/evaluate/data/gold.jsonl --base-gold agent/evaluate/data/gold.jsonl --answers agent/evaluate/data/answers.jsonl
+python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json --rubric-labeled-data agent/evaluate/data/gold.jsonl
+```
+
+一键串行：
+
+```bash
+python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith
+# 若需要在一键流程末尾自动生成 gold.jsonl，可追加：
+# --gold-readable agent/evaluate/data/gold.readable.yaml --gold-out agent/evaluate/data/gold.jsonl --gold-base agent/evaluate/data/gold.jsonl
+```
+
 ## 详细文档
 
 - 项目目标与数据结构：`summary.md`
@@ -193,4 +286,5 @@ python -m agent.scripts.trace_by_metadata_id \
 - 系统技术文档：`docs/互联网号码资源问答系统技术文档.md`
 - LangSmith 监控指南：`docs/LangSmith监控指南.md`
 - Agent 目录说明：`agent/README.md`
+- OpenJudge 评测说明：`agent/evaluate/README.md`
 - 面试深潜文档：`agent/docs/system_architecture_deep_dive/README.md`

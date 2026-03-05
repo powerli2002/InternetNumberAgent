@@ -8,7 +8,7 @@ from typing import Optional
 
 # 确保可导入项目内模块
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = PROJECT_ROOT / "src"
+SRC_ROOT = PROJECT_ROOT / "fusiondata" / "src"
 for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.append(str(path))
@@ -55,7 +55,7 @@ def main() -> None:
     parser.add_argument("--config", default="conf/config.docker.yaml", help="YAML 配置路径")
     parser.add_argument("--root", default=".", help="项目根目录")
     parser.add_argument("--date", default=None, help="已弃用，脚本自动使用最新日期")
-    parser.add_argument("--output-dir", default=None, help="输出目录（默认 data/output）")
+    parser.add_argument("--output-dir", default=None, help="输出目录（默认 fusiondata/data/output）")
     parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 行用于快速测试")
     parser.add_argument("--chunk-size", type=int, default=200000, help="分块处理行数")
     parser.add_argument("--neo4j-uri", default=None, help="Neo4j Bolt URI")
@@ -69,7 +69,7 @@ def main() -> None:
     cfg = load_config(config_path)
     date = args.date or cfg.get("current_date") or datetime.now().strftime("%Y-%m-%d")
 
-    output_root = resolve_path(root_dir, cfg.get("output_dir", "./data/"))
+    output_root = resolve_path(root_dir, cfg.get("output_dir", "./fusiondata/data/"))
     output_dir = Path(args.output_dir) if args.output_dir else output_root / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 

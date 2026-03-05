@@ -24,9 +24,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from agent.core.llm import LLMClient, LLMMessage
 from agent.core.models import ConversationTurn, EvidenceItem, MemoryItem
+from agent.core.prompts import CONTEXT_COMPRESS_PROMPT
 
 
 @dataclass
@@ -63,6 +65,9 @@ class ContextBuilder:
         self,
         max_tokens: int = 4096,
         token_counter: Optional[Callable[[str], int]] = None,
+        llm_client: Optional[LLMClient] = None,
+        compress_mode: str = "hybrid",
+        compress_target_ratio: float = 0.7,
     ) -> None:
         """
         初始化上下文构建器
@@ -74,6 +79,9 @@ class ContextBuilder:
         # max_tokens 控制上下文长度，token_counter 可自定义估算方式
         self.max_tokens = max_tokens
         self.token_counter = token_counter or self._default_token_counter
+        self.llm_client = llm_client
+        self.compress_mode = compress_mode if compress_mode in {"llm", "truncate", "hybrid"} else "hybrid"
+        self.compress_target_ratio = min(0.95, max(0.3, float(compress_target_ratio)))
 
     def gather(
         self,
@@ -159,15 +167,66 @@ class ContextBuilder:
         return "\n\n".join(context)
 
     def compress(self, context: str) -> str:
-        """Compress：超过 token 限制时进行截断。"""
+        """Compress：超限后按模式进行 LLM/截断压缩。"""
         if self.token_counter(context) <= self.max_tokens:
             return context
-        # 简单保留头尾：头部常含系统/任务，尾部保留部分证据
-        # 简化策略：保留开头与结尾
-        head = context[: max(0, len(context) // 2)]
-        tail = context[-max(0, len(context) // 4) :]
-        compressed = head + "\n...\n" + tail
-        return compressed
+        if self.compress_mode == "truncate":
+            return self._truncate_compress(context)
+
+        if self.compress_mode in {"llm", "hybrid"}:
+            compressed = self._llm_compress(context)
+            if compressed:
+                if self.token_counter(compressed) <= self.max_tokens:
+                    return compressed
+                # LLM 输出仍超限时，做一次截断收敛。
+                return self._truncate_compress(compressed)
+
+        # LLM 压缩失败或关闭时，回退截断策略保证可用性。
+        return self._truncate_compress(context)
+
+    def _llm_compress(self, context: str) -> Optional[str]:
+        """调用 LLM 压缩上下文，失败时返回 None。"""
+        if not self.llm_client:
+            return None
+        target_tokens = max(256, int(self.max_tokens * self.compress_target_ratio))
+        prompt = CONTEXT_COMPRESS_PROMPT.format(
+            target_ratio=f"{self.compress_target_ratio:.2f}",
+            target_tokens=target_tokens,
+        )
+        try:
+            compressed = self.llm_client.chat(
+                [
+                    LLMMessage(role="system", content=prompt),
+                    LLMMessage(role="user", content=context),
+                ],
+                temperature=0.0,
+            )
+        except Exception:
+            return None
+        output = (compressed or "").strip()
+        return output or None
+
+    def _truncate_compress(self, context: str) -> str:
+        """头尾保留截断策略，作为压缩兜底。"""
+        text = context or ""
+        if not text:
+            return text
+        compressed = text
+        for _ in range(4):
+            if self.token_counter(compressed) <= self.max_tokens:
+                return compressed
+            head = compressed[: max(160, len(compressed) // 2)]
+            tail = compressed[-max(120, len(compressed) // 4) :]
+            compressed = head + "\n...\n" + tail
+        if self.token_counter(compressed) <= self.max_tokens:
+            return compressed
+        ratio = max(0.1, self.max_tokens / max(1, self.token_counter(compressed)))
+        keep_chars = max(32, int(len(compressed) * ratio))
+        final_text = compressed[:keep_chars]
+        while self.token_counter(final_text) > self.max_tokens and keep_chars > 16:
+            keep_chars = max(16, int(keep_chars * 0.8))
+            final_text = compressed[:keep_chars]
+        return final_text
 
     def build(
         self,
@@ -179,6 +238,26 @@ class ContextBuilder:
         notes: List[str],
     ) -> str:
         """完整流水线：Gather -> Select -> Structure -> Compress。"""
+        context, _trace_payload = self.build_with_trace(
+            system_prompt=system_prompt,
+            user_query=user_query,
+            history=history,
+            memories=memories,
+            evidences=evidences,
+            notes=notes,
+        )
+        return context
+
+    def build_with_trace(
+        self,
+        system_prompt: str,
+        user_query: str,
+        history: List[ConversationTurn],
+        memories: List[MemoryItem],
+        evidences: List[EvidenceItem],
+        notes: List[str],
+    ) -> Tuple[str, Dict[str, Any]]:
+        """完整流水线 + 追踪信息：用于记录压缩前后上下文与统计指标。"""
         # GSSC 流水线说明：
         # 1) Gather：收集系统/任务/历史/记忆/证据/笔记
         # 2) Select：按评分排序，优先保留高价值片段
@@ -187,7 +266,54 @@ class ContextBuilder:
         chunks = self.gather(system_prompt, user_query, history, memories, evidences, notes)
         selected = self.select(chunks)
         structured = self.structure(selected)
-        return self.compress(structured)
+        before_tokens = self.token_counter(structured)
+        compressed = self.compress(structured)
+        after_tokens = self.token_counter(compressed)
+
+        trace_payload: Dict[str, Any] = {
+            "chunk_stats": self._build_chunk_stats(chunks, selected),
+            "token_stats": {
+                "before_compress": before_tokens,
+                "after_compress": after_tokens,
+                "max_tokens": self.max_tokens,
+                "compression_applied": bool(after_tokens < before_tokens),
+            },
+            "compress_config": {
+                "mode": self.compress_mode,
+                "target_ratio": self.compress_target_ratio,
+            },
+            # 由上游节点统一截断后写入追踪，避免在构建器内引入追踪策略。
+            "context_before_compress": structured,
+            "context_after_compress": compressed,
+        }
+        return compressed, trace_payload
+
+    @staticmethod
+    def _build_chunk_stats(chunks: List[ContextChunk], selected: List[ContextChunk]) -> Dict[str, Any]:
+        """汇总上下文分块统计，便于追踪模型输入构成。"""
+        def _classify(title: str) -> str:
+            if title.startswith("Role"):
+                return "Role & Policy"
+            if title.startswith("Task"):
+                return "Task"
+            if title.startswith("Evidence"):
+                return "Evidence"
+            return "Context"
+
+        by_section = {
+            "Role & Policy": 0,
+            "Task": 0,
+            "Evidence": 0,
+            "Context": 0,
+        }
+        for chunk in selected:
+            by_section[_classify(chunk.title)] += 1
+
+        return {
+            "gathered_total": len(chunks),
+            "selected_total": len(selected),
+            "selected_by_section": by_section,
+        }
 
     @staticmethod
     def _default_token_counter(text: str) -> int:

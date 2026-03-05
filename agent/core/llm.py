@@ -1,7 +1,7 @@
 """
-LLM 客户端模块 - 阿里云百炼集成
+LLM 客户端模块 - OpenAI 兼容后端
 
-提供与阿里云百炼大语言模型的统一接口封装：
+提供与 OpenAI 兼容大语言模型的统一接口封装：
 1. OpenAI 兼容的 API 调用方式
 2. 流式和非流式文本生成
 3. 结构化输出支持
@@ -32,7 +32,7 @@ class LLMMessage:
 
 
 class LLMClient:
-    """阿里云百炼兼容 OpenAI 模式调用接口。"""
+    """OpenAI 兼容后端调用接口。"""
 
     def __init__(
         self,
@@ -50,10 +50,10 @@ class LLMClient:
             from openai import OpenAI  # type: ignore
             from langsmith.wrappers import wrap_openai  # type: ignore
         except Exception as exc:
-            raise RuntimeError("未安装 openai/langsmith SDK，无法调用百炼兼容接口。") from exc
+            raise RuntimeError("未安装 openai/langsmith SDK，无法调用 OpenAI 兼容接口。") from exc
 
         if not self.api_key:
-            raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用百炼模型。")
+            raise RuntimeError("缺少 API Key，无法调用 OpenAI 兼容模型。")
 
         client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
         response = client.chat.completions.create(
@@ -69,10 +69,10 @@ class LLMClient:
             from openai import OpenAI  # type: ignore
             from langsmith.wrappers import wrap_openai  # type: ignore
         except Exception as exc:
-            raise RuntimeError("未安装 openai/langsmith SDK，无法调用百炼兼容接口。") from exc
+            raise RuntimeError("未安装 openai/langsmith SDK，无法调用 OpenAI 兼容接口。") from exc
 
         if not self.api_key:
-            raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用百炼模型。")
+            raise RuntimeError("缺少 API Key，无法调用 OpenAI 兼容模型。")
 
         client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
         stream = client.chat.completions.create(
@@ -106,10 +106,10 @@ class LLMClient:
             from openai import OpenAI  # type: ignore
             from langsmith.wrappers import wrap_openai  # type: ignore
         except Exception as exc:
-            raise RuntimeError("未安装 openai/langsmith SDK，无法调用百炼兼容接口。") from exc
+            raise RuntimeError("未安装 openai/langsmith SDK，无法调用 OpenAI 兼容接口。") from exc
 
         if not self.api_key:
-            raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用百炼模型。")
+            raise RuntimeError("缺少 API Key，无法调用 OpenAI 兼容模型。")
 
         client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
         response = client.chat.completions.create(

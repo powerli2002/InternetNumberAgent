@@ -40,7 +40,7 @@ from llama_index.core.prompts import PromptTemplate
 
 from agent.core.prompts import NL2SQL_TEXT_TO_SQL_PROMPT
 from agent.core.schema import COLUMN_REVIEW_COMMENTS, TABLE_CONTEXT_HINTS, TABLE_REVIEW_COMMENTS, TABLE_SCHEMA
-from src.utils.logging_manager import logger
+from fusiondata.src.utils.logging_manager import logger
 
 
 NL2SQL_LOG_ENABLED = os.getenv("NL2SQL_LOG_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
@@ -396,7 +396,6 @@ class SQLGuard:
         "pg_terminate_backend",
         "pg_cancel_backend",
     }
-
     def __init__(
         self,
         allowed_tables: List[str],
@@ -521,7 +520,6 @@ class NL2SQLTool:
 
     TABLE_PARTITION = "nl2sql_tables"
     COLUMN_PARTITION = "nl2sql_columns"
-
     # 默认列索引配置：仅选择相对稳定、类别化程度高的字段
     COLUMN_INDEX_CONFIG: Dict[str, List[str]] = {
         "as_entity": [
@@ -673,9 +671,17 @@ class NL2SQLTool:
         question: str,
         tables: Optional[List[str]] = None,
         enable_column_retrieval: Optional[bool] = None,
+        query_mode: str = "OTHER",
+        intent_policy: str = "auto",
+        intent_labels_required: Optional[List[str]] = None,
         trace_id: str = "",
     ) -> NL2SQLResult:
-        """使用 LlamaIndex NL2SQL 生成查询并执行。"""
+        """使用 LlamaIndex NL2SQL 生成查询并执行。
+
+        说明：
+        - query_mode 为规划器唯一意图位：COUNT/GROUP_BY/EXISTS/OTHER；
+        - intent_policy/intent_labels_required 仅用于兼容旧接口，当前不参与逻辑判断。
+        """
         start_time = time.monotonic()
         try:
             from llama_index.core import SQLDatabase  # type: ignore
@@ -697,12 +703,16 @@ class NL2SQLTool:
         table_names = tables or self.allowed_tables
         if not table_names:
             raise RuntimeError("未提供可用表名，无法执行 NL2SQL。")
+        # 兼容过渡参数：当前链路不再使用 intent_policy/intent_labels_required。
+        _ = (intent_policy, intent_labels_required)
         use_columns = self.enable_column_retrieval if enable_column_retrieval is None else enable_column_retrieval
+        resolved_query_mode = self._normalize_query_mode(query_mode)
         _log_nl2sql(
-            "NL2SQL开始 question=%s tables=%s enable_columns=%s",
+            "NL2SQL开始 question=%s tables=%s enable_columns=%s query_mode=%s",
             question,
             ",".join(table_names),
             use_columns,
+            resolved_query_mode,
         )
         # 连接数据库并准备 LLM/Embedding
         step_time = time.monotonic()
@@ -742,28 +752,16 @@ class NL2SQLTool:
         )
         _log_nl2sql("NL2SQL步骤 检索器准备耗时=%dms", int((time.monotonic() - step_time) * 1000))
 
-        step_time = time.monotonic()
-        # 注入自定义 text_to_sql_prompt，显式约束 PostgreSQL 标识符规则。
-        # NLSQLRetriever 在生成 SQL 时会自动注入这些上下文
-        nlsql_retriever = NLSQLRetriever(
-            sql_database=db,
+        first_query = self._compose_query_mode_guided_question(question=question, query_mode=resolved_query_mode)
+        nlsql_retriever = self._build_nlsql_retriever(
+            retriever_cls=NLSQLRetriever,
+            db=db,
             llm=llm,
-            text_to_sql_prompt=PromptTemplate(NL2SQL_TEXT_TO_SQL_PROMPT),
             table_retriever=table_retriever,
             cols_retrievers=cols_retrievers,
-            context_query_kwargs=table_context,
-            sql_only=True,
-            verbose=False,
+            table_context=table_context,
         )
-        _log_nl2sql("NL2SQL步骤 SQL生成器初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
-
-        step_time = time.monotonic()
-        # 生成 SQL
-        retrieved_nodes, metadata = nlsql_retriever.retrieve_with_metadata(question)
-        sql_query = metadata.get("result") if isinstance(metadata, dict) else None
-        if not sql_query and retrieved_nodes:
-            sql_query = getattr(retrieved_nodes[0].node, "text", "") or ""
-        _log_nl2sql("NL2SQL步骤 SQL生成耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        sql_query = self._generate_sql_once(nlsql_retriever, first_query)
 
         guard = SQLGuard(
             allowed_tables=table_names,
@@ -785,10 +783,58 @@ class NL2SQLTool:
             "limit_applied": limit_info.get("limit_applied"),
             "limit_value": limit_info.get("limit_value"),
             "limit_clamped": limit_info.get("limit_clamped"),
+            "metadata": {
+                "query_mode": resolved_query_mode,
+                "generation_mode": "planner_driven",
+            },
         }
         _log_nl2sql("NL2SQL步骤 SQL执行耗时=%dms", int((time.monotonic() - step_time) * 1000))
         _log_nl2sql("NL2SQL完成 总耗时=%dms", int((time.monotonic() - start_time) * 1000))
         return NL2SQLResult(sql=safe_sql, result=result_payload)
+
+    def _build_nlsql_retriever(
+        self,
+        retriever_cls,
+        db,
+        llm,
+        table_retriever,
+        cols_retrievers,
+        table_context: Dict[str, str],
+    ):
+        """构建 NLSQLRetriever，便于按策略切换 prompt。"""
+        return retriever_cls(
+            sql_database=db,
+            llm=llm,
+            text_to_sql_prompt=PromptTemplate(NL2SQL_TEXT_TO_SQL_PROMPT),
+            table_retriever=table_retriever,
+            cols_retrievers=cols_retrievers,
+            context_query_kwargs=table_context,
+            sql_only=True,
+            verbose=False,
+        )
+
+    def _generate_sql_once(self, nlsql_retriever, question: str) -> str:
+        """执行一次 SQL 生成并返回 SQL 文本。"""
+        step_time = time.monotonic()
+        retrieved_nodes, metadata = nlsql_retriever.retrieve_with_metadata(question)
+        sql_query = metadata.get("result") if isinstance(metadata, dict) else None
+        if not sql_query and retrieved_nodes:
+            sql_query = getattr(retrieved_nodes[0].node, "text", "") or ""
+        _log_nl2sql("NL2SQL步骤 SQL生成耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        return str(sql_query or "")
+
+    def _compose_query_mode_guided_question(self, question: str, query_mode: str) -> str:
+        """将规划阶段给定的 query_mode 透传给 SQL 生成提示。"""
+        directive = f"[QUERY_MODE={self._normalize_query_mode(query_mode)}]"
+        return f"{question}\n\n{directive}"
+
+    @staticmethod
+    def _normalize_query_mode(query_mode: str) -> str:
+        """归一化 query_mode，仅允许四个枚举值。"""
+        mode = str(query_mode or "").strip().upper()
+        if mode in {"COUNT", "GROUP_BY", "EXISTS", "OTHER"}:
+            return mode
+        return "OTHER"
 
     def warmup_retrievers(
         self,

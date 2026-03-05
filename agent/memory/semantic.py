@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.core.models import MemoryItem
 from .base import BaseMemory
-from src.utils.logging_manager import logger
+from fusiondata.src.utils.logging_manager import logger
 
 
 @dataclass

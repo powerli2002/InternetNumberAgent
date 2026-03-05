@@ -12,6 +12,21 @@ python agent/cli/main.py
 
 说明：CLI 默认不设置外层超时；工具执行期间会输出开始/结束日志与耗时。
 
+.venv/bin/langgraph dev --config langgraph.json --port 8123
+
+## LLM 后端切换（cloud/local）
+
+- `LLM_BACKEND=cloud`：使用 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL`。
+- `LLM_BACKEND=local`：使用 `LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_LLM_MODEL`。
+- 配置缺失会直接报错，不做静默回退。
+- 建议把所有运行参数统一维护在 `conf/.env`（`AgentConfig` 启动时自动加载）。
+
+本机 vLLM 启动示例：
+
+```bash
+python -m agent.scripts.start_vllm --model Qwen/Qwen3-4B --port 2222 --api-key your-local-key
+```
+
 
 ## 分层结构（推荐新代码落点）
 
@@ -63,6 +78,8 @@ python agent/cli/main.py
 
 ### 关键环境变量
 
+- `MAX_CONTEXT_TOKENS`：上下文窗口上限（默认 `4096`）
+- `WORKING_MEMORY_SIZE` / `EPISODIC_MEMORY_SIZE` / `SEMANTIC_MEMORY_SIZE`：三层记忆容量
 - `RAG_EMBEDDING_BACKEND`：`local_bge`（默认）或 `dashscope`
 - `RAG_EMBEDDING_MODEL`：默认 `BAAI/bge-m3`（可改为本地模型目录）
 - `RAG_EMBEDDING_DEVICE`：`cpu` / `cuda` / `mps`
@@ -77,6 +94,9 @@ python agent/cli/main.py
 - `RAG_MQE_MAX_QUERIES`：默认 `4`
 - `RAG_CANDIDATE_MULTIPLIER`：默认 `4`
 - `RAG_RRF_K`：默认 `60`
+- `VECTOR_COLLECTION`：RAG 向量集合（默认 `fusion_docs`）
+- `GRAPH_MAX_ROWS` / `GRAPH_MAX_CYPHER_LENGTH`：图查询约束
+- `ALLOWED_TABLES`：NL2SQL 白名单（逗号分隔）
 
 ### 入库示例
 

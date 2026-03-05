@@ -9,7 +9,7 @@
 
     配置分类：
     - 数据库连接：PostgreSQL、Neo4j、Milvus
-    - LLM 服务：阿里云百炼 API 配置
+    - LLM 服务：OpenAI 兼容 API 配置
     - 协议服务：MCP 工具服务
     - 记忆系统：各类型记忆的容量和行为参数
     - 工具配置：索引缓存、向量集合等
@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import List, Optional
 
 import yaml
+
+from agent.model.llm_endpoint import resolve_llm_endpoint
 
 
 @dataclass
@@ -74,15 +76,27 @@ class AgentConfig:
     neo4j_database: str = "neo4j"
     """Neo4j 数据库名"""
 
-    # LLM 服务配置（阿里云百炼兼容 OpenAI 模式）
+    # LLM 服务配置（统一 OpenAI 兼容端点）
+    llm_backend: str = "local"
+    """LLM 后端路由：cloud（DashScope）或 local（本机 vLLM/OpenAI 兼容服务）"""
+
     dashscope_api_key: Optional[str] = None
-    """阿里云百炼 API 密钥，用于 LLM 调用和向量嵌入"""
+    """云端 OpenAI 兼容 API 密钥（DashScope）"""
 
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    """阿里云百炼 API 基础 URL"""
+    """云端 OpenAI 兼容 API 基础 URL（DashScope）"""
 
     dashscope_model: str = "qwen3-max-preview"
-    """默认使用的 LLM 模型"""
+    """云端默认 LLM 模型"""
+
+    local_llm_api_key: Optional[str] = "local-dev-key"
+    """本机 OpenAI 兼容服务 API 密钥（例如 vLLM serve）"""
+
+    local_llm_base_url: str = "http://127.0.0.1:2222/v1"
+    """本机 OpenAI 兼容服务基础 URL"""
+
+    local_llm_model: str = ""
+    """本机 OpenAI 兼容服务暴露的模型名"""
 
     dashscope_embedding_model: str = "text-embedding-v3"
     """DashScope embedding 模型（在 RAG/NL2SQL 切换到 dashscope 后端时使用）"""
@@ -115,6 +129,12 @@ class AgentConfig:
 
     max_context_tokens: int = 4096
     """上下文最大 token 数，控制发送给 LLM 的上下文长度"""
+
+    context_compress_mode: str = "hybrid"
+    """上下文压缩模式：llm/truncate/hybrid"""
+
+    context_compress_target_ratio: float = 0.7
+    """上下文压缩目标比例（0-1），用于 LLM 压缩提示"""
 
     request_timeout_seconds: int = 180
     """统一请求超时时间（秒），用于各模块默认回退"""
@@ -288,18 +308,27 @@ class AgentConfig:
         cfg.neo4j_user = os.environ.get("NEO4J_USER", cfg.neo4j_user)
         cfg.neo4j_password = os.environ.get("NEO4J_PASSWORD", cfg.neo4j_password)
         cfg.neo4j_database = os.environ.get("NEO4J_DATABASE", cfg.neo4j_database)
-        # 兼容多种环境变量命名，优先使用 DASHSCOPE_API_KEY
-        dashscope_key = (
-            os.environ.get("DASHSCOPE_API_KEY")
-            or os.environ.get("BAILIAN_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-        )
-        if dashscope_key:
-            os.environ.setdefault("DASHSCOPE_API_KEY", dashscope_key)
-        cfg.dashscope_api_key = dashscope_key or cfg.dashscope_api_key
+        cfg.llm_backend = os.environ.get("LLM_BACKEND", cfg.llm_backend)
+        cfg.dashscope_api_key = os.environ.get("DASHSCOPE_API_KEY", cfg.dashscope_api_key)
         cfg.dashscope_base_url = os.environ.get("DASHSCOPE_BASE_URL", cfg.dashscope_base_url)
         cfg.dashscope_model = os.environ.get("DASHSCOPE_MODEL", cfg.dashscope_model)
+        cfg.local_llm_api_key = os.environ.get("LOCAL_LLM_API_KEY", cfg.local_llm_api_key)
+        cfg.local_llm_base_url = os.environ.get("LOCAL_LLM_BASE_URL", cfg.local_llm_base_url)
+        cfg.local_llm_model = os.environ.get("LOCAL_LLM_MODEL", cfg.local_llm_model)
         cfg.dashscope_embedding_model = os.environ.get("DASHSCOPE_EMBEDDING_MODEL", cfg.dashscope_embedding_model)
+        endpoint = resolve_llm_endpoint(
+            backend=cfg.llm_backend,
+            dashscope_api_key=cfg.dashscope_api_key,
+            dashscope_base_url=cfg.dashscope_base_url,
+            dashscope_model=cfg.dashscope_model,
+            local_llm_api_key=cfg.local_llm_api_key,
+            local_llm_base_url=cfg.local_llm_base_url,
+            local_llm_model=cfg.local_llm_model,
+        )
+        cfg.llm_backend = endpoint.backend
+        cfg.dashscope_api_key = endpoint.api_key
+        cfg.dashscope_base_url = endpoint.base_url
+        cfg.dashscope_model = endpoint.model
         cfg.rag_embedding_backend = os.environ.get("RAG_EMBEDDING_BACKEND", cfg.rag_embedding_backend)
         cfg.rag_embedding_model = os.environ.get("RAG_EMBEDDING_MODEL", cfg.rag_embedding_model)
         cfg.rag_embedding_device = os.environ.get("RAG_EMBEDDING_DEVICE", cfg.rag_embedding_device)
@@ -312,6 +341,34 @@ class AgentConfig:
         rag_embedding_normalize_value = os.environ.get("RAG_EMBEDDING_NORMALIZE")
         if rag_embedding_normalize_value is not None:
             cfg.rag_embedding_normalize = rag_embedding_normalize_value.strip().lower() in {"1", "true", "yes", "on"}
+
+        working_memory_size_value = os.environ.get("WORKING_MEMORY_SIZE")
+        if working_memory_size_value:
+            try:
+                cfg.working_memory_size = max(1, int(working_memory_size_value))
+            except ValueError:
+                pass
+
+        episodic_memory_size_value = os.environ.get("EPISODIC_MEMORY_SIZE")
+        if episodic_memory_size_value:
+            try:
+                cfg.episodic_memory_size = max(1, int(episodic_memory_size_value))
+            except ValueError:
+                pass
+
+        semantic_memory_size_value = os.environ.get("SEMANTIC_MEMORY_SIZE")
+        if semantic_memory_size_value:
+            try:
+                cfg.semantic_memory_size = max(1, int(semantic_memory_size_value))
+            except ValueError:
+                pass
+
+        max_context_tokens_value = os.environ.get("MAX_CONTEXT_TOKENS")
+        if max_context_tokens_value:
+            try:
+                cfg.max_context_tokens = max(256, int(max_context_tokens_value))
+            except ValueError:
+                pass
 
         # NL2SQL embedding 配置（默认本地离线），并兼容复用 RAG embedding 配置。
         cfg.nl2sql_embedding_backend = os.environ.get(
@@ -424,6 +481,9 @@ class AgentConfig:
         notes_dir_value = os.environ.get("NOTES_DIR")
         if notes_dir_value:
             cfg.notes_dir = Path(notes_dir_value)
+        vector_collection_value = os.environ.get("VECTOR_COLLECTION")
+        if vector_collection_value:
+            cfg.vector_collection = vector_collection_value.strip()
         cache_enabled_value = os.environ.get("NL2SQL_INDEX_CACHE_ENABLED")
         if cache_enabled_value is not None:
             cfg.nl2sql_index_cache_enabled = cache_enabled_value.strip().lower() in {"1", "true", "yes", "on"}
@@ -477,9 +537,23 @@ class AgentConfig:
                 "on",
             }
 
-        # 为依赖 OpenAI 兼容接口的组件兜底注入 KEY，避免默认 OpenAIEmbedding 报错
+        context_compress_mode_value = os.environ.get("CONTEXT_COMPRESS_MODE")
+        if context_compress_mode_value:
+            normalized_mode = context_compress_mode_value.strip().lower()
+            if normalized_mode in {"llm", "truncate", "hybrid"}:
+                cfg.context_compress_mode = normalized_mode
+
+        context_compress_target_ratio_value = os.environ.get("CONTEXT_COMPRESS_TARGET_RATIO")
+        if context_compress_target_ratio_value:
+            try:
+                ratio = float(context_compress_target_ratio_value)
+                cfg.context_compress_target_ratio = min(0.95, max(0.3, ratio))
+            except ValueError:
+                pass
+
+        # 为依赖 OpenAI 兼容接口的组件注入当前生效 KEY，避免使用到过期配置。
         if cfg.dashscope_api_key:
-            os.environ.setdefault("OPENAI_API_KEY", cfg.dashscope_api_key)
+            os.environ["OPENAI_API_KEY"] = cfg.dashscope_api_key
 
         cfg.store_root = cfg.memory_store_dir.parent
         cfg.notes_index = cfg.notes_dir / "notes_index.json"
@@ -503,5 +577,10 @@ class AgentConfig:
             "org_entity",
             "website_entity",
         ]
+        allowed_tables_value = os.environ.get("ALLOWED_TABLES")
+        if allowed_tables_value:
+            parsed_allowed_tables = [item.strip() for item in allowed_tables_value.split(",") if item.strip()]
+            if parsed_allowed_tables:
+                cfg.allowed_tables = parsed_allowed_tables
 
         return cfg

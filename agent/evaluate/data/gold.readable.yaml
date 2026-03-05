@@ -1,0 +1,312 @@
+records:
+- id: Q001
+  query: 什么是自治系统（AS）？按连接属性和流量角色，自治系统通常可以分为哪几类？
+  answer: "**什么是自治系统（AS）？**\n\n自治系统（Autonomous System，简称 AS）是互联网中由单一管理实体（如 ISP、云服务商、大型企业、大学或政府机构）控制的一组 IP 路由前缀集合。该实体为其网络制定统一、明确的路由策略，并通过边界网关协议（BGP）与其他自治系统交换路由信息。\n\
+    \nAS 最初在 1982 年 RFC 827 中定义，其核心思想是：互联网由多个“平等”的自治系统组成，每个系统无论规模大小，在路由管理责任上地位相同。AS 通过唯一的 **自治系统号（ASN）** 标识，最初为 16 位（0–65535），后扩展为\
+    \ 32 位（0–4294967295），由 IANA 分配给五大区域互联网注册机构（RIR），再由 RIR 分配给申请实体。\n\n---\n\n**按连接属性和流量角色，自治系统通常可分为以下四类：**\n\n1. **末端 AS（Stub\
+    \ AS）**  \n   - 仅连接到一个上游 AS。\n   - 通常不承载穿越流量，仅收发自身网络的流量。\n   - 虽然路由策略可能与其上游一致，但仍可能因私有对等或安全隔离需求而独立编号。\n   - 典型例子：企业专网、金融/运输行业私有网络。\n\
+    \n2. **多宿主 AS（Multi-homed AS）**  \n   - 连接到两个或多个上游 AS，以提高冗余性和可靠性。\n   - 不允许将来自一个上游 AS 的流量转发给另一个上游 AS（即不提供 Transit 服务）。\n\
+    \   - 目的是增强自身网络可用性，而非成为流量中转节点。\n   - 常见于大型企业或内容提供商，如 Netflix、Google 等。\n\n3. **传输 AS（Transit AS）**  \n   - 在两个或多个 AS 之间提供流量中转服务。\n\
+    \   - 通常是大型 ISP 或骨干网运营商，客户向其付费以接入全球互联网。\n   - 承担“客户→提供商”（C2P）关系中的“提供商”角色。\n   - 示例：中国电信、AT&T、Level 3（现 Lumen）等骨干运营商。\n\
+    \n4. **互联网交换点 AS（IXP AS）**  \n   - 代表物理基础设施（如交换中心），供多个 AS 在本地直接交换流量。\n   - IXP 自身通常不参与路由决策，其 ASN 多为透明或仅用于标识交换平台。\n   -\
+    \ 目的是降低跨网流量成本、减少延迟、提升效率。\n   - 示例：DE-CIX（德国）、AMS-IX（阿姆斯特丹）、中国 IXPs 如深圳 IX、上海 IX。\n\n---\n\n**补充说明：商业关系视角下的分类**\n\n从流量流向与合约角度，AS\
+    \ 间关系还可细分为：\n\n- **客户到提供商（C2P）**：客户付费，提供商提供全球可达性。\n- **提供商到客户（P2C）**：同 C2P，视角相反。\n- **对等互联（P2P）**：双方免费交换彼此及客户流量，通常基于流量对等原则。\n\
+    \n---\n\n✅ **总结：**\n\n| 类型       | 连接数量 | 是否中转流量 | 典型角色               |\n|------------|----------|----------------|------------------------|\n\
+    | Stub AS    | 1        | 否             | 企业、私有网络         |\n| Multi-homed AS | ≥2     | 否             | 内容商、大型企业    \
+    \   |\n| Transit AS | ≥2       | 是             | 骨干 ISP、运营商       |\n| IXP AS     | 多       | 平台不中转     | 交换中心基础设施   \
+    \    |\n\n如需进一步分析某个 AS 的类型或归属，可提供 ASN 或 IP 地址，我可协助查询其拓扑角色与组织归属。"
+  reference_answer: ''
+  expected_tool_calls:
+  - name: rag
+  tool_calls:
+  - name: rag
+    arguments:
+      query: 什么是自治系统（AS）？按连接属性和流量角色，自治系统通常可以分为哪几类？
+      top_k: 5
+    step_id: step_1
+  plan_text: |-
+    reason=该问题属于知识性问答，适合使用RAG工具检索相关文档内容。
+    1. [rag] 查询自治系统（AS）的定义及其分类信息
+  evidence_summary: "context_preview=[Role & Policy]\n你是互联网号码资源问答助手，负责回答 IP、ASN、域名、路由与组织归属等问题。\n你必须遵守以下约束：\n1) 不删除或修改数据库中的原始数据；\n\
+    2) 不输出敏感凭据或私密信息；\n3) 工具调用要有明确目的，先思考再调用工具；\n4) 如果信息不足，说明缺失并给出下一步建议。\n\n[Task]\n什么是自治系统（AS）？按连接属性和流量角色，自治系统通常可以分为哪几类？\n\n\
+    [Evidence]\n来源: knowledge/互联网域间路由安全监测与防御.docx\n### 2.1.1 自治系统\n\n自治系统的概念最早在1982年的外部网关协议RFC827中定义[4]，早于BGP协议的提出。该定义指出互联网络最终由很多平等的自治系统组成，平等意味着每个自治系统不管路由前缀多少、路由设备多少，在网络管理方面承当的责任和基本功能是一样的。外部网关协议的目的是使一个或多个自治系统能够用作传输媒介，用于源自其他自治系统的流量，通过中间自治系统传输到另一个自治系统，同时允许最终用户将所有自治系统的组合视为统一地址空间的单一网络，数据报通过互联网的路由，以及它所穿越的自治系统的数量\n\
+    answer_preview=**什么是自治系统（AS）？**\n\n自治系统（Autonomous System，简称 AS）是互联网中由单一管理实体（如 ISP、云服务商、大型企业、大学或政府机构）控制的一组 IP 路由前缀集合。该实体为其网络制定统一、明确的路由策略，并通过边界网关协议（BGP）与其他自治系统交换路由信息。\n\
+    \nAS 最初在 1982 年 RFC 827 中定义，其核心思想是：互联网由多个“平等”的自治系统组成，每个系统无论规模大小，在路由管理责任上地位相同。AS 通过唯一的 **自治系统号（ASN）** 标识，最初为 16 位（0–65535），后扩展为\
+    \ 32 位（0–4294967295），由 IANA 分配给五大区域互联网注册机构（RIR），再由 RIR 分配给申请实体。\n\n---\n\n**按连接属性和流量角色，自治系统通常可分为以下四类：**\n\n1. **末端 AS（Stub\
+    \ AS）**  \n   - 仅连接到一个上游 AS。\n   - 通常不承载穿越流量，仅收发自身网络的流量。\n   - 虽然路由策略可能与其上游一致，但仍可能因私有对等或安全隔离需求而独立编号。\n   - 典型例子：企业专网\n\
+    tool_calls=1"
+  human_reasoning_planning: 1
+  human_final_response_quality: 1
+  human_evidence_groundedness: 1
+  human_tool_call_scores:
+  - call_index: 1
+    step_id: step_1
+    tool: rag
+    score: null
+    reason: ''
+  human_comment: ''
+- id: Q021
+  query: 统计 as_entity 中活跃 AS 的总量，并按国家前 10 排名。
+  answer: |-
+    根据当前查询结果，**as_entity 中活跃 AS（状态为 'assigned'）的总量未直接提供**，但可确认按国家排名前 10 的分布如下：
+
+    ---
+
+    ### 🌍 活跃 AS 国家 Top 10（按数量降序）
+
+    | 排名 | 国家代码 | 国家/地区       | 活跃 AS 数量 |
+    |------|----------|------------------|---------------|
+    | 1    | US       | 美国             | 29,999        |
+    | 2    | CA       | 加拿大           | 2,294         |
+    | 3    | PR       | 波多黎各         | 111           |
+    | 4    | BM       | 百慕大           | 21            |
+    | 5    | GB       | 英国             | 17            |
+    | 6    | VG       | 英属维尔京群岛   | 15            |
+    | 7    | BS       | 巴哈马           | 14            |
+    | 8    | JM       | 牙买加           | 13            |
+    | 9    | VI       | 美属维尔京群岛   | 12            |
+    | 10   | AG       | 安提瓜和巴布达   | 12            |
+
+    > ✅ **说明**：以上数据仅包含状态为 `'assigned'` 的 AS 编号，代表“活跃”或“已分配”的自治系统。
+
+    ---
+
+    ### ⚠️ 信息缺失与建议
+
+    - **总活跃 AS 数量缺失**：当前 SQL 查询仅返回分组聚合后的前 10 名，未提供全局总计。
+      - ✅ **建议下一步**：执行 `SELECT COUNT(*) FROM as_entity WHERE status = 'assigned';` 获取活跃 AS 总量。
+
+    - **国家名称映射缺失**：部分国家使用 ISO 代码（如 PR、BM），非所有用户熟悉其全称。
+      - ✅ **建议增强**：若需展示友好名称，可关联国家代码映射表（如 `country_code_map`）。
+
+    ---
+
+    ### 📊 补充分析（基于现有数据）
+
+    - **美国主导地位显著**：US 占比远超其他国家之和，反映其互联网基础设施密度与商业生态规模。
+    - **加勒比地区集中度高**：PR、BM、VG、BS、JM、VI、AG 均位于加勒比海区域，可能与离岸注册、金融或 CDN 节点部署有关。
+    - **欧洲代表较少**：仅英国（GB）入榜，且数量较低，可能受统计口径或数据源覆盖影响。
+
+    ---
+
+    如需进一步分析（如趋势变化、ASN 类型分布、商业关系图谱等），请提供更详细字段或扩展查询条件。
+  reference_answer: ''
+  expected_tool_calls:
+  - name: nl2sql
+  tool_calls:
+  - name: nl2sql
+    arguments:
+      question: 统计 as_entity 中活跃 AS 的总量，并按国家前 10 排名
+      tables:
+      - as_entity
+      enable_column_retrieval: true
+      query_mode: GROUP_BY
+    step_id: step_1
+  plan_text: |-
+    reason=单步 nl2sql 即可完成分组统计与排序需求，无需额外步骤。
+    1. [nl2sql] 统计 as_entity 中活跃 AS 的总量，并按国家分组排名前 10
+  evidence_summary: "context_preview=[Role & Policy]  \n你是互联网号码资源问答助手，负责回答 IP、ASN、域名、路由与组织归属等问题。  \n约束：  \n1) 不删除或修改数据库原始数据；\
+    \  \n2) 不输出敏感凭据；  \n3) 工具调用需先思考再执行；  \n4) 信息不足时说明缺失并建议下一步。\n\n[Task]  \n统计 as_entity 中活跃 AS 的总量，并按国家前 10 排名。\n\n[Evidence]\
+    \  \nSQL: SELECT as_country, COUNT(*) as active_as_count FROM as_entity WHERE status = 'assigned' GROUP BY as_country\
+    \ ORDER BY active_as_count DESC LIMIT 10  \n结果: {'columns': ['as_country', 'active_as_count'], 'rows': [['US', 29999],\
+    \ ['CA', 2294], ['PR', 111], ['BM', 21], ['GB', 17], ['VG', 15], ['BS', 1\nanswer_preview=根据当前查询结果，**as_entity 中活跃 AS（状态为\
+    \ 'assigned'）的总量未直接提供**，但可确认按国家排名前 10 的分布如下：\n\n---\n\n### \U0001F30D 活跃 AS 国家 Top 10（按数量降序）\n\n| 排名 | 国家代码 | 国家/地区  \
+    \     | 活跃 AS 数量 |\n|------|----------|------------------|---------------|\n| 1    | US       | 美国             | 29,999\
+    \        |\n| 2    | CA       | 加拿大           | 2,294         |\n| 3    | PR       | 波多黎各         | 111           |\n\
+    | 4    | BM       | 百慕大           | 21            |\n| 5    | GB       | 英国             | 17            |\n| 6    | VG\
+    \       | 英属维尔京群岛   | 15\ntool_calls=1"
+  human_reasoning_planning: 1
+  human_final_response_quality: 1
+  human_evidence_groundedness: 1
+  human_tool_call_scores:
+  - call_index: 1
+    step_id: step_1
+    tool: nl2sql
+    score: null
+    reason: ''
+  human_comment: ''
+- id: Q022
+  query: 给出 org_entity 中名称包含 telecom 的组织数量，并列出前 5 个示例。
+  answer: "在 `org_entity` 表中，组织名称包含 “telecom” 的记录共有 **2,630 个**。\n\n以下是前 5 个示例（含英文名与中文译名）：\n\n1. **Optimum Telecom Algeria**\
+    \ — 阿尔及利亚最佳电信  \n2. **RAPIDANET TELECOM LTDA** — RAPIDANET电信有限公司  \n3. **Societe Internationale de Telecommunications\
+    \ Aeronautiques** — 国际电信航空公司  \n4. **Adriano Telecomunicacoes Ltda Me** — 阿德里亚诺电信有限公司  \n5. **CERTTO TELECOMUNICAÇÕES\
+    \ LTDA EPP.** — CERTTO Telecomunica是LTDA EPP。\n\n> 注：第5条中文翻译可能存在语义不完整或直译问题，建议结合上下文或原始数据进一步校对。\n\n如需更多示例、筛选特定国家/地区或导出完整列表，请提供进一步需求。"
+  reference_answer: ''
+  expected_tool_calls:
+  - name: nl2sql
+  tool_calls:
+  - name: nl2sql
+    arguments:
+      question: org_entity 中名称包含 telecom 的组织有多少个？
+      tables:
+      - org_entity
+      enable_column_retrieval: true
+      query_mode: COUNT
+    step_id: step_1
+  - name: nl2sql
+    arguments:
+      question: 列出 org_entity 中名称包含 telecom 的前 5 个组织示例
+      tables:
+      - org_entity
+      enable_column_retrieval: true
+      query_mode: OTHER
+    step_id: step_2
+  plan_text: |-
+    reason=问题包含两个独立子任务：统计数量（COUNT）和取样本（OTHER），可并行执行。
+    1. [nl2sql] 统计 org_entity 中名称包含 telecom 的组织数量
+    2. [nl2sql] 列出 org_entity 中名称包含 telecom 的前 5 个示例
+  evidence_summary: "context_preview=[Role & Policy]  \n你是互联网号码资源问答助手，负责回答 IP、ASN、域名、路由与组织归属等问题。  \n约束：  \n1) 不删除或修改数据库中的原始数据；\
+    \  \n2) 不输出敏感凭据或私密信息；  \n3) 工具调用需有明确目的，先思考再调用；  \n4) 信息不足时说明缺失并建议下一步。\n\n[Task]  \n给出 org_entity 中名称包含 telecom 的组织数量，并列出前\
+    \ 5 个示例。\n\n[Evidence]  \nSQL: SELECT COUNT(*) FROM org_entity WHERE org_name ILIKE '%telecom%' LIMIT 200  \n结果: {'columns':\
+    \ ['count'], 'rows': [[2630]], 'row_count': 1}  \n\nSQL: SELECT org_name, org_name_cn FROM org_entity WHERE org_name ILIKE\
+    \ '%telecom%' LIMIT 5  \n结果: {'columns': ['org_name', 'org_name_\nanswer_preview=在 `org_entity` 表中，组织名称包含 “telecom” 的记录共有\
+    \ **2,630 个**。\n\n以下是前 5 个示例（含英文名与中文译名）：\n\n1. **Optimum Telecom Algeria** — 阿尔及利亚最佳电信  \n2. **RAPIDANET TELECOM LTDA**\
+    \ — RAPIDANET电信有限公司  \n3. **Societe Internationale de Telecommunications Aeronautiques** — 国际电信航空公司  \n4. **Adriano Telecomunicacoes\
+    \ Ltda Me** — 阿德里亚诺电信有限公司  \n5. **CERTTO TELECOMUNICAÇÕES LTDA EPP.** — CERTTO Telecomunica是LTDA EPP。\n\n> 注：第5条中文翻译可能存在语义不完整或直译问题，建议结合上下文或原始数据进一步校对。\n\
+    \n如需更多示例、筛选特定国家/地区或导出完整列表，请提供进一步需求。\ntool_calls=2"
+  human_reasoning_planning: 1
+  human_final_response_quality: 1
+  human_evidence_groundedness: 1
+  human_tool_call_scores:
+  - call_index: 1
+    step_id: step_1
+    tool: nl2sql
+    score: null
+    reason: ''
+  - call_index: 2
+    step_id: step_2
+    tool: nl2sql
+    score: null
+    reason: ''
+  human_comment: ''
+- id: Q026
+  query: 以 AS4134 为起点，查询其上游/下游邻接关系并给出摘要。
+  answer: |-
+    当前任务因 Cypher 查询超出长度限制而失败。为完成对 **AS4134** 上游/下游邻接关系的查询，需采取分步策略以规避系统限制。
+
+    ---
+
+    ### 🧭 任务目标
+    获取 AS4134 的：
+    - **上游邻居（Transit Providers）** —— 向其提供互联网出口的 AS；
+    - **下游邻居（Customers）** —— 从其接收路由并依赖其转发流量的 AS；
+    - （可选）**对等邻居（Peers）** —— 与之建立双边对等（settlement-free peering）的 AS。
+
+    ---
+
+    ### ⚙️ 分析与优化策略
+
+    由于单次查询超限，建议采用以下分步方式：
+
+    #### ✅ Step 1：先查询直接上游（Providers）
+    目的：识别哪些 AS 向 AS4134 提供 Transit 服务。
+
+    ```cypher
+    MATCH (a:AS {asn: 4134})-[:TRANSIT]->(upstream:AS)
+    RETURN upstream.asn, upstream.name LIMIT 10
+    ```
+
+    #### ✅ Step 2：查询直接下游（Customers）
+    目的：识别哪些 AS 通过 AS4134 接入互联网。
+
+    ```cypher
+    MATCH (downstream:AS)-[:TRANSIT]->(a:AS {asn: 4134})
+    RETURN downstream.asn, downstream.name LIMIT 10
+    ```
+
+    #### ✅ Step 3（可选）：查询对等邻居（Peers）
+    目的：识别与 AS4134 建立对等互联的 AS。
+
+    ```cypher
+    MATCH (a:AS {asn: 4134})-[:PEER]-(peer:AS)
+    RETURN peer.asn, peer.name LIMIT 10
+    ```
+
+    > 💡 注：若数据库中未明确区分 TRANSIT / PEER 关系，可改用通用关系如 `[:CONNECTS_TO]` 并结合 BGP 社区或策略推断角色。
+
+    ---
+
+    ### 📌 下一步建议
+
+    请执行上述 **Step 1 → Step 2 → Step 3** 的分步查询，每次仅请求有限结果（如 LIMIT 10），避免再次触发长度限制。
+
+    待获得原始数据后，我将为你整理摘要，包括：
+    - 上游 AS 数量及主要运营商；
+    - 下游 AS 类型分布（企业、ISP、云服务商等）；
+    - 是否存在大型对等伙伴（如 Google、Cloudflare 等）；
+    - AS4134 在全球拓扑中的角色定位（如国家级骨干网、区域 Transit AS 等）。
+
+    ---
+
+    ### 📎 补充说明（基于公开知识）
+
+    AS4134 是 **中国电信骨干网（CHINANET-BACKBONE）** 的核心自治系统之一，通常具有：
+    - 多个国际上游（如 AS4637 Telstra、AS7018 AT&T、AS3356 Level3/Lumen）；
+    - 大量国内省级/地市级 ISP 作为下游；
+    - 与国内外大型内容提供商（如 AS15169 Google、AS13335 Cloudflare）建立对等。
+
+    但具体邻接关系需依赖实际数据库查询确认。
+
+    ---
+
+    ✅ 请授权执行分步查询，或提供部分结果，我将继续为你生成结构化摘要。
+  reference_answer: ''
+  expected_tool_calls:
+  - name: graph
+  tool_calls:
+  - name: graph
+    arguments:
+      cypher: 'MATCH (a:AS {asn: ''AS4134''})-[r:UPSTREAM|DOWNSTREAM]-(b) RETURN a, r, b LIMIT 200'
+      max_rows: 200
+    step_id: step_1
+  plan_text: |-
+    reason=直接使用 graph 工具查询 AS4134 的上下游邻接关系，符合最短可行计划原则。
+    1. [graph] 查询 AS4134 的上游/下游邻接关系
+  evidence_summary: |-
+    evidence_count=1; tool_calls=1; sources=executor:1
+    [1] source=executor; title=步骤 step_1 执行失败; content=错误: Error calling tool 'neo4j_llamaindex_query': Cypher 超出长度限制
+  human_reasoning_planning: 1
+  human_final_response_quality: 0.4
+  human_evidence_groundedness: 0.8
+  human_tool_call_scores:
+  - call_index: 1
+    step_id: step_1
+    tool: graph
+    score: null
+    reason: ''
+  human_comment: ''
+- id: Q027
+  query: 从图谱中查询 1.48.0.0/16 关联的 AS 与组织信息，并返回链路摘要。
+  answer: "当前查询失败原因：工具调用中使用了非只读或非合规Cypher语句（如含写操作或未以 `MATCH`/`OPTIONAL MATCH`/`WITH` 开头）。\n\n✅ **修正建议**：  \n请使用以下合规只读 Cypher\
+    \ 查询语句重试，用于获取 `1.48.0.0/16` 关联的 AS 与组织信息：\n\n```cypher\nMATCH (p:Prefix {prefix: \"1.48.0.0/16\"})-[:ORIGINATE_BY]->(a:AS)\n\
+    OPTIONAL MATCH (a)-[:REGISTERED_TO]->(o:Org)\nRETURN p.prefix AS prefix, a.asn AS asn, o.name AS org_name, o.country AS\
+    \ country\n```\n\n\U0001F4CC **链路摘要结构说明（预期返回）**：\n- **IP前缀**：`1.48.0.0/16`\n- **起源AS**：关联的自治系统编号（ASN）\n- **注册组织**：AS所属组织名称与国家（若存在）\n\
+    - **关系链路**：`Prefix → ORIGINATE_BY → AS → REGISTERED_TO → Org`\n\n\U0001F50D **若仍无结果，可能缺失信息包括**：\n1. 图谱中未收录该前缀；\n2. 前缀未绑定起源AS；\n\
+    3. AS未关联注册组织。\n\n\U0001F6E0️ **下一步建议**：\n- 检查图谱是否包含 `1.48.0.0/16` 节点；\n- 若无，可尝试扩大查询范围（如 `/15` 或 `/17`）或换用外部公开数据库（如 RIPE\
+    \ Stat、APNIC Whois、BGPView）交叉验证；\n- 确保 Neo4j 图谱模式中存在 `Prefix`, `AS`, `Org` 节点及对应关系。\n\n请使用上述合规语句重试查询。"
+  reference_answer: ''
+  expected_tool_calls:
+  - name: graph
+  tool_calls:
+  - name: graph
+    arguments:
+      cypher: 'MATCH (ip:IPv4 {cidr: ''1.48.0.0/16''})-[:BELONGS_TO|ALLOCATED_TO*1..2]-(asn:ASN)-[:REGISTERED_TO]->(org:Organization)
+        RETURN ip.cidr, asn.asn_id, org.name, org.country LIMIT 200'
+      max_rows: 200
+    step_id: step_1
+  plan_text: |-
+    reason=直接通过图谱查询关联路径，满足链路摘要需求。
+    1. [graph] 查询 1.48.0.0/16 关联的 AS 与组织信息
+  evidence_summary: |-
+    evidence_count=1; tool_calls=1; sources=executor:1
+    [1] source=executor; title=步骤 step_1 执行失败; content=错误: Error calling tool 'neo4j_llamaindex_query': 仅允许 MATCH/OPTIONAL MATCH/WITH 开头的只读查询
+  human_reasoning_planning: 1
+  human_final_response_quality: 0.4
+  human_evidence_groundedness: 0.8
+  human_tool_call_scores:
+  - call_index: 1
+    step_id: step_1
+    tool: graph
+    score: null
+    reason: ''
+  human_comment: ''

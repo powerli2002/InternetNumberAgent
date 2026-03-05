@@ -5,7 +5,9 @@
 - 结构化数据为事实源（PostgreSQL），向量/图谱可从结构化表重建；答复要有证据（SQL 结果/文档片段）。
 
 ## 系统结构与关键目录
-- `src/`：数据处理流水线（解析/清洗/实体化/格式化器）。
+- `fusiondata/src/`：数据处理流水线（解析/清洗/实体化/格式化器）。
+- `fusiondata/setup.py`：融合流程统一入口。
+- `fusiondata/bgp_data/`：BGP 原始/解码数据与抓取脚本。
 - `agent/scripts/`：CSV 导入与辅助脚本（如 `python -m agent.scripts.load_all_csv`）。
 - `agent/`：FusionAgent、上下文工程、记忆、工具、追踪；API 在 `agent/interfaces/http/server.py`。
 - `agent/mcp/`：FastMCP 工具服务与客户端（NL2SQL/RAG/Neo4j/Note/Todo）。
@@ -13,7 +15,7 @@
 - `agent/workers/`：A2A Worker 服务与子代理执行器。
 - `agent/tools/`：底层工具实现（由 MCP Server 封装暴露）。
 - `conf/`：配置与 `.env`；`config.yaml`（本机）/`config.docker.yaml`（容器）。
-- `data/format/`：实体 CSV 输出；多为日期快照。
+- `fusiondata/data/format/`：实体 CSV 输出；多为日期快照。
 - `docs/`：项目与部署文档；`summary.md` 为 16 表与关系的权威摘要。
 - `agent-chat-ui/`：可选前端，使用 LangGraph 风格 API 访问 `agent/interfaces/http/server.py`。
 
@@ -36,12 +38,13 @@
 - AS 疆域分析：`python agent/tools/as_territory_tools.py --config conf/config.docker.yaml --root . [--load-neo4j]`
 
 ## 开发规范
-- 严禁使用 回退策略，如果不可行，则报告并询问需要的决策。
+- **严禁使用 回退策略**，如果执行不符合期望流程，直接返回或中断，不需要在异常处理中写降级逻辑。如果整体方案不可行，则报告并询问需要的决策。
+- **精简代码结构**：尽量减少代码文件的新增。在逻辑清晰的前提下可以适当不拆分函数，避免过度封装导致文件跳转繁琐。
 - 代码优先放在：**智能体链路→`agent/`**；**工具/脚本→`agent/tools/`、`agent/scripts/`**。
 - 保持脚本 **幂等**（可重复执行不重复写入）。
-- 修改配置时优先更新 `conf/.env`，不要提交密钥。
+- 修改配置时优先更新 `conf/.env`，可以在conf中配置显示密钥，以便调试。
 - PostgreSQL 数据卷挂载路径需保持 `../mount/...`，避免数据损坏。
-- 代码注释必须为简体中文，复杂逻辑先写思路再实现。
+- **注释与逻辑说明**：代码注释必须使用简体中文，遇到复杂逻辑时，必须先在注释中写明思路再进行代码实现。
 - 需求不清晰时先提问或给出可执行的具体方案。
 
 

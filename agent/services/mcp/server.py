@@ -94,15 +94,24 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
         question: str,
         tables: Optional[List[str]] = None,
         enable_column_retrieval: bool = False,
+        query_mode: str = "OTHER",
+        intent_policy: str = "auto",
+        intent_labels_required: Optional[List[str]] = None,
         trace_id: str = "",
     ) -> Dict[str, Any]:
-        """执行 NL2SQL 查询。"""
+        """执行 NL2SQL 查询。
+
+        说明：
+        - query_mode 为当前生效参数；
+        - intent_policy / intent_labels_required 为兼容字段，已废弃但暂时保留。
+        """
 
         def _run() -> Dict[str, Any]:
             result = runtime.nl2sql_tool.query(
                 question,
                 tables=tables,
                 enable_column_retrieval=enable_column_retrieval,
+                query_mode=query_mode,
                 trace_id=trace_id,
             )
             return {"sql": result.sql, "result": result.result}
@@ -114,6 +123,9 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
                 "question": question,
                 "tables": tables or [],
                 "enable_column_retrieval": enable_column_retrieval,
+                "query_mode": query_mode,
+                "intent_policy": intent_policy,
+                "intent_labels_required": intent_labels_required or [],
             },
             _run,
         )

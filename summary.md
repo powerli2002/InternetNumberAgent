@@ -42,7 +42,7 @@
 
 ### 2.1 文件与命名规则
 
-- 核心 CSV 位于 `data/format/`。
+- 核心 CSV 位于 `fusiondata/data/format/`。
 - 多数表按日期生成快照（如 `as_entity_2024-08-12.csv`），数据库表名不带日期。
 - 导入时只写入 16 张实体表；如存在多日期 CSV，需指定或选择最新日期文件。
 
@@ -71,7 +71,7 @@
 ### 3.1 `as_entity`
 
 - **主键**：`asn`
-- **来源**：`data/format/as_entity_YYYY-MM-DD.csv`
+- **来源**：`fusiondata/data/format/as_entity_YYYY-MM-DD.csv`
 - **字段说明**：
   - 基础：`source, opq_id, date, status`
   - 描述与名称：`descr, descr_cn, aut_name, website`
@@ -86,13 +86,13 @@
 ### 3.2 `asn_entity`
 
 - **主键**：`asn`
-- **来源**：`data/format/asn_entity.csv`
+- **来源**：`fusiondata/data/format/asn_entity.csv`
 - **字段说明**：`asn, source, country, opq_id, date, status, org_name, uuid`
 
 ### 3.3 `country_entity`
 
 - **主键**：`country`（国家代码）
-- **来源**：`data/format/country_entity_YYYY-MM-DD.csv`
+- **来源**：`fusiondata/data/format/country_entity_YYYY-MM-DD.csv`
 - **字段说明**：
   - 基础：`country_en, country, country_cn, region`
   - 宏观统计：`population, internet_users, internet_users_percentage, gdp_per_capita_cny`
@@ -101,13 +101,13 @@
 ### 3.4 `industry_entity`
 
 - **主键**：无显式主键（以 `url`/`parent` 组合可唯一）
-- **来源**：`data/format/industry_entity_YYYY-MM-DD.csv`
+- **来源**：`fusiondata/data/format/industry_entity_YYYY-MM-DD.csv`
 - **字段说明**：`url, parent, title, industry, description, key, ip, ip_prefix, ip_asn, ip_org, auth_ip, auth_ip_prefix, auth_ip_asn, auth_ip_org`
 
 ### 3.5 `ip_bgp_entity`
 
 - **主键**：`prefix + bgp`
-- **来源**：`data/format/ip_bgp_entity_YYYY-MM-DD.csv`
+- **来源**：`fusiondata/data/format/ip_bgp_entity_YYYY-MM-DD.csv`
 - **字段说明**：
   - 前缀与归属：`prefix, prefix_len, route, bgp`
   - 描述信息：`name, descr`
@@ -119,67 +119,67 @@
 ### 3.6 `ip_inetnum_entity`
 
 - **主键**：`cidr`
-- **来源**：`data/format/ip_inetnum_entity.csv`
+- **来源**：`fusiondata/data/format/ip_inetnum_entity.csv`
 - **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.7 `ip_rdap_entity`
 
 - **主键**：`cidr`
-- **来源**：`data/format/ip_rdap_entity.csv`
+- **来源**：`fusiondata/data/format/ip_rdap_entity.csv`
 - **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.8 `ip_route_entity`
 
 - **主键**：`cidr`
-- **来源**：`data/format/ip_route_entity.csv`
+- **来源**：`fusiondata/data/format/ip_route_entity.csv`
 - **字段说明**：`cidr, descr, origin, mnt_by, last_modified, source`
 
 ### 3.9 `ipv4_entity`
 
 - **主键**：`prefix`
-- **来源**：`data/format/ipv4_entity.csv`
+- **来源**：`fusiondata/data/format/ipv4_entity.csv`
 - **字段说明**：`prefix, prefix_len, source, country, org_id, date, status, org_name, sibling_as, uuid`
 
 ### 3.10 `ipv6_bgp_entity`
 
 - **主键**：`prefix + bgp`
-- **来源**：`data/format/ipv6_bgp_entity_YYYY-MM-DD.csv`
+- **来源**：`fusiondata/data/format/ipv6_bgp_entity_YYYY-MM-DD.csv`
 - **字段说明**：`prefix, prefix_len, name, descr, route, bgp, admin_prefix, admin_route, admin_bgp, org_handle_prefix, org_name_prefix, org_name_cn_prefix, org_uuid_prefix, org_handle_bgp, org_name_bgp, org_name_cn_bgp, org_uuid_bgp, country, source, date, inetnum, rdap, rpki`
 
 ### 3.11 `ipv6_entity`
 
 - **主键**：`prefix`
-- **来源**：`data/format/ipv6_entity.csv`
+- **来源**：`fusiondata/data/format/ipv6_entity.csv`
 - **字段说明**：`prefix, prefix_len, source, country, org_id, date, status, org_name, sibling_as, uuid`
 
 ### 3.12 `ipv6_inetnum_entity`
 
 - **主键**：`cidr`
-- **来源**：`data/format/ipv6_inetnum_entity.csv`
+- **来源**：`fusiondata/data/format/ipv6_inetnum_entity.csv`
 - **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.13 `ipv6_rdap_entity`
 
 - **主键**：`cidr`
-- **来源**：`data/format/ipv6_rdap_entity.csv`
+- **来源**：`fusiondata/data/format/ipv6_rdap_entity.csv`
 - **字段说明**：`cidr, netname, descr, country, source, admin_c, tech_c, abuse_c, org, org_name, org_name_cn, org_uuid`
 
 ### 3.14 `ipv6_route_entity`
 
 - **主键**：`cidr`
-- **来源**：`data/format/ipv6_route_entity.csv`
+- **来源**：`fusiondata/data/format/ipv6_route_entity.csv`
 - **字段说明**：`cidr, descr, origin, mnt_by, last_modified, source`
 
 ### 3.15 `org_entity`
 
 - **主键**：`uuid`
-- **来源**：`data/format/org_entity_YYYY-MM-DD.csv`
+- **来源**：`fusiondata/data/format/org_entity_YYYY-MM-DD.csv`
 - **字段说明**：`uuid, org_country, org_country_cn, org_name, org_name_cn, sibling_as, v4prefixes, v6prefixes, sibling_as_num, v4prefixes_num, v6prefixes_num`
 
 ### 3.16 `website_entity`
 
 - **主键**：`url`
-- **来源**：`data/format/website_entity_base.csv` + `data/format/domain_cn.csv`
+- **来源**：`fusiondata/data/format/website_entity_base.csv` + `fusiondata/data/format/domain_cn.csv`
 - **字段说明**：`url, title, key, description, industry, ip, ip_prefix, auth_ip, auth_ip_prefix`
 
 ---

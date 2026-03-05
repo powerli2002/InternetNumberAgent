@@ -29,13 +29,15 @@
 ### 3.1 总体策略
 
 - 保留 LangGraph/LangSmith 自动追踪。
-- 不再手工创建 `graph_node:*` 与 `mcp_tool:*` runs。
+- 不再手工创建 `graph_node:*` runs（避免与自动节点重复）。
+- MCP 客户端创建 `mcp_tool:*` / `mcp_list_tools` 子 runs，但仅在存在有效 `root_run` 时创建并绑定 `parent`。
 - 每次请求创建一个 root run：`langgraph_agent`。
 - `graph.invoke(...)` 在 `tracing_context(parent=root_run)` 内执行。
 - root run 输出包含聚合字段：
   - `trace_version`
   - `node_records`
   - `final_state_output`
+  - `main_flow_trace`
 
 ### 3.2 并发与子规划
 
@@ -47,6 +49,48 @@
 
 - 采样按请求一次决策（root run 决定）。
 - child run 不再独立随机采样，避免“无 root 有 child”的孤儿链路。
+
+### 3.4 关键节点上下文记录（新增）
+
+- 主流程开始/结束：
+  - root 输出 `main_flow_trace.init_state_snapshot`
+  - root 输出 `main_flow_trace.final_state_snapshot`
+- 工具执行输入（主流程视角）：
+  - `execute_ready` 节点 `prompt_records.stage=tool_dispatch_inputs`
+- 工具返回并回填主流程后：
+  - `execute_ready` 节点 `prompt_records.stage=tool_dispatch_outputs`
+  - 包含 `state_after_merge`（pending/completed/step_results/evidences/sources）
+- 上下文压缩前后：
+  - `build_context` 节点 `prompt_records.stage=context_before_compress`
+  - `build_context` 节点 `prompt_records.stage=context_after_compress`
+  - 同时写入 `context_build_stats`（chunk/token/compress 配置统计）
+- 最终结果：
+  - `generate_answer` 节点 `prompt_records` 记录请求上下文与答案预览
+  - root 输出 `final_state_output` 与最终 `answer`
+
+### 3.5 节点详情页可见性（新增）
+
+- 每个自动节点 run（如 `plan`）的输出里新增 `node_audit` 字段。
+- `node_audit` 包含：
+  - `input_snapshot`
+  - `output_summary`
+  - `prompt_records`
+  - `trace_extras`
+- 因此无需只依赖 root 的 `node_records`，可直接在节点详情页查看解析信息。
+
+### 3.6 LangGraph Studio 与 MCP 工具展示
+
+**为什么图里看不到 MCP 工具（nl2sql / rag / graph / todo）？**
+
+- LangGraph Studio 的**图视图**展示的是 `StateGraph` 的**节点**，即 `add_node(...)` 注册的节点：`plan`、`validate_plan`、`dispatch`、`execute_ready`、`collect_memory_notes`、`conflict_check`、`build_context`、`generate_answer`、`write_memory`。
+- MCP 工具不是在图上单独建节点，而是在 **`execute_ready` 节点内部**按计划步骤调用的（`_run_nl2sql_step`、`_run_rag_step` 等），因此不会作为独立方框出现在图里。
+
+**在哪里能看到 MCP 工具调用？**
+
+- 在 **LangSmith 的 Run 树 / Trace 视图**中：展开 **`execute_ready`** 节点，其下会出现子 run（如 `mcp_tool:nl2sql_query`、`mcp_tool:rag_query`、`mcp_tool:graph_query` 等），即每次 MCP 调用的输入输出与耗时。
+- 通过 Studio 直接 `graph.invoke()` 时，代码已做兼容：当没有 `respond()` 的根 run 时，会以当前节点 run（`execute_ready`）为 parent 创建 MCP 子 run，保证在 trace 树中可见。
+
+**若希望在图里看到“工具级”节点：** 需要改架构，把每种工具做成独立图节点（如 `add_node("nl2sql", ...)`）并由 dispatch 条件边路由到对应节点；当前实现是“单节点内多工具分发”，图视图只到 `execute_ready` 这一层。
 
 ## 4. 基本用法
 
@@ -79,7 +123,7 @@ uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
    - trace 数量：1
    - root run：`langgraph_agent`
    - 子 run：自动节点/LLM runs，均有父子关系
-   - root outputs：存在 `node_records` 与 `final_state_output`
+   - root outputs：存在 `node_records`、`final_state_output`、`main_flow_trace`
 
 ## 5. 命令行排障
 
@@ -149,6 +193,7 @@ python -m agent.scripts.trace_by_metadata_id \
   - `trace_version`
   - `node_records`
   - `final_state_output`
+  - `main_flow_trace`
 - 聚合脚本输出 `trace_count=1`，无多 trace 告警。
 
 ## 8. 维护建议

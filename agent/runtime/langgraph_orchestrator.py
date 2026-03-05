@@ -30,12 +30,13 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 import contextvars
+import hashlib
 import json
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from langsmith.run_helpers import tracing_context
+from langsmith.run_helpers import get_current_run_tree, tracing_context
 from langgraph.graph import END, StateGraph
 from typing_extensions import TypedDict
 
@@ -57,7 +58,7 @@ from agent.runtime.context_builder import ContextBuilder
 from agent.runtime.graph_models import GraphPlan, GraphPlanStep
 from agent.runtime.graph_schemas import build_conflict_schema, build_main_plan_schema, build_todo_subplan_schema
 from agent.services.mcp.client import MCPToolClient
-from src.utils.logging_manager import logger
+from fusiondata.src.utils.logging_manager import logger
 
 
 _ROOT_RUN_CTX: contextvars.ContextVar[Any] = contextvars.ContextVar("langgraph_root_run", default=None)
@@ -120,6 +121,48 @@ def _trace_json(value: Any, limit: int = 6000) -> str:
     except Exception:
         raw = str(value)
     return _truncate(raw, limit=limit)
+
+
+def _to_jsonable(value: Any) -> Any:
+    """把任意对象尽量转换为 JSON 可序列化结构。"""
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        return str(value)
+
+
+def _serialize_evidence_items(evidences: List[Any], max_items: int = 30) -> List[Dict[str, Any]]:
+    """序列化证据列表，供 trace 与评测链路持久化。"""
+    serialized: List[Dict[str, Any]] = []
+    for evidence in evidences[: max(0, int(max_items))]:
+        if isinstance(evidence, EvidenceItem):
+            title = str(evidence.title or "")
+            source = str(evidence.source or "")
+            content = str(evidence.content or "")
+            score = float(evidence.score)
+            metadata = _to_jsonable(evidence.metadata or {})
+        elif isinstance(evidence, dict):
+            title = str(evidence.get("title") or "")
+            source = str(evidence.get("source") or "")
+            content = str(evidence.get("content") or "")
+            score = float(evidence.get("score") or 0.0)
+            metadata = _to_jsonable(evidence.get("metadata") or {})
+        else:
+            title = ""
+            source = ""
+            content = str(evidence or "")
+            score = 0.0
+            metadata = {}
+        serialized.append(
+            {
+                "title": _truncate(title, 200),
+                "source": _truncate(source, 60),
+                "content": _truncate(content, 2000),
+                "score": score,
+                "metadata": metadata,
+            }
+        )
+    return serialized
 
 
 def _trace_state_snapshot(state: AgentGraphState) -> Dict[str, Any]:
@@ -191,10 +234,15 @@ class LangGraphOrchestrator:
             model=self.config.dashscope_model,
         )
         # 上下文构建器负责把多源证据压缩到 token 预算内。
-        self.context_builder = ContextBuilder(max_tokens=self.config.max_context_tokens)
+        self.context_builder = ContextBuilder(
+            max_tokens=self.config.max_context_tokens,
+            llm_client=self.llm,
+            compress_mode=self.config.context_compress_mode,
+            compress_target_ratio=self.config.context_compress_target_ratio,
+        )
         # 统一记忆管理器：工作记忆 + 情景记忆 + 语义记忆。
         self.memory_manager = MemoryManager(
-            working_memory=WorkingMemory(capacity=self.config.working_memory_size),
+            working_memory=WorkingMemory(capacity=self.config.working_memory_size), # 纯标量
             episodic_memory=EpisodicMemory(
                 sqlite_path=self.config.memory_store_dir / "episodic.sqlite",
                 capacity=self.config.episodic_memory_size,
@@ -256,6 +304,11 @@ class LangGraphOrchestrator:
             "metadata": {},
             "error": "",
         }
+        main_flow_trace: Dict[str, Any] = {
+            "stage": "main_flow_start",
+            "init_state_snapshot": _trace_state_snapshot(init_state),
+            "history_size": len(history),
+        }
 
         # 根追踪 run：将整次问答链路绑定到同一个 trace 上，便于跨节点观测。
         root_ctx = (
@@ -296,6 +349,11 @@ class LangGraphOrchestrator:
                 _ROOT_RUN_CTX.reset(token)
 
             answer = str(final_state.get("answer") or "")
+            evidences = list(final_state.get("evidences") or [])
+            evidence_items = _serialize_evidence_items(evidences)
+            evidence_sources = list(
+                dict.fromkeys(item.get("source", "") for item in evidence_items if str(item.get("source", "")).strip())
+            )
             metadata = {
                 # 对 sources 去重并保序，避免重复来源污染前端展示。
                 "sources": list(dict.fromkeys(final_state.get("sources") or [])),
@@ -303,6 +361,8 @@ class LangGraphOrchestrator:
                 "plan_reason": final_state.get("plan_reason", ""),
                 "conflicts": final_state.get("conflicts", []),
                 "replan_count": final_state.get("replan_count", 0),
+                "evidence_count": len(evidences),
+                "evidence_sources": evidence_sources,
             }
             final_state_output = {
                 "plan_steps_size": len(final_state.get("plan_steps") or []),
@@ -310,10 +370,15 @@ class LangGraphOrchestrator:
                 "pending_ids": [str(item) for item in (final_state.get("pending_ids") or [])[:30]],
                 "conflicts": [str(item) for item in (final_state.get("conflicts") or [])[:20]],
                 "step_results": _trace_json(final_state.get("step_results") or {}, limit=6000),
+                "evidence_count": len(evidences),
+                "evidence_sources": evidence_sources,
+                "evidence_items": evidence_items,
                 "context_preview": _truncate(str(final_state.get("context") or ""), 1200),
                 "answer_preview": _truncate(answer, 1200),
                 "error": _truncate(str(final_state.get("error") or ""), 800),
             }
+            main_flow_trace["final_state_snapshot"] = _trace_state_snapshot(final_state)
+            main_flow_trace["final_answer_preview"] = _truncate(answer, 1200)
             if run:
                 run.add_outputs(
                     {
@@ -322,6 +387,7 @@ class LangGraphOrchestrator:
                         "trace_version": "single_trace_auto_v1",
                         "node_records": node_records,
                         "final_state_output": final_state_output,
+                        "main_flow_trace": main_flow_trace,
                     }
                 )
             return answer, metadata
@@ -460,6 +526,7 @@ class LangGraphOrchestrator:
         node_records = _NODE_RECORDS_CTX.get()
         started_at = time.time()
         started_perf = time.perf_counter()
+        current_run = get_current_run_tree()
         try:
             # fn 返回“局部状态更新字典”，由 LangGraph 自动与全局状态合并。
             output = fn()
@@ -498,6 +565,22 @@ class LangGraphOrchestrator:
                 record["trace_extras"] = trace_extras
             if isinstance(node_records, list):
                 node_records.append(record)
+            if current_run is not None:
+                try:
+                    # 同步写入当前 LangGraph 自动节点 run，便于在单节点详情页直接排障。
+                    current_run.add_outputs(
+                        {
+                            "node_audit": {
+                                "node_name": name,
+                                "input_snapshot": record["input_snapshot"],
+                                "output_summary": record["output_summary"],
+                                "prompt_records": prompt_records,
+                                "trace_extras": trace_extras,
+                            }
+                        }
+                    )
+                except Exception as trace_exc:
+                    logger.debug("节点追踪输出写入失败 node=%s error=%s", name, trace_exc)
             return output
         except Exception as exc:
             if isinstance(node_records, list):
@@ -515,6 +598,20 @@ class LangGraphOrchestrator:
                         "error": str(exc),
                     }
                 )
+            if current_run is not None:
+                try:
+                    current_run.add_outputs(
+                        {
+                            "node_audit": {
+                                "node_name": name,
+                                "status": "error",
+                                "error": str(exc),
+                                "input_snapshot": _trace_state_snapshot(state),
+                            }
+                        }
+                    )
+                except Exception as trace_exc:
+                    logger.debug("节点异常追踪输出写入失败 node=%s error=%s", name, trace_exc)
             raise
 
     def _plan_node(self, state: AgentGraphState) -> Dict[str, Any]:
@@ -535,6 +632,8 @@ class LangGraphOrchestrator:
             query = str(state.get("query") or "")
             trace_id = str(state.get("trace_id") or "")
             trace_outputs: Dict[str, Any] = {}
+            # 重规划时将上一轮计划与步骤结果摘要传给 planner，降低重复步骤概率。
+            previous_plan_steps, previous_step_summaries = self._build_previous_plan_payload(state)
             # 每轮规划前重新探测工具可用性，适配 MCP 工具热插拔与重规划场景。
             available_tools = self._resolve_available_tools(trace_id)
             # 仅把“当前可用工具”暴露给规划模型，降低无效计划概率。
@@ -557,6 +656,8 @@ class LangGraphOrchestrator:
                 ],
                 "replan_count": int(state.get("replan_count", 0)),
                 "previous_conflicts": state.get("conflicts", []),
+                "previous_plan_steps": previous_plan_steps,
+                "previous_step_summaries": previous_step_summaries,
             }
             # 使用结构化 tool_call + schema，强约束计划输出字段。
             messages = [
@@ -581,19 +682,32 @@ class LangGraphOrchestrator:
                         "tool_payload": _trace_json(result_payload, limit=5000),
                     }
                 )
+                # 兼容：部分 API 将 tool arguments 双重编码为字符串，一次 json.loads 后仍为 str。
+                if isinstance(result_payload, str):
+                    try:
+                        result_payload = json.loads(result_payload)
+                    except json.JSONDecodeError as e:
+                        trace_outputs["plan_parse_status"] = "failed"
+                        trace_outputs["plan_parse_error"] = f"计划 JSON 二次解析失败: {e}"
+                        trace_outputs["plan_result_payload"] = _trace_json(result_payload)
+                        raise
                 # 把 LLM 的输出结果转换为 GraphPlan 对象
                 try:
                     plan = GraphPlan.from_dict(result_payload)
                 except Exception as parse_exc:
                     # 记录原始结果与解析错误，便于在 LangSmith 中按字段检索失败样本。
-                    trace_outputs = {
-                        "plan_parse_status": "failed",
-                        "plan_parse_error": str(parse_exc),
-                        "plan_result_payload": _trace_json(result_payload),
-                    }
+                    trace_outputs["plan_parse_status"] = "failed"
+                    trace_outputs["plan_parse_error"] = str(parse_exc)
+                    trace_outputs["plan_result_payload"] = _trace_json(result_payload)
                     raise
             except Exception as exc:
-                logger.warning("LangGraph 规划失败，使用兜底计划 error=%s", exc)
+                logger.warning(
+                    "LangGraph 规划失败，使用兜底计划 type=%s error=%s",
+                    type(exc).__name__,
+                    exc,
+                )
+                # 规划失败常见原因：模型未返回 tool_call；tool arguments JSON 解析失败；
+                # arguments 双重编码（一次解析后仍为 str）；GraphPlan.from_dict 校验失败（如 steps 为空）。
                 # 规划失败时保底生成单步计划，确保流程可继续收敛。
                 fallback_tool = "nl2sql" if available_tools.get("nl2sql", False) else "rag"
                 plan = GraphPlan(
@@ -679,6 +793,10 @@ class LangGraphOrchestrator:
                 if step.tool == "todo" and not available_tools.get("todo", True):
                     step.tool = "none"
                     step.arguments = {}
+                if step.tool == "nl2sql":
+                    # query_mode 由规划器给出，这里仅做枚举归一，避免执行层做规则推断。
+                    query_mode = LangGraphOrchestrator._normalize_query_mode((step.arguments or {}).get("query_mode"))
+                    step.arguments["query_mode"] = query_mode
                 normalized.append(step)
 
             if not normalized:
@@ -709,10 +827,16 @@ class LangGraphOrchestrator:
 
     def _dispatch_node(self, state: AgentGraphState) -> Dict[str, Any]:
         """`dispatch` 节点：从“未完成任务”里挑出“现在能做的任务”。
+        从 state 里取：pending_ids（未完成步骤）、completed_ids（已完成步骤）、plan_steps（步骤配置，含 depends_on）。
+        若 pending 为空，直接返回 ready_ids: []，本轮不执行任何步骤
+        算 ready：
+            - 用 plan_steps 建 step_map（step_id → 步骤配置）。
+            - 对每个 pending 里的 step_id：看其 depends_on 是否全部在 completed 里；是则把该 step_id 加入 ready。
+            即：依赖都满足的待办步骤才会进入 ready。
 
+        
         Args:
             state: 当前图状态。
-
         Returns:
             局部更新：`ready_ids`，以及必要时追加 `conflicts`。
         """
@@ -772,32 +896,60 @@ class LangGraphOrchestrator:
             `pending_ids`、`completed_ids`。
         """
         def _impl() -> Dict[str, Any]:
-            """节点内部实现：线程池并发执行并容错汇总。"""
+            """节点内部实现：线程池并发执行并容错汇总。
+
+            流程简述：
+            1. 从 state 取本轮可执行步骤 ready_ids，无则直接返回空更新。
+            2. 准备聚合容器（evidences/sources/step_results）与调度队列（pending/completed）。
+            3. 在线程池中并发执行各 ready 步骤，单步失败不阻断整批，结果统一回填状态。
+            4. 返回合并后的 pending/completed/step_results/evidences/sources，供 dispatch 与后续节点使用。
+            """
+            # ----- 1. 本轮可执行步骤 -----
             ready_ids = list(state.get("ready_ids") or [])
             if not ready_ids:
                 return {}
 
-            # 执行节点维护证据/source/result 三类聚合结果，供后续冲突检查与回答生成使用。
+            # ----- 2. 计划步骤索引与状态聚合容器 -----
+            # step_map：step_id -> 步骤配置（tool/objective/arguments），供执行器与 trace 使用。
             step_map = {step.get("step_id"): step for step in (state.get("plan_steps") or []) if isinstance(step, dict)}
+            # 证据与来源在节点内累加，冲突检查与回答生成会消费 evidences/sources。
             evidences = list(state.get("evidences") or [])
             sources = list(state.get("sources") or [])
             step_results = dict(state.get("step_results") or {})
+            # 本批执行完后：pending 去掉本批 ready，completed 加上本批 step_id。
             pending = [step_id for step_id in (state.get("pending_ids") or []) if step_id not in ready_ids]
             completed = list(state.get("completed_ids") or [])
-            # 并行线程不会自动继承 ContextVar，因此在主线程提前捕获 root_run 并显式透传。
-            root_run = _ROOT_RUN_CTX.get()
 
-            futures = {}
-            with ThreadPoolExecutor(max_workers=max(1, min(4, len(ready_ids)))) as pool:
+            # ----- 3. 追踪父 run（供 MCP 子 span 挂载） -----
+            # 并行线程不会继承 ContextVar，故在主线程提前取 root_run 并透传到 _execute_single_step。
+            # respond() 调用时 _ROOT_RUN_CTX 有值；LangGraph Studio/API 直接 invoke 时无值，
+            # 退化为当前节点 run，使 MCP 工具在 LangSmith trace 中显示为 execute_ready 的子 span。
+            root_run = _ROOT_RUN_CTX.get() or get_current_run_tree()
+            tool_input_records: List[Dict[str, Any]] = []
+            tool_output_records: List[Dict[str, Any]] = []
+            futures: Dict[Any, str] = {}
+
+            # ----- 4. 线程池并发执行本批 ready 步骤 -----
+            max_workers = max(1, min(4, len(ready_ids)))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 def _run_step_in_context(step_payload: Dict[str, Any], ctx: contextvars.Context):
-                    """在线程中恢复父上下文，保证自动追踪继承 parent。"""
+                    """在线程中恢复父上下文，保证 LangSmith 自动追踪能继承 parent。"""
                     return ctx.run(self._execute_single_step, step_payload, state, root_run)
 
                 for step_id in ready_ids:
                     step = step_map.get(step_id)
                     if not step:
                         continue
-                    # 并发提交每个 ready 步骤，遵循“节点内并发，节点间串行”的执行策略。
+                    # 记录本批输入，写入 node 的 trace_outputs（tool_dispatch_inputs）。
+                    tool_input_records.append(
+                        {
+                            "step_id": step_id,
+                            "tool": str(step.get("tool") or "none"),
+                            "objective": _truncate(str(step.get("objective") or ""), 200),
+                            "arguments": step.get("arguments", {}) if isinstance(step.get("arguments"), dict) else {},
+                        }
+                    )
+                    # 复制当前上下文到子线程，再提交；完成顺序不定，用 as_completed 按完成顺序消费。
                     step_ctx = contextvars.copy_context()
                     futures[pool.submit(_run_step_in_context, step, step_ctx)] = step_id
 
@@ -810,7 +962,7 @@ class LangGraphOrchestrator:
                     try:
                         result = future.result()
                     except Exception as exc:
-                        # 单步骤异常不阻断整批执行，转为 error 结果并沉淀证据。
+                        # 单步骤异常不阻断整批：转为 error 结果并写入一条证据，便于后续冲突/回答节点感知。
                         result = {
                             "step_id": step_id,
                             "status": "error",
@@ -833,18 +985,55 @@ class LangGraphOrchestrator:
                         step_id,
                         str(result.get("status", "unknown")),
                     )
+                    # 记录本批输出摘要，写入 node 的 trace_outputs（tool_dispatch_outputs）。
+                    tool_output_records.append(
+                        {
+                            "step_id": step_id,
+                            "status": str(result.get("status", "unknown")),
+                            "tool": str(result.get("tool") or step_map.get(step_id, {}).get("tool") or "none"),
+                            "error": _truncate(str(result.get("error") or ""), 300),
+                            "result_preview": _trace_json(result.get("result", {}), limit=2000),
+                            "evidences_size": len(result.get("evidences") or []),
+                            "sources_size": len(result.get("sources") or []),
+                        }
+                    )
 
-                    # 把单步执行结果回填到主状态，供后续节点消费。
+                    # 回填单步结果到主状态：step_results 供去重/重规划，evidences/sources 供冲突检查与上下文构建。
                     step_results[step_id] = {
                         "status": result.get("status", "error"),
                         "result": result.get("result", {}),
                         "error": result.get("error", ""),
+                        "tool": str(result.get("tool") or ""),
+                        "objective": str(result.get("objective") or ""),
+                        "arguments": result.get("arguments", {}) if isinstance(result.get("arguments"), dict) else {},
+                        "signature": str(result.get("signature") or ""),
+                        "reused_from_step_id": str(result.get("reused_from_step_id") or ""),
                     }
                     completed.append(step_id)
                     evidences.extend(result.get("evidences", []))
                     sources.extend(result.get("sources", []))
                 logger.info("步骤批次完成 total=%s", total)
 
+            # ----- 5. 组装节点追踪输出（供 LangSmith 节点详情与 root 聚合） -----
+            trace_outputs = {
+                "prompt_records": [
+                    {"stage": "tool_dispatch_inputs", "ready_ids": ready_ids, "tools": tool_input_records},
+                    {
+                        "stage": "tool_dispatch_outputs",
+                        "results": tool_output_records,
+                        "state_after_merge": {
+                            "pending_ids": pending[:20],
+                            "completed_ids": completed[:20],
+                            "step_results_size": len(step_results),
+                            "evidences_size": len(evidences),
+                            "sources_size": len(sources),
+                        },
+                    },
+                ]
+            }
+
+            # ----- 6. 返回局部状态更新（LangGraph 会与全局 state 合并） -----
+            # ready_ids 置空表示本批已全部执行完；下一轮由 dispatch 根据 pending/completed 再产出新的 ready_ids。
             return {
                 "pending_ids": pending,
                 "completed_ids": completed,
@@ -852,6 +1041,7 @@ class LangGraphOrchestrator:
                 "step_results": step_results,
                 "evidences": evidences,
                 "sources": sources,
+                "_trace_outputs": trace_outputs,
             }
 
         return self._trace_node("execute_ready", state, _impl)
@@ -992,7 +1182,7 @@ class LangGraphOrchestrator:
         def _impl() -> Dict[str, Any]:
             """节点内部实现：调用 ContextBuilder 做上下文拼装与裁剪。"""
             # ContextBuilder 负责把“系统提示词 + 证据 + 记忆 + 历史”压缩为单轮上下文。
-            context = self.context_builder.build(
+            context, trace_payload = self.context_builder.build_with_trace(
                 system_prompt=SYSTEM_PROMPT,
                 user_query=str(state.get("query") or ""),
                 history=list(state.get("history") or []),
@@ -1000,7 +1190,28 @@ class LangGraphOrchestrator:
                 evidences=list(state.get("evidences") or []),
                 notes=list(state.get("notes") or []),
             )
-            return {"context": context}
+            context_before = str(trace_payload.get("context_before_compress") or "")
+            context_after = str(trace_payload.get("context_after_compress") or context)
+            trace_payload.pop("context_before_compress", None)
+            trace_payload.pop("context_after_compress", None)
+            return {
+                "context": context,
+                "_trace_outputs": {
+                    "prompt_records": [
+                        {
+                            "stage": "context_before_compress",
+                            "context_preview": _truncate(context_before, 5000),
+                            "token_estimate": trace_payload.get("token_stats", {}).get("before_compress"),
+                        },
+                        {
+                            "stage": "context_after_compress",
+                            "context_preview": _truncate(context_after, 5000),
+                            "token_estimate": trace_payload.get("token_stats", {}).get("after_compress"),
+                        },
+                    ],
+                    "context_build_stats": trace_payload,
+                },
+            }
 
         return self._trace_node("build_context", state, _impl)
 
@@ -1087,6 +1298,7 @@ class LangGraphOrchestrator:
         objective = str(step.get("objective") or "").strip()
         tool = str(step.get("tool") or "none").strip().lower()
         arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
+        signature = LangGraphOrchestrator._build_step_signature(tool, objective, arguments)
         trace_id = str(state.get("trace_id") or "")
         started_at = time.monotonic()
         logger.info(
@@ -1095,6 +1307,45 @@ class LangGraphOrchestrator:
             tool,
             _truncate(objective, 120),
         )
+        # 复用历史同签名步骤结果，避免重规划后重复访问同一工具。
+        reused = LangGraphOrchestrator._find_reusable_step_result(state, signature, step_id)
+        if reused is not None:
+            reused_from_step_id, reused_entry = reused
+            reused_result = reused_entry.get("result", {})
+            logger.info(
+                "步骤复用 step_id=%s reused_from=%s signature=%s",
+                step_id or "-",
+                reused_from_step_id,
+                signature,
+            )
+            evidence = EvidenceItem(
+                title="步骤结果复用",
+                content=(
+                    f"复用来源步骤: {reused_from_step_id}\n"
+                    f"签名: {signature}\n"
+                    f"结果摘要: {_truncate(str(reused_result), 1500)}"
+                ),
+                source="reuse",
+                score=1.0,
+                metadata={
+                    "step_id": step_id,
+                    "reused_from_step_id": reused_from_step_id,
+                    "signature": signature,
+                },
+            )
+            return {
+                "step_id": step_id,
+                "status": "ok",
+                "result": reused_result,
+                "evidences": [evidence],
+                "sources": ["reuse"],
+                "error": "",
+                "tool": tool,
+                "objective": objective,
+                "arguments": arguments,
+                "signature": signature,
+                "reused_from_step_id": reused_from_step_id,
+            }
         try:
             # 工具分发器：根据 step.tool 路由到不同执行器。
             if tool == "nl2sql":
@@ -1113,6 +1364,12 @@ class LangGraphOrchestrator:
                     "evidences": [],
                     "sources": [],
                 }
+            # 统一回填步骤元信息，供后续重规划与去重复用。
+            result["tool"] = tool
+            result["objective"] = objective
+            result["arguments"] = arguments
+            result["signature"] = signature
+            result["reused_from_step_id"] = str(result.get("reused_from_step_id") or "")
             logger.info(
                 "步骤完成 step_id=%s tool=%s status=%s elapsed=%.2fs",
                 step_id or "-",
@@ -1151,63 +1408,190 @@ class LangGraphOrchestrator:
         Returns:
             标准化步骤结果，`result` 中包含 SQL 与查询结果。
         """
-        question = str(arguments.get("question") or objective)
+        question_list = self._normalize_text_list(arguments.get("question"), arguments.get("questions"), objective)
+        if not question_list:
+            raise ValueError("NL2SQL 缺少 question/questions 参数")
         tables = arguments.get("tables") if isinstance(arguments.get("tables"), list) else None
         use_columns = bool(arguments.get("enable_column_retrieval", False))
-        retried_without_columns = False
-        retry_error = ""
-        try:
-            # 首次按计划参数执行，可选启用列检索能力提升 SQL 命中率。
-            payload = self.mcp_client.call_tool(
-                "nl2sql_query",
+        query_mode = self._normalize_query_mode(arguments.get("query_mode"))
+
+        items: List[Dict[str, Any]] = []
+        for idx, question in enumerate(question_list, start=1):
+            first_error = ""
+            retried = False
+            retried_without_columns = False
+            try:
+                # 首次按计划参数执行，可选启用列检索能力提升 SQL 命中率。
+                payload = self.mcp_client.call_tool(
+                    "nl2sql_query",
+                    {
+                        "question": question,
+                        "tables": tables,
+                        "enable_column_retrieval": use_columns,
+                        "query_mode": query_mode,
+                        "trace_id": trace_id,
+                    },
+                    trace_id=trace_id,
+                    root_run=root_run,
+                )
+            except Exception as exc:
+                # 重试时把首次报错注入上下文，帮助 NL2SQL 修正失败原因。
+                retried = True
+                first_error = str(exc)
+                retried_without_columns = use_columns
+                retry_question = self._build_retry_question(
+                    question,
+                    first_error,
+                    tool_name="nl2sql",
+                    extra_instruction=(
+                        f"query_mode={query_mode}。若上次 SQL 无法执行，请输出语义等价但可执行的 SQL。"
+                    ),
+                )
+                try:
+                    payload = self.mcp_client.call_tool(
+                        "nl2sql_query",
+                        {
+                            "question": retry_question,
+                            "tables": tables,
+                            "enable_column_retrieval": False if use_columns else use_columns,
+                            "query_mode": query_mode,
+                            "trace_id": trace_id,
+                        },
+                        trace_id=trace_id,
+                        root_run=root_run,
+                    )
+                except Exception as retry_exc:
+                    items.append(
+                        {
+                            "index": idx,
+                            "question": question,
+                            "status": "error",
+                            "error": str(retry_exc),
+                            "first_error": first_error,
+                            "retried": True,
+                            "retried_without_columns": retried_without_columns,
+                        }
+                    )
+                    continue
+
+            sql = str(payload.get("sql", "")) if isinstance(payload, dict) else ""
+            result = payload.get("result", {}) if isinstance(payload, dict) else {}
+            items.append(
                 {
+                    "index": idx,
                     "question": question,
-                    "tables": tables,
-                    "enable_column_retrieval": use_columns,
-                    "trace_id": trace_id,
-                },
-                trace_id=trace_id,
-                root_run=root_run,
-            )
-        except Exception as exc:
-            if not use_columns:
-                raise
-            # 若“启用列检索”失败，则回退为关闭列检索重试一次，保留可观测信息。
-            retried_without_columns = True
-            retry_error = str(exc)
-            payload = self.mcp_client.call_tool(
-                "nl2sql_query",
-                {
-                    "question": question,
-                    "tables": tables,
-                    "enable_column_retrieval": False,
-                    "trace_id": trace_id,
-                },
-                trace_id=trace_id,
-                root_run=root_run,
+                    "status": "ok",
+                    "sql": sql,
+                    "result": result,
+                    "retried": retried,
+                    "first_error": first_error,
+                    "retried_without_columns": retried_without_columns,
+                }
             )
 
-        sql = str(payload.get("sql", "")) if isinstance(payload, dict) else ""
-        result = payload.get("result", {}) if isinstance(payload, dict) else {}
+        success_items = [item for item in items if str(item.get("status") or "") == "ok"]
+        if not success_items:
+            first_error = str(items[0].get("error") or "NL2SQL 执行失败") if items else "NL2SQL 执行失败"
+            raise RuntimeError(first_error)
+
+        if len(items) == 1:
+            result_payload = {
+                "sql": str(success_items[0].get("sql") or ""),
+                "result": success_items[0].get("result", {}),
+            }
+            evidence_body = (
+                f"问题: {success_items[0].get('question')}\n"
+                f"SQL: {success_items[0].get('sql')}\n"
+                f"结果: {_truncate(str(success_items[0].get('result', {})), 2000)}"
+            )
+        else:
+            result_payload = {
+                "items": items,
+                "success_count": len(success_items),
+                "total_count": len(items),
+            }
+            detail_lines: List[str] = []
+            for item in items:
+                if str(item.get("status") or "") == "ok":
+                    detail_lines.append(
+                        f"[{item.get('index')}] OK question={_truncate(str(item.get('question') or ''), 120)} "
+                        f"sql={_truncate(str(item.get('sql') or ''), 200)}"
+                    )
+                else:
+                    detail_lines.append(
+                        f"[{item.get('index')}] ERROR question={_truncate(str(item.get('question') or ''), 120)} "
+                        f"error={_truncate(str(item.get('error') or ''), 200)}"
+                    )
+            evidence_body = "\n".join(detail_lines)
+
         # 统一产出证据对象，后续上下文构建只依赖 EvidenceItem 抽象。
         evidence = EvidenceItem(
             title="NL2SQL 结果",
-            content=f"SQL: {sql}\n结果: {_truncate(str(result), 2000)}",
+            content=evidence_body,
             source="nl2sql",
-            score=1.0,
+            score=1.0 if len(success_items) == len(items) else 0.7,
             metadata={
                 "step_id": step_id,
-                "retried_without_columns": retried_without_columns,
-                "retry_error": retry_error,
+                "query_mode": query_mode,
+                "total_count": len(items),
+                "success_count": len(success_items),
+                "failed_count": len(items) - len(success_items),
             },
         )
         return {
             "step_id": step_id,
             "status": "ok",
-            "result": {"sql": sql, "result": result},
+            "result": result_payload,
             "evidences": [evidence],
             "sources": ["nl2sql"],
         }
+
+    @staticmethod
+    def _normalize_query_mode(query_mode: Any) -> str:
+        """归一化 query_mode，仅做枚举校验。"""
+        mode = str(query_mode or "").strip().upper()
+        if mode in {"COUNT", "GROUP_BY", "EXISTS", "OTHER"}:
+            return mode
+        return "OTHER"
+
+    @staticmethod
+    def _normalize_text_list(*raw_values: Any) -> List[str]:
+        """把输入归一化为去重且有序的字符串列表。"""
+        values: List[str] = []
+        for raw in raw_values:
+            if isinstance(raw, list):
+                for item in raw:
+                    text = str(item or "").strip()
+                    if text:
+                        values.append(text)
+                continue
+            text = str(raw or "").strip()
+            if text:
+                values.append(text)
+        return list(dict.fromkeys(values))
+
+    @staticmethod
+    def _build_retry_question(
+        original_question: str,
+        first_error: str,
+        *,
+        tool_name: str,
+        extra_instruction: str = "",
+    ) -> str:
+        """构造重试问题：把首次错误注入上下文，指导工具修正重试。"""
+        base = str(original_question or "").strip()
+        error_text = _truncate(str(first_error or ""), 500)
+        retry_parts = [
+            base,
+            "[重试上下文]",
+            f"工具={tool_name}",
+            f"首次错误={error_text}",
+            "请根据上述错误修正查询并仅返回可执行结果。",
+        ]
+        extra = str(extra_instruction or "").strip()
+        if extra:
+            retry_parts.append(extra)
+        return "\n".join(part for part in retry_parts if str(part).strip())
 
     def _run_rag_step(
         self,
@@ -1291,30 +1675,126 @@ class LangGraphOrchestrator:
             标准化步骤结果，`result` 为 neo4j_llamaindex_query 返回内容。
         """
         # 当前链路不在主流程生成 Cypher；统一交给 Neo4j-LlamaIndex 工具内部生成并执行。
-        question = str(arguments.get("question") or objective).strip()
+        question_list = self._normalize_text_list(arguments.get("question"), arguments.get("questions"), objective)
+        if not question_list:
+            raise ValueError("graph 缺少 question/questions 参数")
+        max_rows = arguments.get("max_rows")
 
-        payload = self.mcp_client.call_tool(
-            "neo4j_llamaindex_query",
-            {
-                "question": question,
-                "max_rows": arguments.get("max_rows"),
-                "trace_id": trace_id,
-            },
-            trace_id=trace_id,
-            root_run=root_run,
-        )
-        cypher = str(payload.get("cypher", "")) if isinstance(payload, dict) else ""
+        items: List[Dict[str, Any]] = []
+        for idx, question in enumerate(question_list, start=1):
+            first_error = ""
+            retried = False
+            try:
+                payload = self.mcp_client.call_tool(
+                    "neo4j_llamaindex_query",
+                    {
+                        "question": question,
+                        "max_rows": max_rows,
+                        "trace_id": trace_id,
+                    },
+                    trace_id=trace_id,
+                    root_run=root_run,
+                )
+            except Exception as exc:
+                # 重试时把首次报错注入上下文，约束生成只读 Cypher。
+                retried = True
+                first_error = str(exc)
+                retry_question = self._build_retry_question(
+                    question,
+                    first_error,
+                    tool_name="neo4j",
+                    extra_instruction=(
+                        "请严格使用只读图查询语义，生成 MATCH/OPTIONAL MATCH/WITH 开头并包含 LIMIT 的查询。"
+                    ),
+                )
+                try:
+                    payload = self.mcp_client.call_tool(
+                        "neo4j_llamaindex_query",
+                        {
+                            "question": retry_question,
+                            "max_rows": max_rows,
+                            "trace_id": trace_id,
+                        },
+                        trace_id=trace_id,
+                        root_run=root_run,
+                    )
+                except Exception as retry_exc:
+                    items.append(
+                        {
+                            "index": idx,
+                            "question": question,
+                            "status": "error",
+                            "error": str(retry_exc),
+                            "first_error": first_error,
+                            "retried": True,
+                        }
+                    )
+                    continue
+
+            cypher = str(payload.get("cypher", "")) if isinstance(payload, dict) else ""
+            row_count = payload.get("row_count") if isinstance(payload, dict) else None
+            items.append(
+                {
+                    "index": idx,
+                    "question": question,
+                    "status": "ok",
+                    "payload": payload if isinstance(payload, dict) else {"data": payload},
+                    "cypher": cypher,
+                    "row_count": row_count,
+                    "retried": retried,
+                    "first_error": first_error,
+                }
+            )
+
+        success_items = [item for item in items if str(item.get("status") or "") == "ok"]
+        if not success_items:
+            first_error = str(items[0].get("error") or "graph 执行失败") if items else "graph 执行失败"
+            raise RuntimeError(first_error)
+
+        if len(items) == 1:
+            result_payload = success_items[0].get("payload", {})
+            evidence_body = (
+                f"问题: {success_items[0].get('question')}\n"
+                f"Cypher: {success_items[0].get('cypher')}\n"
+                f"结果: {_truncate(str(result_payload), 2000)}"
+            )
+        else:
+            result_payload = {
+                "items": items,
+                "success_count": len(success_items),
+                "total_count": len(items),
+            }
+            detail_lines: List[str] = []
+            for item in items:
+                if str(item.get("status") or "") == "ok":
+                    detail_lines.append(
+                        f"[{item.get('index')}] OK question={_truncate(str(item.get('question') or ''), 120)} "
+                        f"cypher={_truncate(str(item.get('cypher') or ''), 200)} "
+                        f"row_count={item.get('row_count')}"
+                    )
+                else:
+                    detail_lines.append(
+                        f"[{item.get('index')}] ERROR question={_truncate(str(item.get('question') or ''), 120)} "
+                        f"error={_truncate(str(item.get('error') or ''), 200)}"
+                    )
+            evidence_body = "\n".join(detail_lines)
+
         evidence = EvidenceItem(
             title="图谱查询结果",
-            content=f"问题: {question}\nCypher: {cypher}\n结果: {_truncate(str(payload), 2000)}",
+            content=evidence_body,
             source="neo4j",
-            score=0.9,
-            metadata={"step_id": step_id, "cypher": cypher, "question": question},
+            score=0.9 if len(success_items) == len(items) else 0.6,
+            metadata={
+                "step_id": step_id,
+                "total_count": len(items),
+                "success_count": len(success_items),
+                "failed_count": len(items) - len(success_items),
+            },
         )
         return {
             "step_id": step_id,
             "status": "ok",
-            "result": payload if isinstance(payload, dict) else {"data": payload},
+            "result": result_payload,
             "evidences": [evidence],
             "sources": ["neo4j"],
         }
@@ -1452,7 +1932,209 @@ class LangGraphOrchestrator:
             },
             "evidences": [parent_evidence] + sub_evidences[:6],
             "sources": ["todo"] + sub_sources,
+            "tool": "todo",
+            "objective": objective,
+            "arguments": arguments,
+            "signature": LangGraphOrchestrator._build_step_signature("todo", objective, arguments),
+            "reused_from_step_id": "",
         }
+
+    @staticmethod
+    def _normalize_arguments_for_signature(tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """规范化步骤参数，构建稳定签名用于跨轮去重。"""
+        normalized: Dict[str, Any]
+        if tool == "nl2sql":
+            tables = arguments.get("tables") if isinstance(arguments.get("tables"), list) else []
+            questions = LangGraphOrchestrator._normalize_text_list(arguments.get("question"), arguments.get("questions"))
+            normalized = {
+                "questions": questions,
+                "tables": sorted({str(item).strip() for item in tables if str(item).strip()}),
+                "enable_column_retrieval": bool(arguments.get("enable_column_retrieval", False)),
+                "query_mode": LangGraphOrchestrator._normalize_query_mode(arguments.get("query_mode")),
+            }
+        elif tool == "rag":
+            normalized = {
+                "query": str(arguments.get("query") or "").strip(),
+                "top_k": int(arguments.get("top_k", 5)) if str(arguments.get("top_k", "")).strip() else 5,
+            }
+        elif tool == "graph":
+            questions = LangGraphOrchestrator._normalize_text_list(arguments.get("question"), arguments.get("questions"))
+            normalized = {
+                "questions": questions,
+                "max_rows": arguments.get("max_rows"),
+            }
+        else:
+            normalized = {str(k): arguments[k] for k in sorted(arguments.keys())}
+        return normalized
+
+    @staticmethod
+    def _build_step_signature(tool: str, objective: str, arguments: Dict[str, Any]) -> str:
+        """构建步骤签名：同工具+同目标+同参数可复用。"""
+        normalized_tool = str(tool or "none").strip().lower()
+        payload = {
+            "tool": normalized_tool,
+            "objective": str(objective or "").strip(),
+            "arguments": LangGraphOrchestrator._normalize_arguments_for_signature(normalized_tool, arguments),
+        }
+        raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _find_reusable_step_result(
+        state: AgentGraphState,
+        signature: str,
+        current_step_id: str,
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """在已有步骤结果中查找同签名成功结果。"""
+        step_results = state.get("step_results") or {}
+        if not isinstance(step_results, dict):
+            return None
+        for prev_step_id, entry in step_results.items():
+            if str(prev_step_id) == current_step_id:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("status") or "").strip().lower() != "ok":
+                continue
+            prev_signature = str(entry.get("signature") or "").strip()
+            if prev_signature and prev_signature == signature:
+                return str(prev_step_id), entry
+        return None
+
+    @staticmethod
+    def _summarize_step_result_for_plan(step_id: str, step_result: Dict[str, Any]) -> Dict[str, Any]:
+        """压缩步骤结果摘要，供 planner 在重规划时参考。"""
+        if not isinstance(step_result, dict):
+            return {"step_id": step_id, "status": "unknown", "tool": "", "summary": "无结果"}
+
+        status = str(step_result.get("status") or "unknown")
+        error = _truncate(str(step_result.get("error") or ""), 200)
+        tool = str(step_result.get("tool") or "").strip().lower()
+        payload = step_result.get("result", {})
+        if not tool and isinstance(payload, dict):
+            if "sql" in payload:
+                tool = "nl2sql"
+            elif "cypher" in payload:
+                tool = "graph"
+            elif "chunks" in payload:
+                tool = "rag"
+            elif str(payload.get("tool") or "").strip().lower() == "none":
+                tool = "none"
+
+        summary = "无摘要"
+        if isinstance(payload, dict):
+            if tool == "nl2sql":
+                batch_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                if batch_items:
+                    ok_count = sum(1 for item in batch_items if isinstance(item, dict) and str(item.get("status") or "") == "ok")
+                    first_ok = next(
+                        (
+                            item
+                            for item in batch_items
+                            if isinstance(item, dict) and str(item.get("status") or "") == "ok"
+                        ),
+                        {},
+                    )
+                    sql_preview = _truncate(str(first_ok.get("sql") or ""), 180) if isinstance(first_ok, dict) else ""
+                    summary = f"batch={len(batch_items)}; success={ok_count}; first_sql={sql_preview}"
+                else:
+                    sql_preview = _truncate(str(payload.get("sql") or ""), 220)
+                    result_payload = payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}
+                    row_count = result_payload.get("row_count")
+                    if row_count is None and isinstance(result_payload.get("rows"), list):
+                        row_count = len(result_payload.get("rows") or [])
+                    summary = f"sql={sql_preview}; row_count={row_count}"
+            elif tool == "graph":
+                batch_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                if batch_items:
+                    ok_count = sum(1 for item in batch_items if isinstance(item, dict) and str(item.get("status") or "") == "ok")
+                    first_ok = next(
+                        (
+                            item
+                            for item in batch_items
+                            if isinstance(item, dict) and str(item.get("status") or "") == "ok"
+                        ),
+                        {},
+                    )
+                    cypher_preview = _truncate(str(first_ok.get("cypher") or ""), 180) if isinstance(first_ok, dict) else ""
+                    summary = f"batch={len(batch_items)}; success={ok_count}; first_cypher={cypher_preview}"
+                else:
+                    cypher_preview = _truncate(str(payload.get("cypher") or ""), 220)
+                    row_count = payload.get("row_count")
+                    if row_count is None and isinstance(payload.get("rows"), list):
+                        row_count = len(payload.get("rows") or [])
+                    summary = f"cypher={cypher_preview}; row_count={row_count}"
+            elif tool == "rag":
+                chunks = payload.get("chunks") if isinstance(payload.get("chunks"), list) else []
+                sources = []
+                for chunk in chunks[:3]:
+                    if not isinstance(chunk, dict):
+                        continue
+                    src = str(chunk.get("source") or "").strip()
+                    if src:
+                        sources.append(src)
+                summary = f"chunk_count={len(chunks)}; sources={sources}"
+            elif tool == "todo":
+                subplan = payload.get("subplan") if isinstance(payload.get("subplan"), list) else []
+                sub_results = payload.get("sub_results") if isinstance(payload.get("sub_results"), dict) else {}
+                summary = f"subplan_steps={len(subplan)}; sub_results={len(sub_results)}"
+            else:
+                summary = _truncate(_trace_json(payload, limit=600), 260)
+        else:
+            summary = _truncate(str(payload), 260)
+
+        return {
+            "step_id": step_id,
+            "status": status,
+            "tool": tool,
+            "objective": _truncate(str(step_result.get("objective") or ""), 160),
+            "summary": summary,
+            "error": error,
+            "signature": str(step_result.get("signature") or ""),
+            "reused_from_step_id": str(step_result.get("reused_from_step_id") or ""),
+        }
+
+    def _build_previous_plan_payload(self, state: AgentGraphState) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """拼装重规划输入：上一轮计划步骤 + 各步骤结果摘要。"""
+        raw_plan_steps = state.get("plan_steps") if isinstance(state.get("plan_steps"), list) else []
+        step_results = state.get("step_results") if isinstance(state.get("step_results"), dict) else {}
+
+        previous_plan_steps: List[Dict[str, Any]] = []
+        previous_step_summaries: List[Dict[str, Any]] = []
+        planned_step_ids: List[str] = []
+
+        for raw_step in raw_plan_steps[:20]:
+            if not isinstance(raw_step, dict):
+                continue
+            step_id = str(raw_step.get("step_id") or "").strip()
+            if not step_id:
+                continue
+            planned_step_ids.append(step_id)
+            depends_on = raw_step.get("depends_on") if isinstance(raw_step.get("depends_on"), list) else []
+            previous_plan_steps.append(
+                {
+                    "step_id": step_id,
+                    "tool": str(raw_step.get("tool") or ""),
+                    "objective": _truncate(str(raw_step.get("objective") or ""), 200),
+                    "depends_on": [str(item).strip() for item in depends_on if str(item).strip()],
+                }
+            )
+            summary = self._summarize_step_result_for_plan(
+                step_id,
+                step_results.get(step_id, {}) if isinstance(step_results.get(step_id), dict) else {},
+            )
+            previous_step_summaries.append(summary)
+
+        # 兼容历史残留结果：即使不在当前计划，也给 planner 作为补充上下文。
+        for step_id, step_result in step_results.items():
+            sid = str(step_id)
+            if sid in planned_step_ids:
+                continue
+            if not isinstance(step_result, dict):
+                continue
+            previous_step_summaries.append(self._summarize_step_result_for_plan(sid, step_result))
+
+        return previous_plan_steps[:20], previous_step_summaries[:30]
 
     def _resolve_available_tools(self, trace_id: str) -> Dict[str, bool]:
         """从 MCP 服务动态发现当前可用工具能力。

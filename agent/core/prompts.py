@@ -30,11 +30,21 @@ LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器，需要把用户问题
 3) 只有当任务明显复杂时才使用 todo；
 4) 优先生成最短可行计划，默认 1-3 步；
 5) arguments 必须与 tool 匹配：
-   - nl2sql: question / tables / enable_column_retrieval
+   - nl2sql: question 或 questions(字符串数组) / tables / enable_column_retrieval / query_mode(必填: COUNT|GROUP_BY|EXISTS|OTHER)
    - rag: query / top_k
-   - graph: cypher(可选) / max_rows
+   - graph: question 或 questions(字符串数组) / max_rows
    - todo: 可为空
-6) 输出必须可执行，不要出现未知工具。
+6) query_mode 选择规则：
+   - 审计/核验/一致性/对比/差异统计优先使用 COUNT 或 GROUP_BY；
+   - 是否存在关系/有无连接优先使用 EXISTS；
+   - 只有明确需要明细样本或逐条记录时才使用 OTHER；
+   - 不确定时默认 OTHER。
+7) 输入中若提供 previous_plan_steps 与 previous_step_summaries，必须基于这些已执行信息规划：
+   - 已完成且结果已满足目标的步骤不要重复生成；
+   - 只新增“补缺口、解冲突、补证据”的步骤；
+   - 若现有证据足够，直接生成 none 汇总步骤。
+8) 重规划时优先复用历史结果，不要重复执行语义等价查询。
+9) 输出必须可执行，不要出现未知工具。
 """
 
 LANGGRAPH_TODO_SUBPLAN_PROMPT = """你是复杂任务子规划器。
@@ -55,20 +65,26 @@ LANGGRAPH_CONFLICT_PROMPT = """你是证据冲突核验器。
 仅根据输入证据判断，不要臆造事实。
 """
 
-NL2SQL_TEXT_TO_SQL_PROMPT = """Given an input question, first create a syntactically correct {dialect} query to run, then look at the results of the query and return the answer.
-You can order the results by a relevant column to return the most interesting examples in the database.
+NL2SQL_TEXT_TO_SQL_PROMPT = """Given an input question, create one syntactically correct {dialect} SQL query.
 
-Never query for all the columns from a specific table, only ask for a few relevant columns given the question.
-Pay attention to use only the table and column names that you can see in the schema description.
-Be careful to not query for columns that do not exist.
-Pay attention to which column is in which table.
-Also, qualify column names with table aliases when needed.
+Never query for all columns from a table. Select only the smallest necessary column set.
+Pay attention to use only table/column names that exist in schema.
+Be careful to not query non-existing columns.
+Qualify column names with table aliases when needed.
 
 Important identifier rules for PostgreSQL:
 1) Unquoted identifiers are folded to lowercase.
-2) If a table/column name in schema contains uppercase letters or special characters, you MUST wrap it in double quotes exactly as shown in schema.
-3) When using aliases, keep quoting when needed, e.g. a."gdp_per_capita_cny", a."admin_c", a."last_modified".
+2) If schema uses uppercase/special characters, wrap identifier in double quotes exactly as shown.
+3) Keep quoting when using aliases, e.g. a."gdp_per_capita_cny", a."admin_c", a."last_modified".
 4) Never change identifier spelling or letter case.
+
+Query mode guidance (must follow):
+1) If question contains [QUERY_MODE=COUNT], the main evidence must be COUNT aggregate.
+2) If question contains [QUERY_MODE=GROUP_BY], the main evidence must be grouped aggregate with GROUP BY.
+3) If question contains [QUERY_MODE=EXISTS], the main evidence must be existence check (EXISTS or boolean-style existence query).
+4) If question contains [QUERY_MODE=OTHER], detail query is allowed.
+5) For COUNT/GROUP_BY/EXISTS modes, do not use large detail sampling as primary evidence.
+6) When examples are necessary, keep detail sample LIMIT <= 5.
 
 You are required to use the following format, each taking one line:
 Question: Question here
@@ -81,6 +97,16 @@ Only use tables listed below.
 
 Question: {query_str}
 SQLQuery: """
+
+CONTEXT_COMPRESS_PROMPT = """你是上下文压缩助手。请在不新增事实的前提下压缩输入上下文。
+约束：
+1) 严禁新增、猜测、改写事实含义，只能重排和删减冗余；
+2) 必须保留 Task、核心结论、关键证据来源（如 SQL/Cypher/文档来源）；
+3) 优先压缩 Context 历史冗余，尽量保留 Evidence；
+4) 输出应可直接作为后续回答上下文；
+5) 目标长度约为原文的 {target_ratio}，且不超过 {target_tokens} tokens；
+6) 仅输出压缩后的正文，不要解释。
+"""
 
 GRAPH_CYPHER_PROMPT = """你是图谱查询助手，需要把任务转为只读 Cypher。
 图谱 schema（简化）：

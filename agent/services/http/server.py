@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from agent.core.config import AgentConfig
 from agent.core.models import ConversationTurn
 from agent.runtime.fusion_agent import FusionAgent
-from src.utils.logging_manager import logger
+from fusiondata.src.utils.logging_manager import logger
 
 
 class ThreadCreateRequest(BaseModel):

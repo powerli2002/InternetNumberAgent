@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from contextlib import nullcontext
 from dataclasses import asdict, is_dataclass
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -12,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from fastmcp import Client
 
 from agent.core.tracing import LangSmithTracer
-from src.utils.logging_manager import logger
+from fusiondata.src.utils.logging_manager import logger
 
 
 class MCPToolClient:
@@ -91,18 +92,30 @@ class MCPToolClient:
         root_run=None,
     ) -> Any:
         """异步调用 MCP 工具。"""
-        # 兼容保留 root_run 参数，自动追踪模式下不再手工创建 mcp_tool:* span。
-        _ = root_run
         payload = arguments or {}
-        async with Client(self.server_url, timeout=self.timeout_seconds) as client:
-            result = await client.call_tool(
-                name=name,
-                arguments=payload,
-                timeout=self.timeout_seconds,
-                meta={"trace_id": trace_id},
-                raise_on_error=True,
-            )
-        return self._normalize_result(result)
+        run_ctx = self._build_tool_run_context(
+            name=f"mcp_tool:{name}",
+            trace_id=trace_id,
+            inputs={
+                "name": name,
+                "arguments": MCPToolClient._summarize_for_trace(payload),
+            },
+            tags=["mcp", f"tool:{name}"],
+            root_run=root_run,
+        )
+        with run_ctx as run:
+            async with Client(self.server_url, timeout=self.timeout_seconds) as client:
+                result = await client.call_tool(
+                    name=name,
+                    arguments=payload,
+                    timeout=self.timeout_seconds,
+                    meta={"trace_id": trace_id},
+                    raise_on_error=True,
+                )
+            normalized = self._normalize_result(result)
+            if run and hasattr(run, "add_outputs"):
+                run.add_outputs({"name": name, "result": MCPToolClient._summarize_for_trace(normalized)})
+            return normalized
 
     async def list_tools(
         self,
@@ -111,17 +124,55 @@ class MCPToolClient:
         refresh: bool = False,
     ) -> List[Dict[str, Any]]:
         """异步读取 MCP 工具元数据，并做短时缓存。"""
-        _ = (trace_id, root_run)
         now = time.monotonic()
         if not refresh and self._tools_cache and now < self._tools_cache_expires_at:
             return list(self._tools_cache)
 
-        async with Client(self.server_url, timeout=self.timeout_seconds) as client:
-            tools = await client.list_tools()
-        normalized = [self._normalize_tool(tool) for tool in tools]
-        self._tools_cache = normalized
-        self._tools_cache_expires_at = time.monotonic() + 30.0
-        return list(normalized)
+        run_ctx = self._build_tool_run_context(
+            name="mcp_list_tools",
+            trace_id=trace_id,
+            inputs={"server_url": self.server_url, "refresh": bool(refresh)},
+            tags=["mcp", "tools", "list"],
+            root_run=root_run,
+        )
+        with run_ctx as run:
+            async with Client(self.server_url, timeout=self.timeout_seconds) as client:
+                tools = await client.list_tools()
+            normalized = [self._normalize_tool(tool) for tool in tools]
+            self._tools_cache = normalized
+            self._tools_cache_expires_at = time.monotonic() + 30.0
+            if run and hasattr(run, "add_outputs"):
+                run.add_outputs(
+                    {
+                        "count": len(normalized),
+                        "names": [str(item.get("name") or "") for item in normalized[:50]],
+                    }
+                )
+            return list(normalized)
+
+    def _build_tool_run_context(
+        self,
+        name: str,
+        trace_id: str,
+        inputs: Dict[str, Any],
+        tags: List[str],
+        root_run=None,
+    ):
+        """构造 MCP 客户端子 run 上下文，且仅允许挂载到已有 root run。"""
+        if not self.tracer or not self.tracer.enabled:
+            return nullcontext()
+        # 强制要求 parent run 存在且具备 id，避免误创建新的根 trace。
+        if root_run is None or not hasattr(root_run, "id"):
+            logger.debug("跳过 MCP 子 run：缺少可用 root_run name=%s trace_id=%s", name, trace_id or "-")
+            return nullcontext()
+        return self.tracer.start_run(
+            name=name,
+            run_type="tool",
+            inputs=inputs,
+            tags=tags,
+            metadata={"trace_id": trace_id, "mcp_server": self.server_url},
+            parent=root_run,
+        )
 
     @staticmethod
     def _normalize_result(result: Any) -> Any:

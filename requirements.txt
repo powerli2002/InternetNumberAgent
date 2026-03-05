@@ -15,7 +15,7 @@ openai
 langchain
 langchain-openai
 langgraph
-langgraph-cli
+langgraph-cli[inmem]
 llama-index
 llama-index-llms-openai
 llama-index-vector-stores-milvus>=0.2.0,<0.3.0
@@ -30,3 +30,4 @@ python-docx
 fastmcp
 markitdown
 sentence-transformers
+py-openjudge

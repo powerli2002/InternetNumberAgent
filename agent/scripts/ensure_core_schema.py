@@ -15,8 +15,8 @@ except ModuleNotFoundError:
         sys.path.insert(0, project_root_str)
     from agent.scripts.common import load_yaml_config, open_pg_connection, resolve_project_path
 
-from src.utils.schema_manager import apply_core_ddl, resolve_core_ddl_path
-from src.utils.logging_manager import logger
+from fusiondata.src.utils.schema_manager import apply_core_ddl, resolve_core_ddl_path
+from fusiondata.src.utils.logging_manager import logger
 
 
 def main() -> None:
