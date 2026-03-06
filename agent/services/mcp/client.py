@@ -11,6 +11,8 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+from langsmith.run_helpers import get_current_run_tree
 
 from agent.core.tracing import LangSmithTracer
 from fusiondata.src.utils.logging_manager import logger
@@ -104,7 +106,13 @@ class MCPToolClient:
             root_run=root_run,
         )
         with run_ctx as run:
-            async with Client(self.server_url, timeout=self.timeout_seconds) as client:
+            # 提取当前 LangSmith run tree 的传播 headers，注入到 HTTP 请求，
+            # 使 MCP Server 侧的 @traceable 工具调用能嵌套挂到本链路 trace 树下。
+            ls_headers: Dict[str, str] = {}
+            if rt := get_current_run_tree():
+                ls_headers = {k: str(v) for k, v in rt.to_headers().items()}
+            transport = StreamableHttpTransport(url=self.server_url, headers=ls_headers or None)
+            async with Client(transport, timeout=self.timeout_seconds) as client:
                 result = await client.call_tool(
                     name=name,
                     arguments=payload,

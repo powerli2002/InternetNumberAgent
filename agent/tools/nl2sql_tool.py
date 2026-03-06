@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.prompts import PromptTemplate
 
+from agent.core.llm import strip_think_blocks
 from agent.core.prompts import NL2SQL_TEXT_TO_SQL_PROMPT
 from agent.core.schema import COLUMN_REVIEW_COMMENTS, TABLE_CONTEXT_HINTS, TABLE_REVIEW_COMMENTS, TABLE_SCHEMA
 from fusiondata.src.utils.logging_manager import logger
@@ -293,7 +294,8 @@ class DashScopeLlamaLLM:
                     stream=False,
                     langsmith_extra=self._langsmith_extra(),
                 )
-                text = response.choices[0].message.content or ""
+                # 推理模型输出前含 <think>...</think> 块，剥离后再交给 LlamaIndex 处理
+                text = strip_think_blocks(response.choices[0].message.content or "")
                 return CompletionResponse(text=text, raw=response)
 
             def stream_complete(self, prompt: str, formatted: bool = False, **kwargs):  # type: ignore[override]

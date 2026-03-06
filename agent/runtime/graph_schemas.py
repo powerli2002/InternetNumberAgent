@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List
 
 
 def _normalize_tools(tools: Iterable[str]) -> List[str]:
-    valid = {"nl2sql", "rag", "graph", "todo", "none"}
+    valid = {"nl2sql", "rag", "graph", "none"}
     normalized = [tool for tool in tools if tool in valid]
     if not normalized:
         return ["none"]
@@ -47,45 +47,6 @@ def build_main_plan_schema(tools_allowed: Iterable[str]) -> Dict[str, Any]:
                     },
                     "reason": {"type": "string"},
                     "max_replans": {"type": "integer"},
-                },
-                "required": ["steps", "reason"],
-            },
-        },
-    }
-
-
-def build_todo_subplan_schema(tools_allowed: Iterable[str]) -> Dict[str, Any]:
-    """复杂任务子计划 schema。"""
-    tool_enum = [tool for tool in _normalize_tools(tools_allowed) if tool not in {"todo", "none"}]
-    if not tool_enum:
-        tool_enum = ["rag"]
-    return {
-        "type": "function",
-        "function": {
-            "name": "create_todo_subplan",
-            "description": "把复杂目标拆解为可执行的子步骤。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "steps": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "step_id": {"type": "string"},
-                                "objective": {"type": "string"},
-                                "tool": {"type": "string", "enum": tool_enum},
-                                "arguments": {"type": "object", "additionalProperties": True},
-                                "depends_on": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                                "can_parallel": {"type": "boolean"},
-                            },
-                            "required": ["objective", "tool"],
-                        },
-                    },
-                    "reason": {"type": "string"},
                 },
                 "required": ["steps", "reason"],
             },

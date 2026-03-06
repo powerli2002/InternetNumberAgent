@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
+from langsmith.middleware import TracingMiddleware
+from langsmith.run_helpers import trace as ls_trace
 
 from agent.core.config import AgentConfig
 from agent.core.models import TodoItem
@@ -71,18 +72,9 @@ class _MCPRuntime:
 
 def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
     """创建 FastMCP server。"""
-    # MCP 服务端进程默认关闭 LangSmith/LangChain tracing，避免产生噪声埋点。
-    os.environ["LANGSMITH_TRACING"] = "false"
-    os.environ["LANGCHAIN_TRACING_V2"] = "false"
     cfg = config or AgentConfig.load()
     runtime = _MCPRuntime(cfg)
     mcp = FastMCP(name="fusion-tools", instructions="Fusion 工具层（NL2SQL / RAG / Neo4j-LlamaIndex / Note / Todo）")
-
-    def _trace_tool(name: str, trace_id: str, inputs: Dict[str, Any], fn):
-        """统一工具包装：服务端不再写入 LangSmith，仅执行工具函数。"""
-        # 保留函数签名，避免调用侧改动；参数仅用于兼容。
-        _ = (name, trace_id, inputs)
-        return fn()
 
     @mcp.tool
     def health() -> Dict[str, Any]:
@@ -105,8 +97,8 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
         - query_mode 为当前生效参数；
         - intent_policy / intent_labels_required 为兼容字段，已废弃但暂时保留。
         """
-
-        def _run() -> Dict[str, Any]:
+        # 用 ls_trace context manager 而非 @traceable 装饰器，避免修改 FastMCP 所见的函数签名。
+        with ls_trace("nl2sql_query", run_type="tool", inputs={"question": question, "query_mode": query_mode}):
             result = runtime.nl2sql_tool.query(
                 question,
                 tables=tables,
@@ -116,25 +108,10 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
             )
             return {"sql": result.sql, "result": result.result}
 
-        return _trace_tool(
-            "nl2sql_query",
-            trace_id,
-            {
-                "question": question,
-                "tables": tables or [],
-                "enable_column_retrieval": enable_column_retrieval,
-                "query_mode": query_mode,
-                "intent_policy": intent_policy,
-                "intent_labels_required": intent_labels_required or [],
-            },
-            _run,
-        )
-
     @mcp.tool
     def rag_search(query: str, top_k: int = 5, trace_id: str = "") -> Dict[str, Any]:
         """执行文档向量检索。"""
-
-        def _run() -> Dict[str, Any]:
+        with ls_trace("rag_search", run_type="tool", inputs={"query": query, "top_k": top_k}):
             chunks = runtime.rag_tool.search(query, top_k=max(1, int(top_k)))
             return {
                 "query": query,
@@ -149,37 +126,40 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
                 ],
             }
 
-        return _trace_tool("rag_search", trace_id, {"query": query, "top_k": top_k}, _run)
-
     @mcp.tool
-    def neo4j_llamaindex_query(question: str, max_rows: Optional[int] = None, trace_id: str = "") -> Dict[str, Any]:
-        """使用 LlamaIndex 自动读取图结构并生成 Cypher 执行查询。"""
+    def neo4j_llamaindex_query(
+        question: str,
+        max_rows: Optional[int] = None,
+        trace_id: str = "",
+        repair_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """使用 LlamaIndex 自动读取图结构并生成 Cypher 执行查询。
 
-        def _run() -> Dict[str, Any]:
-            return runtime.graph_llamaindex_tool.query(question, max_rows=max_rows, trace_id=trace_id)
-
-        return _trace_tool(
+        repair_context 不为空时使用修复模板重试，不重新生成 Cypher。
+        """
+        with ls_trace(
             "neo4j_llamaindex_query",
-            trace_id,
-            {"question": question, "max_rows": max_rows},
-            _run,
-        )
+            run_type="tool",
+            inputs={"question": question, "max_rows": max_rows, "is_repair": repair_context is not None},
+        ):
+            return runtime.graph_llamaindex_tool.query(
+                question,
+                max_rows=max_rows,
+                trace_id=trace_id,
+                repair_context=repair_context,
+            )
 
     @mcp.tool
     def note_search(query: str, limit: int = 3, trace_id: str = "") -> Dict[str, Any]:
         """搜索笔记。"""
-
-        def _run() -> Dict[str, Any]:
+        with ls_trace("note_search", run_type="tool", inputs={"query": query, "limit": limit}):
             notes = runtime.note_tool.search(query, limit=max(1, int(limit)))
             return {"notes": notes}
-
-        return _trace_tool("note_search", trace_id, {"query": query, "limit": limit}, _run)
 
     @mcp.tool
     def todo_add(items: List[Dict[str, Any]], trace_id: str = "") -> Dict[str, Any]:
         """批量写入 Todo。"""
-
-        def _run() -> Dict[str, Any]:
+        with ls_trace("todo_add", run_type="tool", inputs={"count": len(items)}):
             todo_items: List[TodoItem] = []
             for item in items:
                 todo_items.append(
@@ -193,13 +173,10 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
             runtime.todo_tool.add_items(todo_items)
             return {"count": len(todo_items)}
 
-        return _trace_tool("todo_add", trace_id, {"count": len(items)}, _run)
-
     @mcp.tool
     def todo_list(trace_id: str = "") -> Dict[str, Any]:
         """读取 Todo 列表。"""
-
-        def _run() -> Dict[str, Any]:
+        with ls_trace("todo_list", run_type="tool", inputs={}):
             return {
                 "items": [
                     {
@@ -214,11 +191,12 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
                 ]
             }
 
-        return _trace_tool("todo_list", trace_id, {}, _run)
-
     return mcp
 
 
 config = AgentConfig.load()
 mcp_server = create_mcp_server(config)
+# http_app 返回 Starlette ASGI 应用；添加 TracingMiddleware 使 Server 端接收 Client
+# 传来的 langsmith-trace header，将工具调用嵌套挂到主链路 trace 树下。
 app = mcp_server.http_app(path="/mcp", transport="streamable-http")
+app.add_middleware(TracingMiddleware)

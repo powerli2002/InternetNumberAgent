@@ -15,6 +15,7 @@ import subprocess
 import sys
 from typing import List
 
+# ps aux | grep start_vllm
 # nohup python start_vllm.py
 # curl http://127.0.0.1:2222/v1/models
 def _parse_args() -> argparse.Namespace:
@@ -66,6 +67,11 @@ def _parse_args() -> argparse.Namespace:
         default=True,
         help="是否强制 eager 执行（关闭 CUDA Graph 以降低显存峰值）",
     )
+    parser.add_argument(
+        "--tool-call-parser",
+        default="hermes",
+        help="工具调用解析器，指定模型的 function calling 格式（如 hermes、mistral、llama3_json、pythonic 等）",
+    )
     return parser.parse_args()
 
 
@@ -100,8 +106,22 @@ def _build_command(args: argparse.Namespace) -> List[str]:
         command.append("--no-trust-remote-code")
     if args.enforce_eager:
         command.append("--enforce-eager")
+    if args.tool_call_parser:
+        command.extend(["--enable-auto-tool-choice", "--tool-call-parser", args.tool_call_parser])
     return command
 
+
+
+def _check_port_free(host: str, port: int) -> None:
+    """检测端口是否已被占用，被占用说明旧进程仍在运行，需先手动终止。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        result = s.connect_ex((host, port))
+    if result == 0:
+        raise RuntimeError(
+            f"端口 {host}:{port} 已被占用，旧 vLLM 进程可能仍在运行并占用 GPU 显存。\n"
+            f"请先执行：kill $(lsof -ti tcp:{port})  或  pkill -f 'vllm.*serve'"
+        )
 
 
 def main() -> int:
@@ -114,6 +134,8 @@ def main() -> int:
         raise RuntimeError("--max-num-batched-tokens 必须 >= 1。")
     if not (0.0 < args.gpu_memory_utilization <= 1.0):
         raise RuntimeError("--gpu-memory-utilization 必须在 (0, 1] 范围内。")
+
+    _check_port_free(args.host, args.port)
 
     command = _build_command(args)
     child_env = os.environ.copy()

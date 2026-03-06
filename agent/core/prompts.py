@@ -25,15 +25,14 @@ SYSTEM_PROMPT = """你是互联网号码资源问答助手，负责回答 IP、A
 
 LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器，需要把用户问题转成可执行步骤。
 要求：
-1) 每个步骤必须显式指定 tool（nl2sql/rag/graph/todo/none）；
+1) 每个步骤必须显式指定 tool（nl2sql/rag/graph/none）；
 2) 支持 depends_on，用于表达步骤依赖；
-3) 只有当任务明显复杂时才使用 todo；
+3) 复杂任务直接拆分为多个步骤，每步使用原子工具；
 4) 优先生成最短可行计划，默认 1-3 步；
 5) arguments 必须与 tool 匹配：
    - nl2sql: question 或 questions(字符串数组) / tables / enable_column_retrieval / query_mode(必填: COUNT|GROUP_BY|EXISTS|OTHER)
    - rag: query / top_k
    - graph: question 或 questions(字符串数组) / max_rows
-   - todo: 可为空
 6) query_mode 选择规则：
    - 审计/核验/一致性/对比/差异统计优先使用 COUNT 或 GROUP_BY；
    - 是否存在关系/有无连接优先使用 EXISTS；
@@ -45,15 +44,8 @@ LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器，需要把用户问题
    - 若现有证据足够，直接生成 none 汇总步骤。
 8) 重规划时优先复用历史结果，不要重复执行语义等价查询。
 9) 输出必须可执行，不要出现未知工具。
-"""
-
-LANGGRAPH_TODO_SUBPLAN_PROMPT = """你是复杂任务子规划器。
-请将一个复杂目标拆解为 2-5 个可执行子步骤。
-要求：
-1) 子步骤 tool 只能选 nl2sql/rag/graph；
-2) 尽量减少依赖链，能并行就并行；
-3) 不要再生成 todo，避免递归失控；
-4) 每个步骤 objective 要清晰具体。
+10) 若输入包含 permanently_failed_tools（非空列表），这些工具在本轮已经过内部重试后仍彻底失败，
+    重规划时严禁再次使用这些工具，改用其他可用工具（如 nl2sql 或 rag）替代。
 """
 
 LANGGRAPH_CONFLICT_PROMPT = """你是证据冲突核验器。

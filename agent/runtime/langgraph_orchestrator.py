@@ -47,7 +47,6 @@ from agent.core.prompts import (
     GRAPH_CYPHER_PROMPT,
     LANGGRAPH_CONFLICT_PROMPT,
     LANGGRAPH_PLAN_PROMPT,
-    LANGGRAPH_TODO_SUBPLAN_PROMPT,
     SEMANTIC_EXTRACT_PROMPT,
     SYSTEM_PROMPT,
 )
@@ -56,7 +55,7 @@ from agent.memory import EpisodicMemory, MemoryManager, SemanticMemory, WorkingM
 from agent.memory.semantic import SemanticRecord
 from agent.runtime.context_builder import ContextBuilder
 from agent.runtime.graph_models import GraphPlan, GraphPlanStep
-from agent.runtime.graph_schemas import build_conflict_schema, build_main_plan_schema, build_todo_subplan_schema
+from agent.runtime.graph_schemas import build_conflict_schema, build_main_plan_schema
 from agent.services.mcp.client import MCPToolClient
 from fusiondata.src.utils.logging_manager import logger
 
@@ -632,14 +631,14 @@ class LangGraphOrchestrator:
             query = str(state.get("query") or "")
             trace_id = str(state.get("trace_id") or "")
             trace_outputs: Dict[str, Any] = {}
-            # 重规划时将上一轮计划与步骤结果摘要传给 planner，降低重复步骤概率。
-            previous_plan_steps, previous_step_summaries = self._build_previous_plan_payload(state)
+            # 重规划时将上一轮计划、步骤结果摘要及彻底失败的工具列表传给 planner。
+            previous_plan_steps, previous_step_summaries, permanently_failed_tools = self._build_previous_plan_payload(state)
             # 每轮规划前重新探测工具可用性，适配 MCP 工具热插拔与重规划场景。
             available_tools = self._resolve_available_tools(trace_id)
             # 仅把“当前可用工具”暴露给规划模型，降低无效计划概率。
             allowed = [
                 tool
-                for tool in ("nl2sql", "rag", "graph", "todo", "none")
+                for tool in ("nl2sql", "rag", "graph", "none")
                 if available_tools.get(tool, False)
             ]
             if not allowed:
@@ -658,6 +657,7 @@ class LangGraphOrchestrator:
                 "previous_conflicts": state.get("conflicts", []),
                 "previous_plan_steps": previous_plan_steps,
                 "previous_step_summaries": previous_step_summaries,
+                "permanently_failed_tools": permanently_failed_tools,
             }
             # 使用结构化 tool_call + schema，强约束计划输出字段。
             messages = [
@@ -790,9 +790,6 @@ class LangGraphOrchestrator:
                     else:
                         step.tool = "none"
                         step.arguments = {}
-                if step.tool == "todo" and not available_tools.get("todo", True):
-                    step.tool = "none"
-                    step.arguments = {}
                 if step.tool == "nl2sql":
                     # query_mode 由规划器给出，这里仅做枚举归一，避免执行层做规则推断。
                     query_mode = LangGraphOrchestrator._normalize_query_mode((step.arguments or {}).get("query_mode"))
@@ -963,15 +960,24 @@ class LangGraphOrchestrator:
                         result = future.result()
                     except Exception as exc:
                         # 单步骤异常不阻断整批：转为 error 结果并写入一条证据，便于后续冲突/回答节点感知。
+                        # 解析 |step_retried=True 后缀（由 _run_graph_step 编码），用于重规划时禁止重复调用。
+                        exc_str = str(exc)
+                        step_retried = False
+                        if "|step_retried=True" in exc_str:
+                            step_retried = True
+                            exc_str = exc_str.replace("|step_retried=True", "").rstrip("|").strip()
+                        elif "|step_retried=False" in exc_str:
+                            exc_str = exc_str.replace("|step_retried=False", "").rstrip("|").strip()
                         result = {
                             "step_id": step_id,
                             "status": "error",
-                            "error": str(exc),
+                            "error": exc_str,
                             "result": {},
+                            "retried": step_retried,
                             "evidences": [
                                 EvidenceItem(
                                     title=f"步骤 {step_id} 执行失败",
-                                    content=f"错误: {exc}",
+                                    content=f"错误: {exc_str}",
                                     source="executor",
                                     score=0.1,
                                 )
@@ -1008,6 +1014,8 @@ class LangGraphOrchestrator:
                         "arguments": result.get("arguments", {}) if isinstance(result.get("arguments"), dict) else {},
                         "signature": str(result.get("signature") or ""),
                         "reused_from_step_id": str(result.get("reused_from_step_id") or ""),
+                        # retried=True 表示工具内部已经过子图重试仍失败，重规划时应禁止再次使用该工具。
+                        "retried": bool(result.get("retried", False)),
                     }
                     completed.append(step_id)
                     evidences.extend(result.get("evidences", []))
@@ -1354,8 +1362,6 @@ class LangGraphOrchestrator:
                 result = self._run_rag_step(step_id, objective, arguments, trace_id, root_run=root_run)
             elif tool == "graph":
                 result = self._run_graph_step(step_id, objective, arguments, trace_id, root_run=root_run)
-            elif tool == "todo":
-                result = self._run_todo_subgraph(step_id, objective, arguments, trace_id, state, root_run=root_run)
             else:
                 result = {
                     "step_id": step_id,
@@ -1679,57 +1685,67 @@ class LangGraphOrchestrator:
         if not question_list:
             raise ValueError("graph 缺少 question/questions 参数")
         max_rows = arguments.get("max_rows")
+        # 子图最多修复重试次数：第1次正常生成，后续每次用修复 template 重试。
+        max_cypher_retries: int = 2
 
         items: List[Dict[str, Any]] = []
         for idx, question in enumerate(question_list, start=1):
-            first_error = ""
-            retried = False
-            try:
-                payload = self.mcp_client.call_tool(
-                    "neo4j_llamaindex_query",
-                    {
+            repair_context: Optional[Dict[str, Any]] = None
+            attempt_errors: List[str] = []
+            payload: Optional[Dict[str, Any]] = None
+
+            # 子图重试循环：每次失败后提取 raw_cypher 并通过修复模板重试，
+            # 错误上下文在 LlamaIndex PromptTemplate 内正确传递，而非混入 question。
+            for attempt in range(1 + max_cypher_retries):
+                try:
+                    call_args: Dict[str, Any] = {
                         "question": question,
                         "max_rows": max_rows,
                         "trace_id": trace_id,
-                    },
-                    trace_id=trace_id,
-                    root_run=root_run,
-                )
-            except Exception as exc:
-                # 重试时把首次报错注入上下文，约束生成只读 Cypher。
-                retried = True
-                first_error = str(exc)
-                retry_question = self._build_retry_question(
-                    question,
-                    first_error,
-                    tool_name="neo4j",
-                    extra_instruction=(
-                        "请严格使用只读图查询语义，生成 MATCH/OPTIONAL MATCH/WITH 开头并包含 LIMIT 的查询。"
-                    ),
-                )
-                try:
+                    }
+                    if repair_context:
+                        call_args["repair_context"] = repair_context
                     payload = self.mcp_client.call_tool(
                         "neo4j_llamaindex_query",
-                        {
-                            "question": retry_question,
-                            "max_rows": max_rows,
-                            "trace_id": trace_id,
-                        },
+                        call_args,
                         trace_id=trace_id,
                         root_run=root_run,
                     )
-                except Exception as retry_exc:
-                    items.append(
-                        {
-                            "index": idx,
-                            "question": question,
-                            "status": "error",
-                            "error": str(retry_exc),
-                            "first_error": first_error,
-                            "retried": True,
-                        }
+                    break  # 成功，退出重试循环
+                except Exception as exc:
+                    err_msg = str(exc)
+                    attempt_errors.append(err_msg)
+                    # 从异常消息中提取 raw_cypher（格式: "...校验错误...|raw_cypher=CALL ..."）
+                    raw_cypher = ""
+                    if "|raw_cypher=" in err_msg:
+                        raw_cypher = err_msg.split("|raw_cypher=", 1)[-1].strip()
+                    # 去掉 |raw_cypher=... 后的纯错误部分
+                    clean_error = err_msg.split("|raw_cypher=")[0].strip()
+                    logger.warning(
+                        "neo4j 查询失败 attempt=%d/%d trace_id=%s error=%s raw_cypher=%s",
+                        attempt + 1, 1 + max_cypher_retries,
+                        trace_id or "-", clean_error, raw_cypher or "(未捕获)",
                     )
-                    continue
+                    if attempt < max_cypher_retries:
+                        repair_context = {"raw_cypher": raw_cypher, "error": clean_error}
+                    else:
+                        # 全部重试耗尽，记录错误并跳出
+                        items.append(
+                            {
+                                "index": idx,
+                                "question": question,
+                                "status": "error",
+                                "error": clean_error,
+                                "first_error": attempt_errors[0] if attempt_errors else clean_error,
+                                "retried": attempt > 0,
+                                "attempt_count": attempt + 1,
+                            }
+                        )
+                        payload = None
+                        break
+
+            if payload is None:
+                continue
 
             cypher = str(payload.get("cypher", "")) if isinstance(payload, dict) else ""
             row_count = payload.get("row_count") if isinstance(payload, dict) else None
@@ -1741,15 +1757,18 @@ class LangGraphOrchestrator:
                     "payload": payload if isinstance(payload, dict) else {"data": payload},
                     "cypher": cypher,
                     "row_count": row_count,
-                    "retried": retried,
-                    "first_error": first_error,
+                    "retried": len(attempt_errors) > 0,
+                    "first_error": attempt_errors[0] if attempt_errors else "",
+                    "attempt_count": len(attempt_errors) + 1,
                 }
             )
 
         success_items = [item for item in items if str(item.get("status") or "") == "ok"]
         if not success_items:
             first_error = str(items[0].get("error") or "graph 执行失败") if items else "graph 执行失败"
-            raise RuntimeError(first_error)
+            any_retried = any(item.get("retried") for item in items)
+            # 用后缀编码 retried 信息，使外层 except 可识别是否已经过子图重试。
+            raise RuntimeError(f"{first_error}|step_retried={any_retried}")
 
         if len(items) == 1:
             result_payload = success_items[0].get("payload", {})
@@ -1791,154 +1810,16 @@ class LangGraphOrchestrator:
                 "failed_count": len(items) - len(success_items),
             },
         )
+        # 任意子问题有过重试则标记，供 _build_previous_plan_payload 识别彻底失败工具。
+        any_retried = any(item.get("retried") for item in items)
         return {
             "step_id": step_id,
             "status": "ok",
             "result": result_payload,
             "evidences": [evidence],
             "sources": ["neo4j"],
+            "retried": any_retried,
         }
-
-    def _run_todo_subgraph(
-        self,
-        step_id: str,
-        objective: str,
-        arguments: Dict[str, Any],
-        trace_id: str,
-        state: AgentGraphState,
-        root_run: Optional[Any] = None,
-    ) -> Dict[str, Any]:
-        """执行复杂任务子图：先子规划，再按依赖执行子步骤。
-
-        `todo` 步骤用于承载“一个步骤内仍需多步求解”的复杂场景。
-        子图执行策略与主图一致：依赖就绪后执行、无法推进时强制推进首项。
-
-        Args:
-            step_id: 父步骤 ID。
-            objective: 父步骤目标描述。
-            arguments: 父步骤参数。
-            trace_id: 链路追踪 ID。
-            state: 主图当前状态（用于共享工具能力与追踪上下文）。
-            root_run: 可选根追踪对象。
-
-        Returns:
-            父步骤标准化结果，包含子计划与子步骤执行摘要。
-        """
-        available_tools = state.get("available_tools") or {}
-        # todo 子图只允许原子工具，避免再次进入 todo 形成深层递归。
-        allowed = [
-            tool
-            for tool in ("nl2sql", "rag", "graph")
-            if available_tools.get(tool, False)
-        ]
-        if not allowed:
-            allowed = ["rag"]
-
-        payload = {
-            "objective": objective,
-            "arguments": arguments,
-            "available_tools": allowed,
-            "allowed_tables": self.config.allowed_tables,
-        }
-        messages = [
-            LLMMessage(role="system", content=LANGGRAPH_TODO_SUBPLAN_PROMPT),
-            LLMMessage(role="user", content=json.dumps(payload, ensure_ascii=False)),
-        ]
-        schema = build_todo_subplan_schema(allowed)
-
-        try:
-            # 子图同样使用结构化计划，保持主图与子图的一致执行模型。
-            _, result_payload = self.llm.tool_call(messages, tools=[schema], tool_choice="required")
-            plan = GraphPlan.from_dict({"steps": result_payload.get("steps", []), "reason": result_payload.get("reason", "")})
-        except Exception as exc:
-            logger.warning("todo 子计划生成失败，使用兜底步骤 error=%s", exc)
-            plan = GraphPlan(
-                steps=[
-                    GraphPlanStep(
-                        step_id=f"{step_id}_sub_1",
-                        objective=objective,
-                        tool="rag" if "rag" in allowed else allowed[0],  # type: ignore[arg-type]
-                        arguments={"query": objective, "top_k": 5},
-                        depends_on=[],
-                        can_parallel=False,
-                        is_complex=False,
-                    )
-                ],
-                reason="子计划失败，降级为单步检索",
-                max_replans=0,
-            )
-
-        plan.sanitize_dependencies()
-        # 以下循环是“子图内的简化 dispatch-execute”，逻辑与主图一致。
-        sub_step_map = {sub.step_id: sub.to_dict() for sub in plan.steps}
-        pending = [sub.step_id for sub in plan.steps]
-        completed: List[str] = []
-        sub_results: Dict[str, Dict[str, Any]] = {}
-        sub_evidences: List[EvidenceItem] = []
-        sub_sources: List[str] = []
-
-        while pending:
-            ready: List[str] = []
-            completed_set = set(completed)
-            for sub_id in pending:
-                sub = sub_step_map.get(sub_id)
-                if not sub:
-                    continue
-                deps = [str(x) for x in (sub.get("depends_on") or [])]
-                if all(dep in completed_set for dep in deps):
-                    ready.append(sub_id)
-            if not ready:
-                # 子依赖异常时同样做强制推进，保证子图最终收敛。
-                ready = [pending[0]]
-
-            for sub_id in ready:
-                sub = sub_step_map[sub_id]
-                # 子图内禁止再次递归 todo，避免无限嵌套。
-                if sub.get("tool") == "todo":
-                    sub["tool"] = "rag"
-                    sub["arguments"] = {"query": sub.get("objective", ""), "top_k": 5}
-                result = self._execute_single_step(sub, state, root_run=root_run)
-                sub_results[sub_id] = {
-                    "status": result.get("status", "error"),
-                    "result": result.get("result", {}),
-                    "error": result.get("error", ""),
-                }
-                sub_evidences.extend(result.get("evidences", []))
-                sub_sources.extend(result.get("sources", []))
-                completed.append(sub_id)
-
-            pending = [sub_id for sub_id in pending if sub_id not in ready]
-
-        # 给父步骤补一条汇总证据，便于最终答案阶段理解复杂步骤执行过程。
-        summary_lines = [
-            f"- {sub_id}: {sub_results.get(sub_id, {}).get('status', 'unknown')}"
-            for sub_id in completed
-        ]
-        parent_evidence = EvidenceItem(
-            title="复杂步骤执行汇总",
-            content=f"子计划原因: {plan.reason}\n" + "\n".join(summary_lines),
-            source="todo",
-            score=0.7,
-            metadata={"step_id": step_id, "sub_steps": [sub.step_id for sub in plan.steps]},
-        )
-
-        return {
-            "step_id": step_id,
-            "status": "ok",
-            "result": {
-                "subplan": [sub.to_dict() for sub in plan.steps],
-                "sub_results": sub_results,
-                "reason": plan.reason,
-            },
-            "evidences": [parent_evidence] + sub_evidences[:6],
-            "sources": ["todo"] + sub_sources,
-            "tool": "todo",
-            "objective": objective,
-            "arguments": arguments,
-            "signature": LangGraphOrchestrator._build_step_signature("todo", objective, arguments),
-            "reused_from_step_id": "",
-        }
-
     @staticmethod
     def _normalize_arguments_for_signature(tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """规范化步骤参数，构建稳定签名用于跨轮去重。"""
@@ -2074,10 +1955,6 @@ class LangGraphOrchestrator:
                     if src:
                         sources.append(src)
                 summary = f"chunk_count={len(chunks)}; sources={sources}"
-            elif tool == "todo":
-                subplan = payload.get("subplan") if isinstance(payload.get("subplan"), list) else []
-                sub_results = payload.get("sub_results") if isinstance(payload.get("sub_results"), dict) else {}
-                summary = f"subplan_steps={len(subplan)}; sub_results={len(sub_results)}"
             else:
                 summary = _truncate(_trace_json(payload, limit=600), 260)
         else:
@@ -2094,14 +1971,22 @@ class LangGraphOrchestrator:
             "reused_from_step_id": str(step_result.get("reused_from_step_id") or ""),
         }
 
-    def _build_previous_plan_payload(self, state: AgentGraphState) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """拼装重规划输入：上一轮计划步骤 + 各步骤结果摘要。"""
+    def _build_previous_plan_payload(
+        self, state: AgentGraphState
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+        """拼装重规划输入：上一轮计划步骤、各步骤结果摘要、彻底失败的工具列表。
+
+        Returns:
+            (previous_plan_steps, previous_step_summaries, permanently_failed_tools)
+            permanently_failed_tools：经过子图重试后仍失败的工具名列表，供 planner 禁止重复使用。
+        """
         raw_plan_steps = state.get("plan_steps") if isinstance(state.get("plan_steps"), list) else []
         step_results = state.get("step_results") if isinstance(state.get("step_results"), dict) else {}
 
         previous_plan_steps: List[Dict[str, Any]] = []
         previous_step_summaries: List[Dict[str, Any]] = []
         planned_step_ids: List[str] = []
+        permanently_failed_tools: List[str] = []
 
         for raw_step in raw_plan_steps[:20]:
             if not isinstance(raw_step, dict):
@@ -2111,19 +1996,28 @@ class LangGraphOrchestrator:
                 continue
             planned_step_ids.append(step_id)
             depends_on = raw_step.get("depends_on") if isinstance(raw_step.get("depends_on"), list) else []
+            tool_name = str(raw_step.get("tool") or "")
             previous_plan_steps.append(
                 {
                     "step_id": step_id,
-                    "tool": str(raw_step.get("tool") or ""),
+                    "tool": tool_name,
                     "objective": _truncate(str(raw_step.get("objective") or ""), 200),
                     "depends_on": [str(item).strip() for item in depends_on if str(item).strip()],
                 }
             )
-            summary = self._summarize_step_result_for_plan(
-                step_id,
-                step_results.get(step_id, {}) if isinstance(step_results.get(step_id), dict) else {},
-            )
+            result = step_results.get(step_id, {}) if isinstance(step_results.get(step_id), dict) else {}
+            summary = self._summarize_step_result_for_plan(step_id, result)
             previous_step_summaries.append(summary)
+
+            # 步骤失败且经过子图重试（retried=True）意味着已尝试修复仍无法执行，
+            # 将该工具标记为"彻底失败"，重规划时不应再生成此工具步骤。
+            if (
+                str(result.get("status") or "") == "error"
+                and result.get("retried")
+                and tool_name
+                and tool_name not in permanently_failed_tools
+            ):
+                permanently_failed_tools.append(tool_name)
 
         # 兼容历史残留结果：即使不在当前计划，也给 planner 作为补充上下文。
         for step_id, step_result in step_results.items():
@@ -2134,7 +2028,7 @@ class LangGraphOrchestrator:
                 continue
             previous_step_summaries.append(self._summarize_step_result_for_plan(sid, step_result))
 
-        return previous_plan_steps[:20], previous_step_summaries[:30]
+        return previous_plan_steps[:20], previous_step_summaries[:30], permanently_failed_tools
 
     def _resolve_available_tools(self, trace_id: str) -> Dict[str, bool]:
         """从 MCP 服务动态发现当前可用工具能力。
@@ -2143,13 +2037,12 @@ class LangGraphOrchestrator:
             trace_id: 当前会话追踪 ID，用于透传到工具层日志。
 
         Returns:
-            工具可用性字典；包含 nl2sql/rag/graph/todo/none/note。
+            工具可用性字典；包含 nl2sql/rag/graph/none/note。
         """
         available = {
             "nl2sql": False,
             "rag": False,
             "graph": False,
-            "todo": True,
             "none": True,
             "note": False,
         }

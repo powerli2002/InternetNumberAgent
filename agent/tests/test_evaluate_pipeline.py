@@ -255,13 +255,13 @@ def test_normalize_iterative_dataset_from_gold_shape() -> None:
             "id": "Q001",
             "query": "解释自治系统",
             "reference_answer": "自治系统是由统一管理策略控制的路由域。",
-            "scores_dim": {"final_response_quality": 0.4},
+            "label_score": 0,
         },
         {
             "id": "Q002",
             "query": "统计 AS 数量",
             "answer": "共有 100 个。",
-            "main_score": 0.9,
+            "label_score": 1,
         },
     ]
 
@@ -272,6 +272,19 @@ def test_normalize_iterative_dataset_from_gold_shape() -> None:
     assert dataset[0]["response"] == "自治系统是由统一管理策略控制的路由域。"
     assert dataset[0]["label_score"] == 0
     assert dataset[1]["label_score"] == 1
-    assert label_source_count["scores_dim.final_response_quality"] == 1
-    assert label_source_count["main_score"] == 1
+    assert label_source_count["label_score"] == 2
     assert clipped_count == 0
+
+
+def test_normalize_iterative_dataset_requires_binary_label_score() -> None:
+    """验证缺少或非法 label_score 会直接报错。"""
+    with pytest.raises(RuntimeError, match="label_score"):
+        _normalize_iterative_dataset(
+            [
+                {
+                    "id": "Q003",
+                    "query": "测试",
+                    "response": "测试回答",
+                }
+            ]
+        )

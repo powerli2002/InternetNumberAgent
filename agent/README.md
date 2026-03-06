@@ -12,7 +12,15 @@ python agent/cli/main.py
 
 说明：CLI 默认不设置外层超时；工具执行期间会输出开始/结束日志与耗时。
 
-.venv/bin/langgraph dev --config langgraph.json --port 8123
+.venv/bin/python -m agent.scripts.langgraph_dev --config langgraph.json --port 8123
+
+
+启动 本地llm qwen3.5-4B
+kill $(lsof -ti tcp:2222)
+pkill -f "VLLM::EngineCore" 
+cd /home/lzj/fusionprocessing/agent/model
+nohup python start_vllm.py
+
 
 ## LLM 后端切换（cloud/local）
 

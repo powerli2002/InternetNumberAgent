@@ -42,3 +42,4 @@ agent-chat-ui
 
 .pytest_cache
 __pycache__
+.langgraph_api

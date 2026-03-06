@@ -93,6 +93,8 @@ tool_score = mean(tool_call_scores)（无评分时为 -1）
 label_score = final_response_quality 二值化（>=0.5 记 1，否则记 0）
 ```
 
+说明：`build_graders --rubric-labeled-data` 当前仅消费 `label_score`（0/1），不再从 `scores_dim/main_score/overall_score` 回退派生。
+
 ## 5. LangSmith 双记录
 
 - Trace：`fill_answers` 阶段由 `FusionAgent` 写入 LangSmith trace。

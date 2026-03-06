@@ -19,8 +19,26 @@ LLM 客户端模块 - OpenAI 兼容后端
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def strip_think_blocks(text: str) -> str:
+    """剥离推理模型（如 Qwen-QwQ）输出中的 <think>...</think> 思考块。
+
+    处理逻辑：
+    1. 优先用正则去除所有闭合的 <think>...</think> 片段；
+    2. 若剥离后为空但存在未闭合的 </think> 尾巴，取最后一个 </think> 之后的内容；
+    3. 其余情况原样返回，不破坏正常输出。
+    """
+    if not text or "<think>" not in text.lower():
+        return text
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+    # 思考块未闭合时兜底：截取最后一个 </think> 之后的有效内容
+    if not cleaned and "</think>" in text.lower():
+        cleaned = re.split(r"</think>", text, flags=re.IGNORECASE)[-1].strip()
+    return cleaned if cleaned else text
 
 
 @dataclass
@@ -61,7 +79,8 @@ class LLMClient:
             messages=[message.__dict__ for message in messages],
             temperature=temperature,
         )
-        return response.choices[0].message.content or ""
+        raw = response.choices[0].message.content or ""
+        return strip_think_blocks(raw)
 
     def chat_stream(self, messages: List[LLMMessage], temperature: float = 0.2):
         """流式输出对话内容（逐段返回）。"""
