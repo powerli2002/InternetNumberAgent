@@ -98,6 +98,15 @@ class AgentConfig:
     local_llm_model: str = ""
     """本机 OpenAI 兼容服务暴露的模型名"""
 
+    llm_temperature: float = 0.2
+    """普通文本生成默认温度：用于最终回答、普通 chat 与结构化文本生成"""
+
+    llm_tool_temperature: float = 0.0
+    """工具/规划默认温度：用于 function calling、NL2SQL 与图查询这类强约束任务"""
+
+    llm_context_compress_temperature: float = 0.0
+    """上下文压缩温度：压缩任务要求尽量保真，默认关闭采样"""
+
     dashscope_embedding_model: str = "text-embedding-v3"
     """DashScope embedding 模型（在 RAG/NL2SQL 切换到 dashscope 后端时使用）"""
 
@@ -128,10 +137,13 @@ class AgentConfig:
     """语义记忆容量：Neo4j 中存储的概念节点最大数量"""
 
     max_context_tokens: int = 4096
-    """上下文最大 token 数，控制发送给 LLM 的上下文长度"""
+    """上下文最大 token 数，当前与本机 vLLM 总窗口统一读取同一环境变量"""
 
-    context_compress_mode: str = "hybrid"
-    """上下文压缩模式：llm/truncate/hybrid"""
+    vllm_max_model_len: int = 4096
+    """本机 vLLM 服务的 max_model_len，限制输入与输出的总窗口"""
+
+    context_compress_mode: str = "llm"
+    """上下文压缩模式兼容字段，当前固定为 llm"""
 
     context_compress_target_ratio: float = 0.7
     """上下文压缩目标比例（0-1），用于 LLM 压缩提示"""
@@ -315,6 +327,27 @@ class AgentConfig:
         cfg.local_llm_api_key = os.environ.get("LOCAL_LLM_API_KEY", cfg.local_llm_api_key)
         cfg.local_llm_base_url = os.environ.get("LOCAL_LLM_BASE_URL", cfg.local_llm_base_url)
         cfg.local_llm_model = os.environ.get("LOCAL_LLM_MODEL", cfg.local_llm_model)
+        llm_temperature_value = os.environ.get("LLM_TEMPERATURE")
+        if llm_temperature_value:
+            try:
+                cfg.llm_temperature = min(2.0, max(0.0, float(llm_temperature_value)))
+            except ValueError:
+                pass
+        llm_tool_temperature_value = os.environ.get("LLM_TOOL_TEMPERATURE")
+        if llm_tool_temperature_value:
+            try:
+                cfg.llm_tool_temperature = min(2.0, max(0.0, float(llm_tool_temperature_value)))
+            except ValueError:
+                pass
+        llm_context_compress_temperature_value = os.environ.get("LLM_CONTEXT_COMPRESS_TEMPERATURE")
+        if llm_context_compress_temperature_value:
+            try:
+                cfg.llm_context_compress_temperature = min(
+                    2.0,
+                    max(0.0, float(llm_context_compress_temperature_value)),
+                )
+            except ValueError:
+                pass
         cfg.dashscope_embedding_model = os.environ.get("DASHSCOPE_EMBEDDING_MODEL", cfg.dashscope_embedding_model)
         endpoint = resolve_llm_endpoint(
             backend=cfg.llm_backend,
@@ -363,12 +396,11 @@ class AgentConfig:
             except ValueError:
                 pass
 
-        max_context_tokens_value = os.environ.get("MAX_CONTEXT_TOKENS")
-        if max_context_tokens_value:
-            try:
-                cfg.max_context_tokens = max(256, int(max_context_tokens_value))
-            except ValueError:
-                pass
+        vllm_max_model_len_value = os.environ.get("LOCAL_VLLM_MAX_MODEL_LEN")
+        if vllm_max_model_len_value:
+            parsed_vllm_max_model_len = max(256, int(vllm_max_model_len_value))
+            cfg.vllm_max_model_len = parsed_vllm_max_model_len
+            cfg.max_context_tokens = parsed_vllm_max_model_len
 
         # NL2SQL embedding 配置（默认本地离线），并兼容复用 RAG embedding 配置。
         cfg.nl2sql_embedding_backend = os.environ.get(
@@ -539,9 +571,7 @@ class AgentConfig:
 
         context_compress_mode_value = os.environ.get("CONTEXT_COMPRESS_MODE")
         if context_compress_mode_value:
-            normalized_mode = context_compress_mode_value.strip().lower()
-            if normalized_mode in {"llm", "truncate", "hybrid"}:
-                cfg.context_compress_mode = normalized_mode
+            cfg.context_compress_mode = "llm"
 
         context_compress_target_ratio_value = os.environ.get("CONTEXT_COMPRESS_TARGET_RATIO")
         if context_compress_target_ratio_value:

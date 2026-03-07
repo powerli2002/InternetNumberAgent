@@ -11,11 +11,12 @@
 8. write_memory：写入工作记忆并按配置抽取语义记忆。
 
 整体架构：
-- 状态层：`AgentGraphState`（TypedDict）是整张图的单一状态载体。
+- 状态层：`AgentGraphState`（`MessagesState + 业务字段`）是整张图的单一状态载体，`messages` 是唯一对话真相源。
 - 编排层：LangGraph `StateGraph` 负责节点注册、边连接与条件分支路由。
 - 执行层：MCP 工具（NL2SQL/RAG/Neo4j-LlamaIndex/Note）提供外部能力，支持并发步骤执行。
 - 记忆层：Working/Episodic/Semantic 三层记忆由 `MemoryManager` 统一管理。
-- 观测层：LangSmith 自动追踪（root run + 自动节点/LLM/tool run）并在 root 输出聚合节点审计记录。
+- 观测层：LangSmith 自动追踪（root run + 自动节点/LLM/tool run），
+  节点完整审计直接写入自动节点 run，同时在 root 输出保留兼容性聚合记录。
 
 LangGraph 思想与语法（本文件用法）：
 - `StateGraph(StateType)`：声明“共享状态 + 节点函数”的图执行模型。
@@ -27,17 +28,22 @@ LangGraph 思想与语法（本文件用法）：
 
 from __future__ import annotations
 
+import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 import contextvars
+from dataclasses import asdict, is_dataclass
 import hashlib
 import json
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from langsmith.run_helpers import get_current_run_tree, tracing_context
-from langgraph.graph import END, StateGraph
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langsmith.run_helpers import get_current_run_tree, trace, tracing_context
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, MessagesState, StateGraph
 from typing_extensions import TypedDict
 
 from agent.core.config import AgentConfig
@@ -60,18 +66,15 @@ from agent.services.mcp.client import MCPToolClient
 from fusiondata.src.utils.logging_manager import logger
 
 
-_ROOT_RUN_CTX: contextvars.ContextVar[Any] = contextvars.ContextVar("langgraph_root_run", default=None)
 _NODE_RECORDS_CTX: contextvars.ContextVar[Optional[List[Dict[str, Any]]]] = contextvars.ContextVar(
     "langgraph_node_records",
     default=None,
 )
 
 
-class AgentGraphState(TypedDict, total=False):
+class AgentGraphState(MessagesState, total=False):
     """LangGraph 状态。"""
 
-    query: str
-    history: List[ConversationTurn]
     trace_id: str
     available_tools: Dict[str, bool]
     plan_steps: List[Dict[str, Any]]
@@ -94,6 +97,101 @@ class AgentGraphState(TypedDict, total=False):
     error: str
 
 
+def _conversation_turn_to_message(turn: ConversationTurn) -> BaseMessage:
+    """将对话轮次转换为 LangGraph 可识别的消息对象。"""
+    role = str(turn.role or "").strip().lower()
+    content = str(turn.content or "")
+    if role == "assistant":
+        return AIMessage(content=content)
+    if role == "system":
+        return SystemMessage(content=content)
+    return HumanMessage(content=content)
+
+
+def _message_role_and_content(message: Any) -> Tuple[str, str]:
+    """从消息对象或消息字典中提取 role 与 content。"""
+    if isinstance(message, BaseMessage):
+        msg_type = str(getattr(message, "type", "") or "").strip().lower()
+        if msg_type == "human":
+            return "user", str(message.content or "")
+        if msg_type == "ai":
+            return "assistant", str(message.content or "")
+        if msg_type == "system":
+            return "system", str(message.content or "")
+        return msg_type or "unknown", str(message.content or "")
+
+    if isinstance(message, dict):
+        role = str(message.get("role") or "").strip().lower()
+        msg_type = str(message.get("type") or "").strip().lower()
+        content = str(message.get("content") or "")
+        if role:
+            return role, content
+        if msg_type == "human":
+            return "user", content
+        if msg_type == "ai":
+            return "assistant", content
+        if msg_type == "system":
+            return "system", content
+        return msg_type or "unknown", content
+
+    role = str(getattr(message, "role", "") or "").strip().lower()
+    msg_type = str(getattr(message, "type", "") or "").strip().lower()
+    content = str(getattr(message, "content", "") or "")
+    if role:
+        return role, content
+    if msg_type == "human":
+        return "user", content
+    if msg_type == "ai":
+        return "assistant", content
+    if msg_type == "system":
+        return "system", content
+    return msg_type or "unknown", content
+
+
+def _resolve_query_and_history_from_messages(messages: List[Any]) -> Tuple[str, List[ConversationTurn]]:
+    """从 messages 中提取当前 query 与历史对话。
+
+    语义约定：
+    - 最后一个 user/human 消息视为当前 query；
+    - 其之前的 user/assistant/system 消息视为 history；
+    - tool/function 等非对话消息不进入 history。
+    """
+    turns: List[ConversationTurn] = []
+    for message in messages:
+        role, content = _message_role_and_content(message)
+        if role not in {"user", "assistant", "system"}:
+            continue
+        if not str(content).strip():
+            continue
+        turns.append(ConversationTurn(role=role, content=content))
+
+    for index in range(len(turns) - 1, -1, -1):
+        if turns[index].role == "user":
+            return turns[index].content, turns[:index]
+
+    if not turns:
+        return "", []
+    return turns[-1].content, turns[:-1]
+
+
+def _resolve_query(state: AgentGraphState) -> str:
+    """从 messages 推导当前用户问题。"""
+    messages = state.get("messages") or []
+    if isinstance(messages, list):
+        derived_query, _ = _resolve_query_and_history_from_messages(messages)
+        return derived_query
+    return ""
+
+
+def _resolve_history(state: AgentGraphState) -> List[ConversationTurn]:
+    """从 messages 推导当前问题之前的对话历史。"""
+    messages = state.get("messages") or []
+    if isinstance(messages, list):
+        _, derived_history = _resolve_query_and_history_from_messages(messages)
+        return derived_history
+    return []
+
+
 def _truncate(text: str, limit: int = 1000) -> str:
     """对任意文本做长度截断，避免追踪/提示词被超长内容污染。
 
@@ -113,6 +211,16 @@ def _truncate(text: str, limit: int = 1000) -> str:
     return f"{raw[:limit]}...<truncated {len(raw)} chars>"
 
 
+def _build_postgres_dsn(url: str) -> str:
+    """将 SQLAlchemy 风格 DSN 转成 psycopg 可直接使用的 PostgreSQL DSN。"""
+    raw = str(url or "").strip()
+    if not raw:
+        raise RuntimeError("缺少 postgres_url，无法初始化 LangGraph Postgres checkpointer。")
+    if raw.startswith("postgresql+psycopg2://"):
+        return "postgresql://" + raw.split("://", 1)[1]
+    return raw
+
+
 def _trace_json(value: Any, limit: int = 6000) -> str:
     """将任意对象转为可追踪 JSON 字符串，并在超长时截断。"""
     try:
@@ -124,6 +232,19 @@ def _trace_json(value: Any, limit: int = 6000) -> str:
 
 def _to_jsonable(value: Any) -> Any:
     """把任意对象尽量转换为 JSON 可序列化结构。"""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if is_dataclass(value):
+        return _to_jsonable(asdict(value))
+    if hasattr(value, "model_dump"):
+        try:
+            return _to_jsonable(value.model_dump(mode="json"))
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
     try:
         return json.loads(json.dumps(value, ensure_ascii=False, default=str))
     except Exception:
@@ -165,13 +286,14 @@ def _serialize_evidence_items(evidences: List[Any], max_items: int = 30) -> List
 
 
 def _trace_state_snapshot(state: AgentGraphState) -> Dict[str, Any]:
-    """抽取状态快照，作为节点输入记录写入 root run。"""
+    """抽取轻量状态快照，作为节点输入审计与 root 聚合记录。"""
     pending = [str(item) for item in (state.get("pending_ids") or [])[:20]]
     completed = [str(item) for item in (state.get("completed_ids") or [])[:20]]
     ready = [str(item) for item in (state.get("ready_ids") or [])[:20]]
+    messages = state.get("messages") or []
     return {
         "trace_id": str(state.get("trace_id") or ""),
-        "query": _truncate(str(state.get("query") or ""), 300),
+        "query": _truncate(_resolve_query(state), 300),
         "pending_ids": pending,
         "completed_ids": completed,
         "ready_ids": ready,
@@ -179,6 +301,7 @@ def _trace_state_snapshot(state: AgentGraphState) -> Dict[str, Any]:
         "sources_size": len(state.get("sources") or []),
         "conflicts_size": len(state.get("conflicts") or []),
         "replan_count": int(state.get("replan_count", 0)),
+        "messages_size": len(messages) if isinstance(messages, list) else 0,
     }
 
 
@@ -216,11 +339,19 @@ def _extract_json(text: str) -> Dict[str, Any]:
 class LangGraphOrchestrator:
     """LangGraph 主编排器。"""
 
-    def __init__(self, config: Optional[AgentConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[AgentConfig] = None,
+        *,
+        enable_checkpointer: bool = True,
+    ) -> None:
         """初始化编排器依赖，并编译主图。
 
         Args:
             config: 可选配置对象；为空时从默认配置源加载。
+            enable_checkpointer: 是否挂载项目内自定义 PostgresSaver。
+                LangGraph API / langgraph dev 会自动注入平台持久化，
+                因此这类入口必须关闭自定义 checkpointer，避免图加载时报错。
         """
         # 读取运行配置：统一管理模型、数据库、图谱、工具服务等参数。
         self.config = config or AgentConfig.load()
@@ -231,6 +362,8 @@ class LangGraphOrchestrator:
             api_key=self.config.dashscope_api_key,
             base_url=self.config.dashscope_base_url,
             model=self.config.dashscope_model,
+            default_temperature=self.config.llm_temperature,
+            tool_temperature=self.config.llm_tool_temperature,
         )
         # 上下文构建器负责把多源证据压缩到 token 预算内。
         self.context_builder = ContextBuilder(
@@ -238,6 +371,7 @@ class LangGraphOrchestrator:
             llm_client=self.llm,
             compress_mode=self.config.context_compress_mode,
             compress_target_ratio=self.config.context_compress_target_ratio,
+            compress_temperature=self.config.llm_context_compress_temperature,
         )
         # 统一记忆管理器：工作记忆 + 情景记忆 + 语义记忆。
         self.memory_manager = MemoryManager(
@@ -257,32 +391,41 @@ class LangGraphOrchestrator:
         self.mcp_client = MCPToolClient(
             server_url=self.config.mcp_server_url,
             timeout_seconds=self.config.mcp_timeout_seconds,
-            tracer=self.tracer,
         )
+        self._checkpointer_cm = None
+        self.checkpointer = None
+        if enable_checkpointer:
+            # 项目主服务需要显式挂载 PostgresSaver，以便复用既有 thread/checkpoint 表。
+            self._checkpointer_cm = PostgresSaver.from_conn_string(
+                _build_postgres_dsn(self.config.postgres_url or "")
+            )
+            self.checkpointer = self._checkpointer_cm.__enter__()
+            self.checkpointer.setup()
+            atexit.register(self.close)
         # 启动时一次性编译执行图，后续复用同一图实例。
         self.graph = self._build_graph()
 
-    def respond(self, user_message: str, history: Optional[List[ConversationTurn]] = None) -> Tuple[str, Dict[str, Any]]:
-        """执行完整 LangGraph 主流程并返回最终答案。
+    def close(self) -> None:
+        """关闭 Postgres checkpointer 底层连接。"""
+        cm = getattr(self, "_checkpointer_cm", None)
+        if cm is None:
+            return
+        self._checkpointer_cm = None
+        try:
+            cm.__exit__(None, None, None)
+        except Exception as exc:
+            logger.debug("关闭 LangGraph Postgres checkpointer 失败 error=%s", exc)
 
-        执行顺序为：规划 -> 计划校验 -> 调度执行 -> 记忆补充 ->
-        冲突检查 -> 上下文构建 -> 答案生成 -> 记忆写回。
+    @staticmethod
+    def _thread_config(thread_id: str) -> Dict[str, Any]:
+        """构造 LangGraph 原生线程配置。"""
+        return {"configurable": {"thread_id": thread_id}}
 
-        Args:
-            user_message: 用户当前输入问题。
-            history: 可选多轮对话历史，按时间顺序传入。
-
-        Returns:
-            二元组 `(answer, metadata)`：
-            - answer: 最终自然语言回答。
-            - metadata: 追踪与可解释字段（来源、冲突、重规划次数等）。
-        """
-        history = history or []
-        trace_id = str(uuid.uuid4())
-        # LangGraph 的初始状态：后续每个节点只返回“增量字段”，由图引擎合并到该状态。
-        init_state: AgentGraphState = {
-            "query": user_message,
-            "history": history,
+    @staticmethod
+    def _build_turn_input(user_message: str, trace_id: str) -> AgentGraphState:
+        """构造单轮输入：仅追加当前用户消息，并重置本轮工作流字段。"""
+        return {
+            "messages": [HumanMessage(content=user_message)],
             "trace_id": trace_id,
             "plan_steps": [],
             "plan_reason": "",
@@ -303,123 +446,218 @@ class LangGraphOrchestrator:
             "metadata": {},
             "error": "",
         }
+
+    def get_state(self, thread_id: str):
+        """读取线程当前状态快照。"""
+        return self.graph.get_state(self._thread_config(thread_id))
+
+    def get_state_history(self, thread_id: str, limit: Optional[int] = None) -> List[Any]:
+        """读取线程 checkpoint 历史，按 LangGraph 默认顺序返回。"""
+        return list(self.graph.get_state_history(self._thread_config(thread_id), limit=limit))
+
+    def _prepare_turn(
+        self,
+        user_message: str,
+        thread_id: Optional[str],
+    ) -> Tuple[str, Dict[str, Any], str, AgentGraphState, Dict[str, Any]]:
+        """构造单轮执行所需的线程配置、输入状态与主流程追踪骨架。"""
+        resolved_thread_id = str(thread_id or uuid.uuid4())
+        thread_config = self._thread_config(resolved_thread_id)
+        previous_state = self.graph.get_state(thread_config)
+        previous_history_size = 0
+        if isinstance(getattr(previous_state, "values", None), dict):
+            previous_history_size = len(_resolve_history(previous_state.values))
+        trace_id = str(uuid.uuid4())
+        init_state = self._build_turn_input(user_message, trace_id)
         main_flow_trace: Dict[str, Any] = {
             "stage": "main_flow_start",
             "init_state_snapshot": _trace_state_snapshot(init_state),
-            "history_size": len(history),
+            "history_size": previous_history_size,
+            "thread_id": resolved_thread_id,
         }
+        return resolved_thread_id, thread_config, trace_id, init_state, main_flow_trace
 
-        # 根追踪 run：将整次问答链路绑定到同一个 trace 上，便于跨节点观测。
-        root_ctx = (
-            self.tracer.start_run(
-                name="langgraph_agent",
-                run_type="chain",
-                inputs={"question": user_message},
-                tags=["fusion", "langgraph", "qa"],
-                metadata={"trace_id": trace_id},
-            )
-            if self.tracer.enabled
-            else nullcontext()
+    def _build_root_trace_context(self, user_message: str, trace_id: str, thread_id: str):
+        """构造 root run 上下文。"""
+        if not self.tracer.enabled:
+            return nullcontext()
+        return trace(
+            name="langgraph_agent",
+            run_type="chain",
+            inputs={"question": user_message},
+            tags=self.tracer.build_tags(["fusion", "langgraph", "qa"]),
+            metadata=self.tracer.build_metadata({"trace_id": trace_id, "thread_id": thread_id}),
+            project_name=self.tracer.project_name,
+            client=self.tracer.client,
         )
 
+    def _build_auto_trace_context(self, run: Any, trace_id: str):
+        """构造 LangGraph 自动节点追踪上下文。"""
+        if not self.tracer.enabled:
+            return nullcontext()
+        if run and hasattr(run, "id"):
+            return tracing_context(
+                parent=run,
+                project_name=self.tracer.project_name,
+                client=self.tracer.client,
+                metadata={"trace_id": trace_id},
+            )
+        return tracing_context(enabled=False)
+
+    def _finalize_run(
+        self,
+        *,
+        final_state: Dict[str, Any],
+        trace_id: str,
+        thread_id: str,
+        node_records: List[Dict[str, Any]],
+        main_flow_trace: Dict[str, Any],
+        run: Any,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """统一构造最终 metadata / root 输出，供同步与流式共用。"""
+        answer = str(final_state.get("answer") or "")
+        evidences = list(final_state.get("evidences") or [])
+        evidence_items = _serialize_evidence_items(evidences)
+        evidence_sources = list(
+            dict.fromkeys(item.get("source", "") for item in evidence_items if str(item.get("source", "")).strip())
+        )
+        metadata = {
+            "sources": list(dict.fromkeys(final_state.get("sources") or [])),
+            "trace_id": trace_id,
+            "thread_id": thread_id,
+            "plan_reason": final_state.get("plan_reason", ""),
+            "conflicts": final_state.get("conflicts", []),
+            "replan_count": final_state.get("replan_count", 0),
+            "evidence_count": len(evidences),
+            "evidence_sources": evidence_sources,
+        }
+        final_state_output = {
+            "plan_steps_size": len(final_state.get("plan_steps") or []),
+            "completed_ids": [str(item) for item in (final_state.get("completed_ids") or [])[:30]],
+            "pending_ids": [str(item) for item in (final_state.get("pending_ids") or [])[:30]],
+            "conflicts": [str(item) for item in (final_state.get("conflicts") or [])[:20]],
+            "step_results": _trace_json(final_state.get("step_results") or {}, limit=6000),
+            "evidence_count": len(evidences),
+            "evidence_sources": evidence_sources,
+            "evidence_items": evidence_items,
+            "context_preview": _truncate(str(final_state.get("context") or ""), 1200),
+            "answer_preview": _truncate(answer, 1200),
+            "error": _truncate(str(final_state.get("error") or ""), 800),
+        }
+        main_flow_trace["final_state_snapshot"] = _trace_state_snapshot(final_state)
+        main_flow_trace["final_answer_preview"] = _truncate(answer, 1200)
+        if run:
+            run.add_outputs(
+                {
+                    "answer": answer,
+                    "metadata": metadata,
+                    "trace_version": "node_audit_v2",
+                    "node_records": node_records,
+                    "final_state_output": final_state_output,
+                    "main_flow_trace": main_flow_trace,
+                }
+            )
+        return answer, metadata
+
+    def respond(self, user_message: str, thread_id: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
+        """执行完整 LangGraph 主流程并返回最终答案。
+
+        执行顺序为：规划 -> 计划校验 -> 调度执行 -> 记忆补充 ->
+        冲突检查 -> 上下文构建 -> 答案生成 -> 记忆写回。
+
+        Args:
+            user_message: 用户当前输入问题。
+            thread_id: LangGraph 原生线程 ID；为空时生成临时线程。
+
+        Returns:
+            二元组 `(answer, metadata)`：
+            - answer: 最终自然语言回答。
+            - metadata: 追踪与可解释字段（来源、冲突、重规划次数等）。
+        """
+        resolved_thread_id, thread_config, trace_id, init_state, main_flow_trace = self._prepare_turn(
+            user_message, thread_id
+        )
+        root_ctx = self._build_root_trace_context(user_message, trace_id, resolved_thread_id)
+
         with root_ctx as run:
-            # 把根 run 放入 ContextVar，子节点/子线程可显式透传父 run 形成树状追踪。
-            token = _ROOT_RUN_CTX.set(run if run else None)
             node_records: List[Dict[str, Any]] = []
             node_token = _NODE_RECORDS_CTX.set(node_records)
-            auto_trace_ctx = (
-                tracing_context(
-                    parent=run,
-                    project_name=self.tracer.project_name,
-                    client=self.tracer.client,
-                    metadata={"trace_id": trace_id},
-                )
-                if self.tracer.enabled and run and hasattr(run, "id")
-                else tracing_context(enabled=False)
-                if self.tracer.enabled
-                else nullcontext()
-            )
+            auto_trace_ctx = self._build_auto_trace_context(run, trace_id)
             try:
                 # LangGraph 核心入口：从 init_state 出发执行至 END，得到最终状态快照。
                 with auto_trace_ctx:
-                    final_state = self.graph.invoke(init_state)
+                    final_state = self.graph.invoke(init_state, config=thread_config)
             finally:
                 _NODE_RECORDS_CTX.reset(node_token)
-                _ROOT_RUN_CTX.reset(token)
-
-            answer = str(final_state.get("answer") or "")
-            evidences = list(final_state.get("evidences") or [])
-            evidence_items = _serialize_evidence_items(evidences)
-            evidence_sources = list(
-                dict.fromkeys(item.get("source", "") for item in evidence_items if str(item.get("source", "")).strip())
+            return self._finalize_run(
+                final_state=final_state,
+                trace_id=trace_id,
+                thread_id=resolved_thread_id,
+                node_records=node_records,
+                main_flow_trace=main_flow_trace,
+                run=run,
             )
-            metadata = {
-                # 对 sources 去重并保序，避免重复来源污染前端展示。
-                "sources": list(dict.fromkeys(final_state.get("sources") or [])),
-                "trace_id": trace_id,
-                "plan_reason": final_state.get("plan_reason", ""),
-                "conflicts": final_state.get("conflicts", []),
-                "replan_count": final_state.get("replan_count", 0),
-                "evidence_count": len(evidences),
-                "evidence_sources": evidence_sources,
-            }
-            final_state_output = {
-                "plan_steps_size": len(final_state.get("plan_steps") or []),
-                "completed_ids": [str(item) for item in (final_state.get("completed_ids") or [])[:30]],
-                "pending_ids": [str(item) for item in (final_state.get("pending_ids") or [])[:30]],
-                "conflicts": [str(item) for item in (final_state.get("conflicts") or [])[:20]],
-                "step_results": _trace_json(final_state.get("step_results") or {}, limit=6000),
-                "evidence_count": len(evidences),
-                "evidence_sources": evidence_sources,
-                "evidence_items": evidence_items,
-                "context_preview": _truncate(str(final_state.get("context") or ""), 1200),
-                "answer_preview": _truncate(answer, 1200),
-                "error": _truncate(str(final_state.get("error") or ""), 800),
-            }
-            main_flow_trace["final_state_snapshot"] = _trace_state_snapshot(final_state)
-            main_flow_trace["final_answer_preview"] = _truncate(answer, 1200)
-            if run:
-                run.add_outputs(
-                    {
-                        "answer": answer,
-                        "metadata": metadata,
-                        "trace_version": "single_trace_auto_v1",
-                        "node_records": node_records,
-                        "final_state_output": final_state_output,
-                        "main_flow_trace": main_flow_trace,
-                    }
-                )
-            return answer, metadata
 
     def stream_response(
         self,
         user_message: str,
-        history: Optional[List[ConversationTurn]] = None,
-    ) -> Tuple[Iterable[str], Dict[str, Any]]:
-        """提供兼容流式消费的回答接口。
-
-        当前实现是“先全量生成，再分块输出”的伪流式模式，优点是实现简单、
-        与现有 `respond` 流程保持一致；缺点是不具备真正 token 级实时性。
+        thread_id: Optional[str] = None,
+    ) -> Tuple[Iterable[Any], Dict[str, Any]]:
+        """基于 LangGraph 原生 `stream()` 提供流式回答接口。
 
         Args:
             user_message: 用户当前输入问题。
-            history: 可选历史对话。
+            thread_id: LangGraph 原生线程 ID；为空时生成临时线程。
 
         Returns:
-            二元组 `(iterable_chunks, metadata)`。
+            二元组 `(iterable_events, metadata)`：
+            - iterable_events: LangGraph 原生流事件，当前包含 `custom` 与 `updates`；
+            - metadata: 初始元数据字典，流结束后会原地补齐最终 sources/conflicts 等字段。
         """
-        # 当前实现是“伪流式”：先拿完整答案，再切分为小块向上游发送。
-        answer, metadata = self.respond(user_message, history=history)
+        resolved_thread_id, thread_config, trace_id, init_state, main_flow_trace = self._prepare_turn(
+            user_message, thread_id
+        )
+        metadata: Dict[str, Any] = {
+            "trace_id": trace_id,
+            "thread_id": resolved_thread_id,
+            "sources": [],
+            "conflicts": [],
+            "plan_reason": "",
+            "replan_count": 0,
+            "evidence_count": 0,
+            "evidence_sources": [],
+        }
 
-        def _iter() -> Iterable[str]:
-            """按固定分片大小迭代返回答案文本。"""
-            if not answer:
-                yield ""
-                return
-            # 固定块大小，便于前端按片段渲染。
-            chunk_size = 32
-            for idx in range(0, len(answer), chunk_size):
-                yield answer[idx : idx + chunk_size]
+        def _iter() -> Iterable[Any]:
+            """直接透传 LangGraph `stream()` 产生的事件，并在结束后补齐 root 输出。"""
+            root_ctx = self._build_root_trace_context(user_message, trace_id, resolved_thread_id)
+            with root_ctx as run:
+                node_records: List[Dict[str, Any]] = []
+                node_token = _NODE_RECORDS_CTX.set(node_records)
+                auto_trace_ctx = self._build_auto_trace_context(run, trace_id)
+                try:
+                    with auto_trace_ctx:
+                        for event in self.graph.stream(
+                            init_state,
+                            config=thread_config,
+                            stream_mode=["custom", "updates"],
+                        ):
+                            yield event
+                finally:
+                    _NODE_RECORDS_CTX.reset(node_token)
+
+                state_snapshot = self.graph.get_state(thread_config)
+                final_values = getattr(state_snapshot, "values", None)
+                final_state = final_values if isinstance(final_values, dict) else {}
+                _, final_metadata = self._finalize_run(
+                    final_state=final_state,
+                    trace_id=trace_id,
+                    thread_id=resolved_thread_id,
+                    node_records=node_records,
+                    main_flow_trace=main_flow_trace,
+                    run=run,
+                )
+                metadata.update(final_metadata)
 
         return _iter(), metadata
 
@@ -476,7 +714,11 @@ class LangGraphOrchestrator:
         # END 是 LangGraph 的结束哨兵。
         workflow.add_edge("write_memory", END)
         # compile() 把声明式图结构编译成可 invoke 的运行时对象。
-        return workflow.compile()
+        # 当 graph 由 langgraph dev / LangGraph API 托管时，平台会自动注入持久化，
+        # 这里不能再额外挂项目自定义 checkpointer。
+        if self.checkpointer is None:
+            return workflow.compile()
+        return workflow.compile(checkpointer=self.checkpointer)
 
     @staticmethod
     def _after_dispatch(state: AgentGraphState) -> str:
@@ -512,7 +754,7 @@ class LangGraphOrchestrator:
         return "build_context"
 
     def _trace_node(self, name: str, state: AgentGraphState, fn):
-        """统一包装节点执行，记录节点输入输出到 root run 聚合字段。
+        """统一包装节点执行，并把完整节点审计写入自动节点 run。
 
         Args:
             name: 节点名称，用于追踪标记。
@@ -526,6 +768,7 @@ class LangGraphOrchestrator:
         started_at = time.time()
         started_perf = time.perf_counter()
         current_run = get_current_run_tree()
+        input_snapshot = _trace_state_snapshot(state)
         try:
             # fn 返回“局部状态更新字典”，由 LangGraph 自动与全局状态合并。
             output = fn()
@@ -535,15 +778,23 @@ class LangGraphOrchestrator:
                 raw_trace_extras = output.pop("_trace_outputs", None)
                 if isinstance(raw_trace_extras, dict):
                     trace_extras = raw_trace_extras
+
             prompt_records_raw = trace_extras.pop("prompt_records", [])
             prompt_records = prompt_records_raw if isinstance(prompt_records_raw, list) else []
+            business_input = _to_jsonable(trace_extras.pop("business_input", {}))
+            context_payload = _to_jsonable(trace_extras.pop("context_payload", {}))
+            business_output = _to_jsonable(trace_extras.pop("business_output", {}))
+            remaining_extras = _to_jsonable(trace_extras)
+            state_update = _to_jsonable(output)
             record = {
                 "node_name": name,
                 "status": "ok",
                 "started_at": started_at,
                 "ended_at": time.time(),
                 "duration_ms": int((time.perf_counter() - started_perf) * 1000),
-                "input_snapshot": _trace_state_snapshot(state),
+                "input_snapshot": input_snapshot,
+                "business_input": business_input,
+                "context_payload": context_payload,
                 "output_summary": {
                     "keys": sorted(output.keys()) if isinstance(output, dict) else [],
                     "pending_size": len(output.get("pending_ids", state.get("pending_ids", [])))
@@ -557,60 +808,85 @@ class LangGraphOrchestrator:
                     else False,
                     "sources_size": len(output.get("sources", state.get("sources", []))) if isinstance(output, dict) else 0,
                 },
-                "prompt_records": prompt_records,
+                "prompt_records": _to_jsonable(prompt_records),
+                "business_output": business_output,
+                "state_update": state_update,
                 "final_output": _trace_json(output, limit=10000),
             }
-            if trace_extras:
-                record["trace_extras"] = trace_extras
+            if remaining_extras:
+                record["trace_extras"] = remaining_extras
             if isinstance(node_records, list):
                 node_records.append(record)
             if current_run is not None:
                 try:
-                    # 同步写入当前 LangGraph 自动节点 run，便于在单节点详情页直接排障。
+                    # 节点详情页直接展示完整输入：state / prompt / context / 业务输入。
+                    current_run.add_inputs(
+                        {
+                            "node_name": name,
+                            "state_snapshot": input_snapshot,
+                            "business_input": business_input,
+                            "prompt_records": record["prompt_records"],
+                            "context_payload": context_payload,
+                        }
+                    )
                     current_run.add_outputs(
                         {
-                            "node_audit": {
-                                "node_name": name,
-                                "input_snapshot": record["input_snapshot"],
-                                "output_summary": record["output_summary"],
-                                "prompt_records": prompt_records,
-                                "trace_extras": trace_extras,
-                            }
+                            "node_name": name,
+                            "status": "ok",
+                            "duration_ms": record["duration_ms"],
+                            "output_summary": record["output_summary"],
+                            "business_output": business_output,
+                            "state_update": state_update,
+                            "state_update_preview": record["final_output"],
+                            "trace_extras": remaining_extras,
                         }
                     )
                 except Exception as trace_exc:
-                    logger.debug("节点追踪输出写入失败 node=%s error=%s", name, trace_exc)
+                    logger.debug("节点追踪写入失败 node=%s error=%s", name, trace_exc)
             return output
         except Exception as exc:
+            error_record = {
+                "node_name": name,
+                "status": "error",
+                "started_at": started_at,
+                "ended_at": time.time(),
+                "duration_ms": int((time.perf_counter() - started_perf) * 1000),
+                "input_snapshot": input_snapshot,
+                "business_input": {},
+                "context_payload": {},
+                "output_summary": {"keys": [], "pending_size": 0, "completed_size": 0, "need_replan": False, "sources_size": 0},
+                "prompt_records": [],
+                "business_output": {},
+                "state_update": {},
+                "final_output": "",
+                "error": str(exc),
+            }
             if isinstance(node_records, list):
-                node_records.append(
-                    {
-                        "node_name": name,
-                        "status": "error",
-                        "started_at": started_at,
-                        "ended_at": time.time(),
-                        "duration_ms": int((time.perf_counter() - started_perf) * 1000),
-                        "input_snapshot": _trace_state_snapshot(state),
-                        "output_summary": {"keys": [], "pending_size": 0, "completed_size": 0, "need_replan": False, "sources_size": 0},
-                        "prompt_records": [],
-                        "final_output": "",
-                        "error": str(exc),
-                    }
-                )
+                node_records.append(error_record)
             if current_run is not None:
                 try:
+                    current_run.add_inputs(
+                        {
+                            "node_name": name,
+                            "state_snapshot": input_snapshot,
+                            "business_input": {},
+                            "prompt_records": [],
+                            "context_payload": {},
+                        }
+                    )
                     current_run.add_outputs(
                         {
-                            "node_audit": {
-                                "node_name": name,
-                                "status": "error",
-                                "error": str(exc),
-                                "input_snapshot": _trace_state_snapshot(state),
-                            }
+                            "node_name": name,
+                            "status": "error",
+                            "duration_ms": error_record["duration_ms"],
+                            "error": str(exc),
+                            "output_summary": error_record["output_summary"],
+                            "business_output": {},
+                            "state_update": {},
                         }
                     )
                 except Exception as trace_exc:
-                    logger.debug("节点异常追踪输出写入失败 node=%s error=%s", name, trace_exc)
+                    logger.debug("节点异常追踪写入失败 node=%s error=%s", name, trace_exc)
             raise
 
     def _plan_node(self, state: AgentGraphState) -> Dict[str, Any]:
@@ -628,9 +904,16 @@ class LangGraphOrchestrator:
         """
         def _impl() -> Dict[str, Any]:
             """节点内部实现：调用 LLM 生成计划并做基础容错。"""
-            query = str(state.get("query") or "")
+            query = _resolve_query(state)
+            history = _resolve_history(state)
             trace_id = str(state.get("trace_id") or "")
-            trace_outputs: Dict[str, Any] = {}
+            trace_outputs: Dict[str, Any] = {
+                "business_input": {
+                    "query": _truncate(query, 500),
+                    "history_size": len(history),
+                    "replan_count": int(state.get("replan_count", 0)),
+                }
+            }
             # 重规划时将上一轮计划、步骤结果摘要及彻底失败的工具列表传给 planner。
             previous_plan_steps, previous_step_summaries, permanently_failed_tools = self._build_previous_plan_payload(state)
             # 每轮规划前重新探测工具可用性，适配 MCP 工具热插拔与重规划场景。
@@ -651,13 +934,17 @@ class LangGraphOrchestrator:
                 "max_rows": self.config.nl2sql_max_rows,
                 "history_tail": [
                     {"role": turn.role, "content": _truncate(turn.content, 200)}
-                    for turn in (state.get("history") or [])[-4:]
+                    for turn in history[-4:]
                 ],
                 "replan_count": int(state.get("replan_count", 0)),
                 "previous_conflicts": state.get("conflicts", []),
                 "previous_plan_steps": previous_plan_steps,
                 "previous_step_summaries": previous_step_summaries,
                 "permanently_failed_tools": permanently_failed_tools,
+            }
+            trace_outputs["context_payload"] = {
+                "planner_payload": payload,
+                "trace_id": trace_id,
             }
             # 使用结构化 tool_call + schema，强约束计划输出字段。
             messages = [
@@ -730,6 +1017,11 @@ class LangGraphOrchestrator:
             trace_outputs["prompt_records"] = prompt_records
             trace_outputs["plan_steps_size"] = len(plan.steps)
             trace_outputs["plan_reason"] = plan.reason
+            trace_outputs["business_output"] = {
+                "plan_reason": plan.reason,
+                "plan_steps": [step.to_dict() for step in plan.steps],
+                "max_replans": plan.max_replans,
+            }
             return {
                 "available_tools": available_tools,
                 "plan_steps": [step.to_dict() for step in plan.steps],
@@ -781,8 +1073,12 @@ class LangGraphOrchestrator:
                     step.step_id = f"{step.step_id}_{idx + 1}"
                 used_ids.add(step.step_id)
 
-                # 如果工具不可使用则降级
-                if step.tool in {"nl2sql", "rag", "graph"} and not available_tools.get(step.tool, False):
+                # 如果工具不可使用，或规划器给出了当前执行层不支持的工具，则统一降级。
+                if (
+                    step.tool in {"nl2sql", "rag", "graph"} and not available_tools.get(step.tool, False)
+                ) or (
+                    step.tool not in {"nl2sql", "rag", "graph", "none"} and not available_tools.get(step.tool, False)
+                ):
                     # 工具不可用时优先降级到 rag，再降级为 none
                     if available_tools.get("rag", False):
                         step.tool = "rag"
@@ -800,7 +1096,7 @@ class LangGraphOrchestrator:
                 # 计划全失效时生成 no-op 保底步骤，避免主图崩溃。
                 fallback = GraphPlanStep(
                     step_id="step_1",
-                    objective=str(state.get("query") or ""),
+                    objective=_resolve_query(state),
                     tool="none",
                     arguments={},
                     depends_on=[],
@@ -917,11 +1213,6 @@ class LangGraphOrchestrator:
             pending = [step_id for step_id in (state.get("pending_ids") or []) if step_id not in ready_ids]
             completed = list(state.get("completed_ids") or [])
 
-            # ----- 3. 追踪父 run（供 MCP 子 span 挂载） -----
-            # 并行线程不会继承 ContextVar，故在主线程提前取 root_run 并透传到 _execute_single_step。
-            # respond() 调用时 _ROOT_RUN_CTX 有值；LangGraph Studio/API 直接 invoke 时无值，
-            # 退化为当前节点 run，使 MCP 工具在 LangSmith trace 中显示为 execute_ready 的子 span。
-            root_run = _ROOT_RUN_CTX.get() or get_current_run_tree()
             tool_input_records: List[Dict[str, Any]] = []
             tool_output_records: List[Dict[str, Any]] = []
             futures: Dict[Any, str] = {}
@@ -930,8 +1221,8 @@ class LangGraphOrchestrator:
             max_workers = max(1, min(4, len(ready_ids)))
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 def _run_step_in_context(step_payload: Dict[str, Any], ctx: contextvars.Context):
-                    """在线程中恢复父上下文，保证 LangSmith 自动追踪能继承 parent。"""
-                    return ctx.run(self._execute_single_step, step_payload, state, root_run)
+                    """在线程中恢复父上下文，保证 LangSmith 当前节点上下文可透传到工具调用。"""
+                    return ctx.run(self._execute_single_step, step_payload, state)
 
                 for step_id in ready_ids:
                     step = step_map.get(step_id)
@@ -1024,6 +1315,15 @@ class LangGraphOrchestrator:
 
             # ----- 5. 组装节点追踪输出（供 LangSmith 节点详情与 root 聚合） -----
             trace_outputs = {
+                "business_input": {
+                    "ready_ids": ready_ids,
+                    "pending_ids": list(state.get("pending_ids") or []),
+                    "completed_ids": list(state.get("completed_ids") or []),
+                },
+                "context_payload": {
+                    "plan_steps_size": len(state.get("plan_steps") or []),
+                    "step_results_size_before": len(state.get("step_results") or {}),
+                },
                 "prompt_records": [
                     {"stage": "tool_dispatch_inputs", "ready_ids": ready_ids, "tools": tool_input_records},
                     {
@@ -1037,7 +1337,14 @@ class LangGraphOrchestrator:
                             "sources_size": len(sources),
                         },
                     },
-                ]
+                ],
+                "business_output": {
+                    "pending_ids": pending,
+                    "completed_ids": completed,
+                    "step_results_size": len(step_results),
+                    "evidences_size": len(evidences),
+                    "sources_size": len(sources),
+                },
             }
 
             # ----- 6. 返回局部状态更新（LangGraph 会与全局 state 合并） -----
@@ -1065,20 +1372,19 @@ class LangGraphOrchestrator:
         """
         def _impl() -> Dict[str, Any]:
             """节点内部实现：优先本地记忆检索，按能力开关调用 note 工具。"""
-            query = str(state.get("query") or "")
+            query = _resolve_query(state)
             trace_id = str(state.get("trace_id") or "")
+            available_tools = state.get("available_tools") or {}
 
             # 统一记忆检索：从工作/情景/语义记忆中取与当前问题最相关的片段。
             memories = self.memory_manager.search(query, top_k=5)
             notes: List[str] = []
-            available_tools = state.get("available_tools") or {}
             if available_tools.get("note", False):
                 try:
                     payload = self.mcp_client.call_tool(
                         "note_search",
                         {"query": query, "limit": 3, "trace_id": trace_id},
                         trace_id=trace_id,
-                        root_run=_ROOT_RUN_CTX.get(),
                     )
                     raw_notes = payload.get("notes", []) if isinstance(payload, dict) else []
                     if isinstance(raw_notes, list):
@@ -1089,6 +1395,19 @@ class LangGraphOrchestrator:
             return {
                 "memories": memories,
                 "notes": notes,
+                "_trace_outputs": {
+                    "business_input": {
+                        "query": _truncate(query, 500),
+                        "note_tool_enabled": bool(available_tools.get("note", False)),
+                    },
+                    "context_payload": {
+                        "memory_search_top_k": 5,
+                    },
+                    "business_output": {
+                        "memories": memories,
+                        "notes": notes,
+                    },
+                },
             }
 
         return self._trace_node("collect_memory_notes", state, _impl)
@@ -1107,7 +1426,14 @@ class LangGraphOrchestrator:
             step_results = state.get("step_results") or {}
             replan_count = int(state.get("replan_count", 0))
             max_replans = int(state.get("max_replans", 1))
-            trace_outputs: Dict[str, Any] = {}
+            trace_outputs: Dict[str, Any] = {
+                "business_input": {
+                    "query": _truncate(_resolve_query(state), 500),
+                    "replan_count": replan_count,
+                    "max_replans": max_replans,
+                    "step_results_size": len(step_results),
+                }
+            }
 
             conflicts = list(state.get("conflicts") or [])
             need_replan = False
@@ -1121,16 +1447,24 @@ class LangGraphOrchestrator:
                     "need_replan": need_replan,
                     "replan_count": replan_count + 1 if need_replan else replan_count,
                     "_trace_outputs": {
+                        "business_input": trace_outputs["business_input"],
                         "prompt_records": [],
                         "verdict": "no_evidence",
                         "conflicts_size": len(conflicts),
+                        "business_output": {
+                            "verdict": "no_evidence",
+                            "conflicts": conflicts,
+                            "need_replan": need_replan,
+                            "replan_count_after": replan_count + 1 if need_replan else replan_count,
+                        },
                     },
                 }
 
             payload = {
-                "query": state.get("query", ""),
+                "query": _resolve_query(state),
                 "step_results": step_results,
             }
+            trace_outputs["context_payload"] = {"conflict_payload": payload}
             messages = [
                 LLMMessage(role="system", content=LANGGRAPH_CONFLICT_PROMPT),
                 LLMMessage(role="user", content=json.dumps(payload, ensure_ascii=False)),
@@ -1169,6 +1503,12 @@ class LangGraphOrchestrator:
             trace_outputs["prompt_records"] = prompt_records
             trace_outputs["verdict"] = verdict
             trace_outputs["conflicts_size"] = len(conflicts)
+            trace_outputs["business_output"] = {
+                "verdict": verdict,
+                "conflicts": conflicts,
+                "need_replan": need_replan,
+                "replan_count_after": replan_count + 1 if need_replan else replan_count,
+            }
             return {
                 "conflicts": conflicts,
                 "need_replan": need_replan,
@@ -1189,11 +1529,13 @@ class LangGraphOrchestrator:
         """
         def _impl() -> Dict[str, Any]:
             """节点内部实现：调用 ContextBuilder 做上下文拼装与裁剪。"""
+            query = _resolve_query(state)
+            history = _resolve_history(state)
             # ContextBuilder 负责把“系统提示词 + 证据 + 记忆 + 历史”压缩为单轮上下文。
             context, trace_payload = self.context_builder.build_with_trace(
                 system_prompt=SYSTEM_PROMPT,
-                user_query=str(state.get("query") or ""),
-                history=list(state.get("history") or []),
+                user_query=query,
+                history=history,
                 memories=list(state.get("memories") or []),
                 evidences=list(state.get("evidences") or []),
                 notes=list(state.get("notes") or []),
@@ -1205,6 +1547,18 @@ class LangGraphOrchestrator:
             return {
                 "context": context,
                 "_trace_outputs": {
+                    "business_input": {
+                        "query": _truncate(query, 500),
+                        "history_size": len(history),
+                        "memories_size": len(state.get("memories") or []),
+                        "evidences_size": len(state.get("evidences") or []),
+                        "notes_size": len(state.get("notes") or []),
+                    },
+                    "context_payload": {
+                        "context_before_preview": _truncate(context_before, 5000),
+                        "context_after_preview": _truncate(context_after, 5000),
+                        "context_build_stats": trace_payload,
+                    },
                     "prompt_records": [
                         {
                             "stage": "context_before_compress",
@@ -1217,7 +1571,10 @@ class LangGraphOrchestrator:
                             "token_estimate": trace_payload.get("token_stats", {}).get("after_compress"),
                         },
                     ],
-                    "context_build_stats": trace_payload,
+                    "business_output": {
+                        "context_preview": _truncate(context, 5000),
+                        "token_stats": trace_payload.get("token_stats", {}),
+                    },
                 },
             }
 
@@ -1233,17 +1590,49 @@ class LangGraphOrchestrator:
             局部更新：`answer`。
         """
         def _impl() -> Dict[str, Any]:
-            """节点内部实现：以系统提示词 + 上下文调用 LLM 对话接口。"""
+            """节点内部实现：以系统提示词 + 上下文调用 LLM 流式接口。
+
+            这里直接使用 LangGraph 原生 custom stream：
+            - 节点内部通过 `get_stream_writer()` 发出 assistant 增量文本；
+            - `graph.stream(..., stream_mode=["custom", "updates"])` 会把这些事件透传到上层；
+            - 最终仍返回完整 answer/messages，保证 checkpoint 与非流式调用语义一致。
+            """
             context = str(state.get("context") or "")
             # 生成节点只消费 build_context 的产物，避免直接依赖中间执行细节。
             messages = [
                 LLMMessage(role="system", content=SYSTEM_PROMPT),
                 LLMMessage(role="user", content=context),
             ]
-            answer = self.llm.chat(messages)
+            writer = get_stream_writer()
+            answer_parts: List[str] = []
+            chunk_count = 0
+            for chunk in self.llm.chat_stream(messages):
+                if not chunk:
+                    continue
+                answer_parts.append(chunk)
+                chunk_count += 1
+                writer(
+                    {
+                        "event": "messages",
+                        "role": "assistant",
+                        "content": chunk,
+                        "node": "generate_answer",
+                    }
+                )
+            answer = "".join(answer_parts).strip()
             return {
                 "answer": answer,
+                "messages": [AIMessage(content=answer)],
                 "_trace_outputs": {
+                    "business_input": {
+                        "context_length": len(context),
+                    },
+                    "context_payload": {
+                        "messages": [
+                            {"role": "system", "content": _truncate(SYSTEM_PROMPT, 2000)},
+                            {"role": "user", "content": _truncate(context, 5000)},
+                        ]
+                    },
                     "prompt_records": [
                         {
                             "stage": "generate_answer_request",
@@ -1253,8 +1642,13 @@ class LangGraphOrchestrator:
                         {
                             "stage": "generate_answer_response",
                             "answer_preview": _truncate(answer, 2000),
+                            "chunk_count": chunk_count,
                         },
-                    ]
+                    ],
+                    "business_output": {
+                        "answer": _truncate(answer, 5000),
+                        "chunk_count": chunk_count,
+                    },
                 },
             }
 
@@ -1271,7 +1665,7 @@ class LangGraphOrchestrator:
         """
         def _impl() -> Dict[str, Any]:
             """节点内部实现：将问答摘要写入记忆系统。"""
-            question = str(state.get("query") or "")
+            question = _resolve_query(state)
             answer = str(state.get("answer") or "")
             # 问答闭环：先写工作记忆，再按阈值抽取语义记忆。
             self.memory_manager.add_memory(
@@ -1282,7 +1676,17 @@ class LangGraphOrchestrator:
                 )
             )
             self._maybe_write_semantic_memory(question, answer)
-            return {}
+            return {
+                "_trace_outputs": {
+                    "business_input": {
+                        "question": _truncate(question, 500),
+                        "answer": _truncate(answer, 2000),
+                    },
+                    "business_output": {
+                        "memory_written": True,
+                    },
+                }
+            }
 
         return self._trace_node("write_memory", state, _impl)
 
@@ -1290,14 +1694,12 @@ class LangGraphOrchestrator:
         self,
         step: Dict[str, Any],
         state: AgentGraphState,
-        root_run: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """执行单个计划步骤并路由到对应工具执行器。
 
         Args:
             step: 单个计划步骤（来自 `plan_steps`）。
             state: 当前图状态，用于读取 `trace_id` 与工具能力上下文。
-            root_run: 可选根追踪对象，用于跨线程保持追踪父子关系。
 
         Returns:
             标准化步骤结果，包含 `status/result/evidences/sources` 字段。
@@ -1357,11 +1759,11 @@ class LangGraphOrchestrator:
         try:
             # 工具分发器：根据 step.tool 路由到不同执行器。
             if tool == "nl2sql":
-                result = self._run_nl2sql_step(step_id, objective, arguments, trace_id, root_run=root_run)
+                result = self._run_nl2sql_step(step_id, objective, arguments, trace_id)
             elif tool == "rag":
-                result = self._run_rag_step(step_id, objective, arguments, trace_id, root_run=root_run)
+                result = self._run_rag_step(step_id, objective, arguments, trace_id)
             elif tool == "graph":
-                result = self._run_graph_step(step_id, objective, arguments, trace_id, root_run=root_run)
+                result = self._run_graph_step(step_id, objective, arguments, trace_id)
             else:
                 result = {
                     "step_id": step_id,
@@ -1400,7 +1802,6 @@ class LangGraphOrchestrator:
         objective: str,
         arguments: Dict[str, Any],
         trace_id: str,
-        root_run: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """执行 NL2SQL 工具步骤并产出可解释证据。
 
@@ -1409,8 +1810,6 @@ class LangGraphOrchestrator:
             objective: 步骤目标描述。
             arguments: 步骤参数（question/tables/enable_column_retrieval）。
             trace_id: 链路追踪 ID。
-            root_run: 可选根追踪对象。
-
         Returns:
             标准化步骤结果，`result` 中包含 SQL 与查询结果。
         """
@@ -1438,7 +1837,6 @@ class LangGraphOrchestrator:
                         "trace_id": trace_id,
                     },
                     trace_id=trace_id,
-                    root_run=root_run,
                 )
             except Exception as exc:
                 # 重试时把首次报错注入上下文，帮助 NL2SQL 修正失败原因。
@@ -1464,7 +1862,6 @@ class LangGraphOrchestrator:
                             "trace_id": trace_id,
                         },
                         trace_id=trace_id,
-                        root_run=root_run,
                     )
                 except Exception as retry_exc:
                     items.append(
@@ -1605,7 +2002,6 @@ class LangGraphOrchestrator:
         objective: str,
         arguments: Dict[str, Any],
         trace_id: str,
-        root_run: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """执行 RAG 检索步骤并抽取文档证据片段。
 
@@ -1614,8 +2010,6 @@ class LangGraphOrchestrator:
             objective: 步骤目标描述。
             arguments: 步骤参数（query/top_k）。
             trace_id: 链路追踪 ID。
-            root_run: 可选根追踪对象。
-
         Returns:
             标准化步骤结果，`result` 为 rag_search 原始返回。
         """
@@ -1629,7 +2023,6 @@ class LangGraphOrchestrator:
             "rag_search",
             {"query": query, "top_k": top_k, "trace_id": trace_id},
             trace_id=trace_id,
-            root_run=root_run,
         )
 
         chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
@@ -1666,7 +2059,6 @@ class LangGraphOrchestrator:
         objective: str,
         arguments: Dict[str, Any],
         trace_id: str,
-        root_run: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """执行图数据库查询步骤（LlamaIndex Text2Cypher）。
 
@@ -1675,8 +2067,6 @@ class LangGraphOrchestrator:
             objective: 步骤目标描述。
             arguments: 步骤参数（question/max_rows）。
             trace_id: 链路追踪 ID。
-            root_run: 可选根追踪对象。
-
         Returns:
             标准化步骤结果，`result` 为 neo4j_llamaindex_query 返回内容。
         """
@@ -1709,7 +2099,6 @@ class LangGraphOrchestrator:
                         "neo4j_llamaindex_query",
                         call_args,
                         trace_id=trace_id,
-                        root_run=root_run,
                     )
                     break  # 成功，退出重试循环
                 except Exception as exc:
@@ -2048,7 +2437,7 @@ class LangGraphOrchestrator:
         }
         try:
             # 运行时发现而非静态配置，支持工具服务热插拔。
-            tools = self.mcp_client.list_tools_sync(trace_id=trace_id, root_run=_ROOT_RUN_CTX.get())
+            tools = self.mcp_client.list_tools_sync(trace_id=trace_id)
             names = {str(item.get("name") or "").strip() for item in tools if isinstance(item, dict)}
             available["nl2sql"] = "nl2sql_query" in names
             available["rag"] = "rag_search" in names

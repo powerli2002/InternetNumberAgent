@@ -30,9 +30,11 @@
 
 - 保留 LangGraph/LangSmith 自动追踪。
 - 不再手工创建 `graph_node:*` runs（避免与自动节点重复）。
-- MCP 客户端创建 `mcp_tool:*` / `mcp_list_tools` 子 runs，但仅在存在有效 `root_run` 时创建并绑定 `parent`。
+- MCP 客户端只透传 LangSmith 分布式追踪 headers，不再手工创建 `mcp_tool:*` / `mcp_list_tools` 子 runs。
 - 每次请求创建一个 root run：`langgraph_agent`。
-- `graph.invoke(...)` 在 `tracing_context(parent=root_run)` 内执行。
+- 图编译时已挂 `PostgresSaver`，请求通过 `configurable.thread_id` 进入 LangGraph 原生 checkpoint 流程。
+- `graph.invoke(..., config={"configurable": {"thread_id": ...}})` 在 `tracing_context(parent=root_run)` 内执行。
+- MCP 服务端通过 `TracingMiddleware + ls_trace()` 记录工具 span，并自动挂到当前节点 run 下。
 - root run 输出包含聚合字段：
   - `trace_version`
   - `node_records`
@@ -45,12 +47,7 @@
 - worker 通过 `ctx.run(...)` 执行步骤，继承父追踪上下文。
 - `todo` 子规划在同一上下文内调用 LLM，不会新开根 trace。
 
-### 3.3 采样策略
-
-- 采样按请求一次决策（root run 决定）。
-- child run 不再独立随机采样，避免“无 root 有 child”的孤儿链路。
-
-### 3.4 关键节点上下文记录（新增）
+### 3.3 关键节点上下文记录（新增）
 
 - 主流程开始/结束：
   - root 输出 `main_flow_trace.init_state_snapshot`
@@ -68,17 +65,24 @@
   - `generate_answer` 节点 `prompt_records` 记录请求上下文与答案预览
   - root 输出 `final_state_output` 与最终 `answer`
 
-### 3.5 节点详情页可见性（新增）
+### 3.4 节点详情页可见性（新增）
 
-- 每个自动节点 run（如 `plan`）的输出里新增 `node_audit` 字段。
-- `node_audit` 包含：
-  - `input_snapshot`
-  - `output_summary`
+- 每个自动节点 run（如 `plan`）直接写入标准化审计字段。
+- 节点输入位于 run `inputs`：
+  - `state_snapshot`
+  - `business_input`
   - `prompt_records`
+  - `context_payload`
+- 节点输出位于 run `outputs`：
+  - `status`
+  - `duration_ms`
+  - `output_summary`
+  - `state_update`
+  - `business_output`
   - `trace_extras`
-- 因此无需只依赖 root 的 `node_records`，可直接在节点详情页查看解析信息。
+- 因此无需只依赖 root 的 `node_records`，可直接在节点详情页查看完整节点审计。
 
-### 3.6 LangGraph Studio 与 MCP 工具展示
+### 3.5 LangGraph Studio 与 MCP 工具展示
 
 **为什么图里看不到 MCP 工具（nl2sql / rag / graph / todo）？**
 
@@ -87,8 +91,8 @@
 
 **在哪里能看到 MCP 工具调用？**
 
-- 在 **LangSmith 的 Run 树 / Trace 视图**中：展开 **`execute_ready`** 节点，其下会出现子 run（如 `mcp_tool:nl2sql_query`、`mcp_tool:rag_query`、`mcp_tool:graph_query` 等），即每次 MCP 调用的输入输出与耗时。
-- 通过 Studio 直接 `graph.invoke()` 时，代码已做兼容：当没有 `respond()` 的根 run 时，会以当前节点 run（`execute_ready`）为 parent 创建 MCP 子 run，保证在 trace 树中可见。
+- 在 **LangSmith 的 Run 树 / Trace 视图**中：展开 **`execute_ready`** 节点，其下会出现 MCP 服务端工具 span（如 `nl2sql_query`、`rag_search`、`neo4j_llamaindex_query` 等），即每次工具调用的输入输出与耗时。
+- 这些工具 span 由 MCP Server 侧的 `TracingMiddleware + ls_trace()` 生成；客户端只负责透传分布式追踪头。
 
 **若希望在图里看到“工具级”节点：** 需要改架构，把每种工具做成独立图节点（如 `add_node("nl2sql", ...)`）并由 dispatch 条件边路由到对应节点；当前实现是“单节点内多工具分发”，图视图只到 `execute_ready` 这一层。
 
@@ -101,7 +105,6 @@ LANGSMITH_TRACING=true
 LANGSMITH_API_KEY=...
 LANGSMITH_WORKSPACE_ID=...
 LANGSMITH_PROJECT=internet-number-qa
-LANGSMITH_SAMPLE_RATE=1.0
 LANGSMITH_DEFAULT_TAGS=fusion,langgraph,mcp
 ```
 
@@ -122,7 +125,7 @@ uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
 3. 验证：
    - trace 数量：1
    - root run：`langgraph_agent`
-   - 子 run：自动节点/LLM runs，均有父子关系
+   - 子 run：自动节点/LLM runs 与 MCP 服务端工具 spans，均有父子关系
    - root outputs：存在 `node_records`、`final_state_output`、`main_flow_trace`
 
 ## 5. 命令行排障
@@ -167,8 +170,8 @@ python -m agent.scripts.trace_by_metadata_id \
 - 节点输出结构不统一，未强制写入审计字段。
 
 修复：
-- `_trace_node` 统一写入 `input_snapshot`、`output_summary`、`final_output`、`prompt_records`。
-- plan/conflict/generate 节点补充 prompt 与模型返回记录。
+- `_trace_node` 统一写入节点 run `inputs/outputs`，包含 `state_snapshot`、`business_input`、`prompt_records`、`context_payload`、`state_update`、`business_output`。
+- plan/conflict/build_context/generate 节点补充 prompt、上下文与模型返回记录。
 
 ### 6.3 问题三：一次提问出现多个 trace
 
@@ -177,12 +180,12 @@ python -m agent.scripts.trace_by_metadata_id \
 
 根因：
 - 并发线程未继承父上下文，子调用丢失 `parent_run_id`。
-- 子 run 独立采样导致孤儿链路。
+- MCP 请求未透传 LangSmith 分布式追踪头，导致服务端工具 span 脱离当前 trace。
 
 修复：
 - 线程池统一使用 `copy_context + ctx.run`。
 - root 层包裹 `tracing_context(parent=root_run)`。
-- 采样改为请求级一次决策，child 不独立采样。
+- MCP 客户端统一使用 `get_current_run_tree().to_headers()` 透传请求头。
 
 ## 7. 验收清单
 
@@ -195,9 +198,10 @@ python -m agent.scripts.trace_by_metadata_id \
   - `final_state_output`
   - `main_flow_trace`
 - 聚合脚本输出 `trace_count=1`，无多 trace 告警。
+- 自动节点 run 详情页可直接看到 `inputs/outputs` 完整审计字段。
 
 ## 8. 维护建议
 
 - 优先使用 `run.trace_id` 做链路分析，`metadata.trace_id` 仅做业务辅助筛选。
 - 任何新增并发执行点都必须显式继承 `contextvars`。
-- 如需恢复手工工具 run，建议做配置开关，默认保持关闭，避免再次产生重复追踪。
+- 若新增跨进程或跨服务工具调用，必须同步透传 LangSmith 分布式追踪头。

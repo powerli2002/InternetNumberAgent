@@ -48,6 +48,7 @@ def main() -> None:
         api_key=config.dashscope_api_key,
         base_url=config.dashscope_base_url,
         model=config.dashscope_model,
+        llm_temperature=config.llm_tool_temperature,
         embedding_backend=config.nl2sql_embedding_backend,
         embedding_model=config.nl2sql_embedding_model,
         embedding_device=config.nl2sql_embedding_device,

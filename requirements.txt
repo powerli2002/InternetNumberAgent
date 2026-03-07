@@ -15,6 +15,7 @@ openai
 langchain
 langchain-openai
 langgraph
+langgraph-checkpoint-postgres
 langgraph-cli[inmem]
 llama-index
 llama-index-llms-openai

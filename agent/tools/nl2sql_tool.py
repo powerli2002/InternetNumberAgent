@@ -241,7 +241,7 @@ def build_nl2sql_embedding(
 class DashScopeLlamaLLM:
     """为 LlamaIndex 提供阿里云百炼 LLM 适配。"""
 
-    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+    def __init__(self, api_key: str, base_url: str, model: str, temperature: float = 0.0) -> None:
         try:
             from langsmith.wrappers import wrap_openai  # type: ignore
             from llama_index.core.base.llms.types import LLMMetadata  # type: ignore
@@ -256,12 +256,14 @@ class DashScopeLlamaLLM:
         class _LLM(CustomLLM):
             _client = PrivateAttr()
             _model = PrivateAttr()
+            _temperature = PrivateAttr()
             _metadata = PrivateAttr()
 
-            def __init__(self, client, model_name: str) -> None:
+            def __init__(self, client, model_name: str, temperature_value: float) -> None:
                 super().__init__()
                 self._client = client
                 self._model = model_name
+                self._temperature = float(temperature_value)
                 # LlamaIndex 需要模型元数据以评估上下文窗口与输出长度
                 self._metadata = LLMMetadata(
                     context_window=4096,
@@ -292,6 +294,7 @@ class DashScopeLlamaLLM:
                     model=self._model,
                     messages=[{"role": "user", "content": prompt}],
                     stream=False,
+                    temperature=self._temperature,
                     langsmith_extra=self._langsmith_extra(),
                 )
                 # 推理模型输出前含 <think>...</think> 块，剥离后再交给 LlamaIndex 处理
@@ -306,6 +309,7 @@ class DashScopeLlamaLLM:
                     model=self._model,
                     messages=[{"role": "user", "content": prompt}],
                     stream=True,
+                    temperature=self._temperature,
                     langsmith_extra=self._langsmith_extra(),
                 )
                 for chunk in stream:
@@ -314,7 +318,7 @@ class DashScopeLlamaLLM:
                         yield CompletionResponse(text=delta, delta=delta, raw=chunk)
 
         client = wrap_openai(OpenAI(api_key=api_key, base_url=base_url))
-        self._llm = _LLM(client, model)
+        self._llm = _LLM(client, model, temperature)
 
     @property
     def llm(self):
@@ -588,6 +592,7 @@ class NL2SQLTool:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: str = "qwen3-max-preview",
+        llm_temperature: float = 0.0,
         embedding_backend: str = "local_bge",
         embedding_model: Optional[str] = None,
         embedding_device: str = "cpu",
@@ -617,6 +622,7 @@ class NL2SQLTool:
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self.llm_temperature = float(llm_temperature)
         self.embedding_backend = str(embedding_backend or "local_bge").strip().lower()
         if embedding_model:
             self.embedding_model = embedding_model
@@ -647,6 +653,7 @@ class NL2SQLTool:
             api_key=self.api_key or "",
             base_url=self.base_url or "",
             model=self.model,
+            temperature=self.llm_temperature,
         ).llm
         self._embed_model = build_nl2sql_embedding(
             backend=self.embedding_backend,

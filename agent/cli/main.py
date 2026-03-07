@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+import uuid
 
 # 直接脚本启动时，确保优先从项目根目录解析 `agent.*` 包。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +13,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.core.config import AgentConfig
-from agent.core.models import ConversationTurn
 from agent.runtime.fusion_agent import FusionAgent
 
 
@@ -23,13 +23,12 @@ def main() -> None:
 
     config = AgentConfig.load()
     agent = FusionAgent(config)
-
-    history: list[ConversationTurn] = []
+    thread_id = str(uuid.uuid4())
 
     if args.once:
         try:
             # CLI 默认不设置外层超时，持续执行直到本轮请求自然结束。
-            answer, _ = agent.respond(args.once, history=history)
+            answer, _ = agent.respond(args.once, thread_id=thread_id)
             print(answer)
         except Exception as exc:
             print(f"执行失败: {exc}")
@@ -41,10 +40,8 @@ def main() -> None:
             break
         try:
             # CLI 默认不设置外层超时，持续执行直到本轮请求自然结束。
-            answer, _ = agent.respond(user_input, history=history)
+            answer, _ = agent.respond(user_input, thread_id=thread_id)
             print(f"助手> {answer}")
-            history.append(ConversationTurn(role="user", content=user_input))
-            history.append(ConversationTurn(role="assistant", content=answer))
         except Exception as exc:
             print(f"执行失败: {exc}")
 

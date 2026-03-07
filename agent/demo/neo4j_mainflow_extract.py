@@ -124,6 +124,8 @@ class Neo4jMainFlowExtractor:
             api_key=self.config.dashscope_api_key,
             base_url=self.config.dashscope_base_url,
             model=self.config.dashscope_model,
+            default_temperature=self.config.llm_temperature,
+            tool_temperature=self.config.llm_tool_temperature,
         )
         self.neo4j_uri = str(neo4j_uri or self.config.neo4j_uri)
         self.neo4j_user = str(neo4j_user or self.config.neo4j_user)

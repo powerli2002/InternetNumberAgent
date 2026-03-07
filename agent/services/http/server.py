@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 import json
 import uuid
 from datetime import datetime, timezone
@@ -9,11 +10,11 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from agent.core.config import AgentConfig
-from agent.core.models import ConversationTurn
 from agent.runtime.fusion_agent import FusionAgent
 from fusiondata.src.utils.logging_manager import logger
 
@@ -45,7 +46,7 @@ class RunStreamRequest(BaseModel):
 
 
 class ThreadStore:
-    """基于 Postgres 的线程与消息存储。"""
+    """基于 Postgres 的线程注册与 metadata 存储。"""
 
     def __init__(self, postgres_url: str) -> None:
         if not postgres_url:
@@ -73,21 +74,6 @@ class ThreadStore:
                     """
                 )
             )
-            conn.execute(
-                self._text(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_messages (
-                        id BIGSERIAL PRIMARY KEY,
-                        thread_id UUID NOT NULL REFERENCES agent_threads(thread_id) ON DELETE CASCADE,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        metadata JSONB NOT NULL DEFAULT '{}'::jsonb
-                    );
-                    """
-                )
-            )
-            conn.execute(self._text("CREATE INDEX IF NOT EXISTS idx_agent_messages_thread_id ON agent_messages(thread_id);"))
 
     def create_thread(self, payload: ThreadCreateRequest) -> Dict[str, Any]:
         thread_id = payload.thread_id or str(uuid.uuid4())
@@ -133,7 +119,7 @@ class ThreadStore:
                 "status": row[3],
                 "metadata": row[4] or {},
                 "config": {},
-                "values": self._build_values(thread_id),
+                "values": {},
                 "interrupts": {},
             }
 
@@ -175,90 +161,11 @@ class ThreadStore:
                         "status": row[3],
                         "metadata": row[4] or {},
                         "config": {},
-                        "values": self._build_values(thread_id),
+                        "values": {},
                         "interrupts": {},
                     }
                 )
         return threads
-
-    def add_message(self, thread_id: str, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> int:
-        metadata = metadata or {}
-        with self._engine.begin() as conn:
-            row = conn.execute(
-                self._text(
-                    """
-                    INSERT INTO agent_messages (thread_id, role, content, metadata)
-                    VALUES (:thread_id, :role, :content, CAST(:metadata AS jsonb))
-                    RETURNING id
-                    """
-                ),
-                {
-                    "thread_id": thread_id,
-                    "role": role,
-                    "content": content,
-                    "metadata": json.dumps(metadata),
-                },
-            ).fetchone()
-            conn.execute(
-                self._text("UPDATE agent_threads SET updated_at = NOW(), status = 'idle' WHERE thread_id = :thread_id"),
-                {"thread_id": thread_id},
-            )
-            return int(row[0])
-
-    def update_message(self, message_id: int, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-        metadata = metadata or {}
-        with self._engine.begin() as conn:
-            conn.execute(
-                self._text(
-                    """
-                    UPDATE agent_messages
-                    SET content = :content,
-                        metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:metadata AS jsonb)
-                    WHERE id = :message_id
-                    """
-                ),
-                {
-                    "content": content,
-                    "metadata": json.dumps(metadata),
-                    "message_id": message_id,
-                },
-            )
-            conn.execute(
-                self._text(
-                    """
-                    UPDATE agent_threads
-                    SET updated_at = NOW(), status = 'idle'
-                    WHERE thread_id = (SELECT thread_id FROM agent_messages WHERE id = :message_id)
-                    """
-                ),
-                {"message_id": message_id},
-            )
-
-    def get_messages(self, thread_id: str) -> List[Dict[str, Any]]:
-        with self._engine.begin() as conn:
-            rows = conn.execute(
-                self._text(
-                    """
-                    SELECT id, role, content, created_at, metadata
-                    FROM agent_messages
-                    WHERE thread_id = :thread_id
-                    ORDER BY id ASC
-                    """
-                ),
-                {"thread_id": thread_id},
-            ).fetchall()
-        messages: List[Dict[str, Any]] = []
-        for row in rows:
-            messages.append(
-                {
-                    "id": int(row[0]),
-                    "role": row[1],
-                    "content": row[2],
-                    "created_at": row[3].isoformat(),
-                    "metadata": row[4] or {},
-                }
-            )
-        return messages
 
     def update_metadata(self, thread_id: str, updates: Dict[str, Any]) -> None:
         if not updates:
@@ -276,27 +183,6 @@ class ThreadStore:
                 self._text("UPDATE agent_threads SET metadata = CAST(:metadata AS jsonb) WHERE thread_id = :thread_id"),
                 {"metadata": json.dumps(metadata), "thread_id": thread_id},
             )
-
-    def _build_values(self, thread_id: str) -> Dict[str, Any]:
-        messages = self.get_messages(thread_id)
-        return {"messages": [self._to_langgraph_message(msg) for msg in messages]}
-
-    @staticmethod
-    def _to_langgraph_message(message: Dict[str, Any]) -> Dict[str, Any]:
-        role = message["role"]
-        msg_type = "human" if role == "user" else "ai" if role == "assistant" else role
-        return {
-            "content": message["content"],
-            "type": msg_type,
-            "role": role,
-            "id": f"msg-{message['id']}",
-            "name": None,
-            "additional_kwargs": {},
-            "response_metadata": {},
-            "tool_calls": [],
-            "invalid_tool_calls": [],
-            "usage_metadata": None,
-        }
 
 
 def _now_iso() -> str:
@@ -350,12 +236,146 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _chunk_text(text: str, chunk_size: int = 20) -> Iterable[str]:
-    if not text:
-        yield ""
-        return
-    for i in range(0, len(text), chunk_size):
-        yield text[i : i + chunk_size]
+def _split_stream_event(event: Any) -> tuple[str, Any]:
+    """拆分 LangGraph 原生 stream 事件。
+
+    `graph.stream(stream_mode=[...])` 会返回 `(mode, payload)` 二元组。
+    为了兼容少量非标准调用，这里也接受裸 payload，并默认视为 custom 事件。
+    """
+    if isinstance(event, tuple) and len(event) == 2:
+        return str(event[0]), event[1]
+    return "custom", event
+
+
+def _message_to_api_dict(message: Any, index: int = 0) -> Dict[str, Any]:
+    """将 LangGraph state 中的消息对象统一序列化为前端可消费结构。"""
+    if isinstance(message, BaseMessage):
+        msg_type = str(getattr(message, "type", "") or "").strip().lower()
+        role = "user" if msg_type == "human" else "assistant" if msg_type == "ai" else "system" if msg_type == "system" else msg_type or "unknown"
+        return {
+            "content": str(message.content or ""),
+            "type": msg_type or role,
+            "role": role,
+            "id": str(getattr(message, "id", None) or f"msg-{index}"),
+            "name": getattr(message, "name", None),
+            "additional_kwargs": dict(getattr(message, "additional_kwargs", {}) or {}),
+            "response_metadata": dict(getattr(message, "response_metadata", {}) or {}),
+            "tool_calls": list(getattr(message, "tool_calls", []) or []),
+            "invalid_tool_calls": list(getattr(message, "invalid_tool_calls", []) or []),
+            "usage_metadata": getattr(message, "usage_metadata", None),
+        }
+
+    if isinstance(message, dict):
+        # 兼容 LangChain messages_to_dict 结果：{"type": "...", "data": {...}}
+        if isinstance(message.get("data"), dict):
+            data = dict(message.get("data") or {})
+            raw_type = str(message.get("type") or data.get("type") or "").strip().lower()
+            role = "user" if raw_type == "human" else "assistant" if raw_type == "ai" else "system" if raw_type == "system" else raw_type or "unknown"
+            return {
+                "content": str(data.get("content") or ""),
+                "type": raw_type or role,
+                "role": role,
+                "id": str(data.get("id") or f"msg-{index}"),
+                "name": data.get("name"),
+                "additional_kwargs": dict(data.get("additional_kwargs") or {}),
+                "response_metadata": dict(data.get("response_metadata") or {}),
+                "tool_calls": list(data.get("tool_calls") or []),
+                "invalid_tool_calls": list(data.get("invalid_tool_calls") or []),
+                "usage_metadata": data.get("usage_metadata"),
+            }
+        role = str(message.get("role") or "").strip().lower()
+        raw_type = str(message.get("type") or "").strip().lower()
+        if not role:
+            role = "user" if raw_type == "human" else "assistant" if raw_type == "ai" else raw_type or "unknown"
+        return {
+            "content": str(message.get("content") or ""),
+            "type": raw_type or role,
+            "role": role,
+            "id": str(message.get("id") or f"msg-{index}"),
+            "name": message.get("name"),
+            "additional_kwargs": dict(message.get("additional_kwargs") or {}),
+            "response_metadata": dict(message.get("response_metadata") or {}),
+            "tool_calls": list(message.get("tool_calls") or []),
+            "invalid_tool_calls": list(message.get("invalid_tool_calls") or []),
+            "usage_metadata": message.get("usage_metadata"),
+        }
+
+    return {
+        "content": str(message or ""),
+        "type": "unknown",
+        "role": "unknown",
+        "id": f"msg-{index}",
+        "name": None,
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": None,
+    }
+
+
+def _to_api_json(value: Any) -> Any:
+    """递归序列化 LangGraph state / checkpoint 结果。"""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, BaseMessage):
+        return _message_to_api_dict(value)
+    if is_dataclass(value):
+        return _to_api_json(asdict(value))
+    if hasattr(value, "model_dump"):
+        try:
+            return _to_api_json(value.model_dump(mode="json"))
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {str(key): _to_api_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_api_json(item) for item in value]
+    return str(value)
+
+
+def _serialize_values(values: Any) -> Dict[str, Any]:
+    """将 StateSnapshot.values 转成 API 返回结构。"""
+    if not isinstance(values, dict):
+        return {"messages": []}
+    payload = {str(key): _to_api_json(item) for key, item in values.items()}
+    raw_messages = values.get("messages")
+    if isinstance(raw_messages, list):
+        payload["messages"] = [_message_to_api_dict(message, index=idx) for idx, message in enumerate(raw_messages, start=1)]
+    else:
+        payload.setdefault("messages", [])
+    return payload
+
+
+def _serialize_snapshot(snapshot: Any) -> Dict[str, Any]:
+    """序列化 LangGraph StateSnapshot，供 history API 直接返回。"""
+    config_payload = _to_api_json(getattr(snapshot, "config", None) or {})
+    configurable = config_payload.get("configurable") if isinstance(config_payload, dict) else {}
+    checkpoint_id = ""
+    if isinstance(configurable, dict):
+        checkpoint_id = str(configurable.get("checkpoint_id") or "")
+    return {
+        "checkpoint_id": checkpoint_id,
+        "metadata": _to_api_json(getattr(snapshot, "metadata", None) or {}),
+        "values": _serialize_values(getattr(snapshot, "values", None)),
+        "next": list(getattr(snapshot, "next", ()) or ()),
+        "created_at": getattr(snapshot, "created_at", None),
+        "config": config_payload,
+        "parent_config": _to_api_json(getattr(snapshot, "parent_config", None) or {}),
+        "interrupts": _to_api_json(list(getattr(snapshot, "interrupts", ()) or ())),
+    }
+
+
+def _hydrate_thread(thread_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """用 LangGraph 原生 state 覆盖线程 values/history 视图。"""
+    thread_id = str(thread_payload.get("thread_id") or "")
+    snapshot = agent.get_state(thread_id)
+    config_payload = _to_api_json(getattr(snapshot, "config", None) or {"configurable": {"thread_id": thread_id}})
+    hydrated = dict(thread_payload)
+    hydrated["config"] = config_payload
+    hydrated["values"] = _serialize_values(getattr(snapshot, "values", None))
+    hydrated["interrupts"] = _to_api_json(list(getattr(snapshot, "interrupts", ()) or ()))
+    return hydrated
 
 
 config = AgentConfig.load()
@@ -475,32 +495,25 @@ async def info() -> Dict[str, Any]:
 @app.post("/threads")
 async def create_thread(payload: ThreadCreateRequest) -> Dict[str, Any]:
     """创建线程。"""
-    return store.create_thread(payload)
+    return _hydrate_thread(store.create_thread(payload))
 
 
 @app.get("/threads/{thread_id}")
 async def get_thread(thread_id: str) -> Dict[str, Any]:
     """获取线程详情。"""
-    return store.get_thread(thread_id)
+    return _hydrate_thread(store.get_thread(thread_id))
 
 
 @app.post("/threads/search")
 async def search_threads(payload: ThreadSearchRequest) -> List[Dict[str, Any]]:
     """检索线程列表。"""
-    return store.search_threads(payload)
+    return [_hydrate_thread(item) for item in store.search_threads(payload)]
 
 
 @app.post("/threads/{thread_id}/history")
 async def thread_history(thread_id: str) -> List[Dict[str, Any]]:
-    """返回线程历史状态（简化版）。"""
-    messages = store.get_messages(thread_id)
-    return [
-        {
-            "checkpoint_id": str(uuid.uuid4()),
-            "metadata": {"step": len(messages)},
-            "values": {"messages": [store._to_langgraph_message(msg) for msg in messages]},
-        }
-    ]
+    """返回线程历史状态（LangGraph 原生 checkpoint 视图）。"""
+    return [_serialize_snapshot(snapshot) for snapshot in agent.get_state_history(thread_id)]
 
 
 @app.post("/threads/{thread_id}/runs")
@@ -509,20 +522,13 @@ async def run_thread(thread_id: str, payload: RunStreamRequest) -> Dict[str, Any
     assistant_id = payload.assistant_id or "fusion-agent"
     store.update_metadata(thread_id, {"assistant_id": assistant_id, "graph_id": assistant_id})
     user_message = _extract_user_message(payload.input)
-    history = _build_history(thread_id)
-    answer, metadata = agent.respond(user_message, history=history)
-    user_msg_id = store.add_message(thread_id, "user", user_message)
-    assistant_msg_id = store.add_message(thread_id, "assistant", answer, metadata or {})
+    answer, metadata = agent.respond(user_message, thread_id=thread_id)
+    snapshot = agent.get_state(thread_id)
     return {
-        "run_id": str(uuid.uuid4()),
+        "run_id": str(metadata.get("trace_id") or uuid.uuid4()),
         "thread_id": thread_id,
         "created_at": _now_iso(),
-        "values": {
-            "messages": [
-                store._to_langgraph_message({"id": user_msg_id, "role": "user", "content": user_message}),
-                store._to_langgraph_message({"id": assistant_msg_id, "role": "assistant", "content": answer}),
-            ]
-        },
+        "values": _serialize_values(getattr(snapshot, "values", None)),
     }
 
 
@@ -532,11 +538,9 @@ async def run_thread_stream(thread_id: str, payload: RunStreamRequest, request: 
     assistant_id = payload.assistant_id or "fusion-agent"
     store.update_metadata(thread_id, {"assistant_id": assistant_id, "graph_id": assistant_id})
     user_message = _extract_user_message(payload.input)
-    history = _build_history(thread_id)
-    stream_iter, metadata = agent.stream_response(user_message, history=history)
-    user_msg_id = store.add_message(thread_id, "user", user_message)
-    assistant_msg_id = store.add_message(thread_id, "assistant", "", {"status": "streaming"})
-    message_id = f"msg-{assistant_msg_id}"
+    stream_iter, metadata = agent.stream_response(user_message, thread_id=thread_id)
+    run_id = str(metadata.get("trace_id") or uuid.uuid4())
+    message_id = f"msg-{run_id}"
 
     stream_modes = payload.stream_mode or "messages"
     if isinstance(stream_modes, str):
@@ -547,48 +551,60 @@ async def run_thread_stream(thread_id: str, payload: RunStreamRequest, request: 
 
     def event_stream() -> Iterable[str]:
         event_id = 1
-        yield _sse(event_id, "metadata", {"run_id": str(uuid.uuid4()), "thread_id": thread_id})
+        yield _sse(event_id, "metadata", {"run_id": run_id, "thread_id": thread_id})
         event_id += 1
 
-        answer_parts: List[str] = []
-        for chunk in stream_iter:
-            answer_parts.append(chunk)
-            if "messages" in stream_modes or "messages-tuple" in stream_modes:
-                serialized = {
-                    "id": message_id,
-                    "type": "ai",
-                    "content": chunk,
-                }
-                chunk_meta = {"role": "assistant", "chunk": True}
-                yield _sse(event_id, "messages", [serialized, chunk_meta])
+        for raw_event in stream_iter:
+            mode, event_payload = _split_stream_event(raw_event)
+
+            if mode == "custom":
+                if (
+                    isinstance(event_payload, dict)
+                    and event_payload.get("event") == "messages"
+                    and ("messages" in stream_modes or "messages-tuple" in stream_modes)
+                ):
+                    chunk = str(event_payload.get("content") or "")
+                    if not chunk:
+                        continue
+                    serialized = {
+                        "id": message_id,
+                        "type": "ai",
+                        "content": chunk,
+                    }
+                    chunk_meta = {
+                        "role": str(event_payload.get("role") or "assistant"),
+                        "chunk": True,
+                        "node": event_payload.get("node"),
+                    }
+                    yield _sse(event_id, "messages", [serialized, chunk_meta])
+                    event_id += 1
+                    continue
+
+                if "custom" in stream_modes:
+                    yield _sse(event_id, "custom", _to_api_json(event_payload))
+                    event_id += 1
+                continue
+
+            if mode == "updates":
+                if "updates" in stream_modes:
+                    yield _sse(event_id, "updates", _to_api_json(event_payload))
+                    event_id += 1
+                continue
+
+            if mode == "values":
+                if "values" in stream_modes:
+                    yield _sse(event_id, "values", _serialize_values(event_payload))
+                    event_id += 1
+                continue
+
+            if mode in stream_modes:
+                yield _sse(event_id, mode, _to_api_json(event_payload))
                 event_id += 1
 
-        answer = "".join(answer_parts)
-        store.update_message(assistant_msg_id, answer, metadata or {})
-
         if "values" in stream_modes:
-            values = {
-                "messages": [
-                    store._to_langgraph_message({"id": user_msg_id, "role": "user", "content": user_message}),
-                    store._to_langgraph_message({"id": assistant_msg_id, "role": "assistant", "content": answer}),
-                ]
-            }
+            snapshot = agent.get_state(thread_id)
+            values = _serialize_values(getattr(snapshot, "values", None))
             yield _sse(event_id, "values", values)
-            event_id += 1
-
-        if "updates" in stream_modes:
-            updates = {
-                "agent": {
-                    "messages": [
-                        store._to_langgraph_message({
-                            "id": assistant_msg_id,
-                            "role": "assistant",
-                            "content": answer,
-                        })
-                    ]
-                }
-            }
-            yield _sse(event_id, "updates", updates)
             event_id += 1
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -614,14 +630,6 @@ async def get_assistant(assistant_id: str) -> Dict[str, Any]:
         "name": "fusion-agent",
         "description": "互联网号码资源问答智能体",
     }
-
-
-def _build_history(thread_id: str, limit: int = 20) -> List[ConversationTurn]:
-    messages = store.get_messages(thread_id)
-    turns: List[ConversationTurn] = []
-    for msg in messages[-limit:]:
-        turns.append(ConversationTurn(role=msg["role"], content=msg["content"]))
-    return turns
 
 
 def _sse(event_id: int, event: str, data: Any) -> str:

@@ -1,6 +1,6 @@
 # 互联网号码资源问答系统（fusionprocessing）
 
-本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**LangGraph 主编排 + FastMCP 工具层（HTTP） + LangSmith 追踪（编排层与 MCP 客户端）**。复杂任务通过 LangGraph 子图执行，不再依赖 A2A/子代理服务。
+本仓库是“互联网号码资源问答系统”MVP 的融合处理与智能体实现，负责多源数据清洗、实体化落库、向量索引与图谱构建，并通过 FusionAgent 提供可解释问答能力。当前架构已升级为：**LangGraph 主编排 + FastMCP 工具层（HTTP） + LangSmith 追踪（编排层与 MCP 服务端工具 span）**。复杂任务通过 LangGraph 子图执行，不再依赖 A2A/子代理服务；主图状态以 `MessagesState` 为对话主线，`messages` 是唯一对话真相源，并通过 LangGraph `PostgresSaver` 以原生 `thread_id`/checkpoint 方式持久化线程状态。流式回答链路已切换为 LangGraph 原生 `graph.stream(..., stream_mode=["custom", "updates"])`，由 `generate_answer` 节点通过 `get_stream_writer()` 直接发出 assistant 增量文本。
 
 ## 数据层目录迁移（2026-03-04）
 
@@ -51,7 +51,7 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 2. `execute` 阶段不再做规则式意图判断，只消费并透传 `query_mode` 到 MCP/NL2SQL。
 3. NL2SQL 不再执行“聚合硬拦截+重生”；改为在同次 SQL 生成 prompt 中按 `query_mode` 引导 SQL 形态。
 4. MCP `nl2sql_query` 新增 `query_mode`；`intent_policy/intent_labels_required` 进入兼容保留（deprecated）状态。
-5. ContextBuilder 新增 LLM 压缩能力：`CONTEXT_COMPRESS_MODE=llm|truncate|hybrid`，LLM 失败自动回退截断。
+5. ContextBuilder 统一改为 LLM 压缩：先拆分 `Evidence/Other` 分桶，再分别调用 LLM；单桶超窗时分块调用 LLM 后回拼。
 
 ## 稳定性修复（2026-02-08）
 
@@ -134,13 +134,21 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 
 2. （可选）本机启动 vLLM（OpenAI 兼容接口）
    ```bash
-   python -m agent.scripts.start_vllm --model Qwen/Qwen3-4B --port 2222 --api-key your-local-key
+   python agent/model/start_vllm.py
    ```
    - 然后在 `conf/.env` 中设置：
      - `LLM_BACKEND=local`
      - `LOCAL_LLM_API_KEY=your-local-key`
      - `LOCAL_LLM_BASE_URL=http://127.0.0.1:2222/v1`
-     - `LOCAL_LLM_MODEL=Qwen/Qwen3-4B`
+     - `LOCAL_LLM_MODEL=Qwen/Qwen3.5-4B`
+     - `LOCAL_VLLM_MAX_MODEL_LEN=16384`
+     - `LLM_TEMPERATURE=0.2`
+     - `LLM_TOOL_TEMPERATURE=0.0`
+     - `LLM_CONTEXT_COMPRESS_TEMPERATURE=0.0`
+   - `agent/model/start_vllm.py` 当前默认不显式透传 `trust_remote_code`，并在 `tensor_parallel_size > 2` 时自动追加 `--disable-custom-all-reduce`，减少当前 4 张 `RTX 2080 Ti` 环境下的无效告警。
+   - 启动脚本会自动读取 `conf/.env` 中的 `LOCAL_LLM_MODEL`、`LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_VLLM_MAX_MODEL_LEN`，命令行参数仅用于显式覆盖默认值。
+   - 对 `Qwen/Qwen3.5-4B`，脚本会额外默认追加 `--attention-backend TRITON_ATTN`、`--mm-encoder-attn-backend TRITON_ATTN`、`--language-model-only`、`--skip-mm-profiling`，并通过 `--default-chat-template-kwargs '{"enable_thinking": false}'` 默认关闭 thinking，避免本地 Agent 请求被长 `<think>` 链路拖慢。
+   - `Qwen/Qwen3.5-4B` 首次冷启动会先从 Hugging Face 下载约 9.3GB 权重；下载完成前 `2222` 端口不会进入监听状态。
 
 3. 启动前端（Agent Chat UI）
    ```bash
@@ -170,10 +178,13 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 - `REQUEST_TIMEOUT_SECONDS` / `AGENT_REQUEST_TIMEOUT_SECONDS`（统一默认超时，默认 `180` 秒）
 - `CLI_TIMEOUT_SECONDS`（保留配置；当前 CLI 不设置外层超时，持续执行直到任务结束）
 - `MCP_TIMEOUT_SECONDS`（MCP 客户端超时，默认继承 `REQUEST_TIMEOUT_SECONDS`）
-- `MAX_CONTEXT_TOKENS`（上下文窗口上限，默认 `4096`）
+- `LOCAL_VLLM_MAX_MODEL_LEN`（同时控制 Agent 上下文预算与本机 vLLM 总窗口，默认 `4096`）
 - `LLM_BACKEND`（`cloud|local`，默认 `cloud`）
 - `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` / `DASHSCOPE_MODEL`（`LLM_BACKEND=cloud` 时必填）
 - `LOCAL_LLM_API_KEY` / `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL`（`LLM_BACKEND=local` 时必填）
+- `LLM_TEMPERATURE`（普通文本生成温度，默认 `0.2`，用于最终回答与普通结构化文本生成）
+- `LLM_TOOL_TEMPERATURE`（工具/规划温度，默认 `0.0`，用于 function calling、NL2SQL 与图查询）
+- `LLM_CONTEXT_COMPRESS_TEMPERATURE`（上下文压缩温度，默认 `0.0`，优先保证压缩保真）
 - `WORKING_MEMORY_SIZE` / `EPISODIC_MEMORY_SIZE` / `SEMANTIC_MEMORY_SIZE`（三层记忆容量）
 - `RAG_EMBEDDING_BACKEND`（默认 `local_bge`）
 - `RAG_EMBEDDING_MODEL`（默认 `BAAI/bge-m3`，也可填本地模型目录）
@@ -188,15 +199,16 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 - `NEO4J_DATABASE`（默认 `neo4j`）
 - `GRAPH_MAX_ROWS` / `GRAPH_MAX_CYPHER_LENGTH`（图查询行数与 Cypher 长度上限）
 - `GRAPH_REFRESH_SCHEMA_EACH_QUERY`（默认 `true`，图查询前刷新 schema）
-- `CONTEXT_COMPRESS_MODE`（`llm|truncate|hybrid`，默认 `hybrid`）
+- `CONTEXT_COMPRESS_MODE`（兼容保留字段，当前固定按 `llm` 处理）
 - `CONTEXT_COMPRESS_TARGET_RATIO`（LLM 压缩目标比例，默认 `0.7`）
 - `ALLOWED_TABLES`（NL2SQL 白名单，逗号分隔）
 
 ## 运行时表说明
 
-FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张核心实体表），用于对话与记忆持久化：
+FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张核心实体表），用于线程注册、LangGraph checkpoint 与记忆持久化：
 
-- `agent_threads` / `agent_messages`：线程与消息记录
+- `agent_threads`：HTTP 线程注册与 metadata
+- `checkpoint_migrations` / `checkpoints` / `checkpoint_blobs` / `checkpoint_writes`：LangGraph `PostgresSaver` 内部 checkpoint 表
 - `agent_episodic_memory`：情景记忆条目
 
 ## 日志
@@ -214,12 +226,13 @@ FusionAgent 启动后会在 PostgreSQL 中自动创建运行时表（非 16 张�
 - `MODULE_LOG_MAX_ITEMS`：模块日志最多记录的返回项数量（默认 `5`）
 - MCP 工具调用会输出开始/结束（成功/失败）日志，并带 `elapsed` 耗时
 
-MCP 服务端默认不写 LangSmith 运行记录；当前采用“单 trace + 客户端子 run”模式：
+当前采用“单 trace + 自动节点审计 + 服务端工具 span”模式：
 
 - 每次提问应只生成一个 LangSmith trace；
 - trace 下会有多个自动 run（LangGraph 节点、LLM 调用等）；
-- MCP 客户端会写 `mcp_tool:*` / `mcp_list_tools` 子 run，但仅在检测到有效 `root_run` 时创建，强制挂到同一 trace；
-- 不再依赖手工 `graph_node:*` run。
+- MCP 客户端只透传 LangSmith 分布式追踪 headers，不再手工创建 `mcp_tool:*` / `mcp_list_tools` 子 run；
+- MCP 服务端通过 `TracingMiddleware + ls_trace()` 记录工具 span，并自动挂到当前节点 run 下；
+- 节点输入、prompt、上下文、输出直接写入自动节点 run，root 仅保留兼容性聚合字段。
 
 按 `run.trace_id`（优先）或 `metadata.trace_id`（兼容）聚合链路：
 

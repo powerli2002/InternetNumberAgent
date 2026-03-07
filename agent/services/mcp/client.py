@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from contextlib import nullcontext
 from dataclasses import asdict, is_dataclass
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -14,7 +13,6 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from langsmith.run_helpers import get_current_run_tree
 
-from agent.core.tracing import LangSmithTracer
 from fusiondata.src.utils.logging_manager import logger
 
 
@@ -25,13 +23,11 @@ class MCPToolClient:
         self,
         server_url: str,
         timeout_seconds: int = 60,
-        tracer: Optional[LangSmithTracer] = None,
     ) -> None:
         if not server_url:
             raise ValueError("MCP server_url 不能为空。")
         self.server_url = server_url.rstrip("/")
         self.timeout_seconds = max(1, int(timeout_seconds))
-        self.tracer = tracer
         self._tools_cache: List[Dict[str, Any]] = []
         self._tools_cache_expires_at: float = 0.0
 
@@ -40,7 +36,6 @@ class MCPToolClient:
         name: str,
         arguments: Optional[Dict[str, Any]] = None,
         trace_id: str = "",
-        root_run=None,
     ) -> Any:
         """同步调用 MCP 工具，并在控制台输出开始/结束与耗时。"""
         started_at = time.monotonic()
@@ -51,7 +46,6 @@ class MCPToolClient:
                     name=name,
                     arguments=arguments,
                     trace_id=trace_id,
-                    root_run=root_run,
                 )
             )
             logger.info(
@@ -74,14 +68,12 @@ class MCPToolClient:
     def list_tools_sync(
         self,
         trace_id: str = "",
-        root_run=None,
         refresh: bool = False,
     ) -> List[Dict[str, Any]]:
         """同步获取 MCP 工具列表。"""
         return self._run_sync(
             self.list_tools(
                 trace_id=trace_id,
-                root_run=root_run,
                 refresh=refresh,
             )
         )
@@ -91,44 +83,25 @@ class MCPToolClient:
         name: str,
         arguments: Optional[Dict[str, Any]] = None,
         trace_id: str = "",
-        root_run=None,
     ) -> Any:
         """异步调用 MCP 工具。"""
         payload = arguments or {}
-        run_ctx = self._build_tool_run_context(
-            name=f"mcp_tool:{name}",
-            trace_id=trace_id,
-            inputs={
-                "name": name,
-                "arguments": MCPToolClient._summarize_for_trace(payload),
-            },
-            tags=["mcp", f"tool:{name}"],
-            root_run=root_run,
-        )
-        with run_ctx as run:
-            # 提取当前 LangSmith run tree 的传播 headers，注入到 HTTP 请求，
-            # 使 MCP Server 侧的 @traceable 工具调用能嵌套挂到本链路 trace 树下。
-            ls_headers: Dict[str, str] = {}
-            if rt := get_current_run_tree():
-                ls_headers = {k: str(v) for k, v in rt.to_headers().items()}
-            transport = StreamableHttpTransport(url=self.server_url, headers=ls_headers or None)
-            async with Client(transport, timeout=self.timeout_seconds) as client:
-                result = await client.call_tool(
-                    name=name,
-                    arguments=payload,
-                    timeout=self.timeout_seconds,
-                    meta={"trace_id": trace_id},
-                    raise_on_error=True,
-                )
-            normalized = self._normalize_result(result)
-            if run and hasattr(run, "add_outputs"):
-                run.add_outputs({"name": name, "result": MCPToolClient._summarize_for_trace(normalized)})
-            return normalized
+        # 只透传当前 LangSmith trace 头，客户端不再手工创建 mcp_tool:* span，
+        # 工具级 span 统一由 MCP Server 侧的 TracingMiddleware + ls_trace() 记录。
+        transport = self._build_transport()
+        async with Client(transport, timeout=self.timeout_seconds) as client:
+            result = await client.call_tool(
+                name=name,
+                arguments=payload,
+                timeout=self.timeout_seconds,
+                meta={"trace_id": trace_id},
+                raise_on_error=True,
+            )
+        return self._normalize_result(result)
 
     async def list_tools(
         self,
         trace_id: str = "",
-        root_run=None,
         refresh: bool = False,
     ) -> List[Dict[str, Any]]:
         """异步读取 MCP 工具元数据，并做短时缓存。"""
@@ -136,51 +109,20 @@ class MCPToolClient:
         if not refresh and self._tools_cache and now < self._tools_cache_expires_at:
             return list(self._tools_cache)
 
-        run_ctx = self._build_tool_run_context(
-            name="mcp_list_tools",
-            trace_id=trace_id,
-            inputs={"server_url": self.server_url, "refresh": bool(refresh)},
-            tags=["mcp", "tools", "list"],
-            root_run=root_run,
-        )
-        with run_ctx as run:
-            async with Client(self.server_url, timeout=self.timeout_seconds) as client:
-                tools = await client.list_tools()
-            normalized = [self._normalize_tool(tool) for tool in tools]
-            self._tools_cache = normalized
-            self._tools_cache_expires_at = time.monotonic() + 30.0
-            if run and hasattr(run, "add_outputs"):
-                run.add_outputs(
-                    {
-                        "count": len(normalized),
-                        "names": [str(item.get("name") or "") for item in normalized[:50]],
-                    }
-                )
-            return list(normalized)
+        transport = self._build_transport()
+        async with Client(transport, timeout=self.timeout_seconds) as client:
+            tools = await client.list_tools()
+        normalized = [self._normalize_tool(tool) for tool in tools]
+        self._tools_cache = normalized
+        self._tools_cache_expires_at = time.monotonic() + 30.0
+        return list(normalized)
 
-    def _build_tool_run_context(
-        self,
-        name: str,
-        trace_id: str,
-        inputs: Dict[str, Any],
-        tags: List[str],
-        root_run=None,
-    ):
-        """构造 MCP 客户端子 run 上下文，且仅允许挂载到已有 root run。"""
-        if not self.tracer or not self.tracer.enabled:
-            return nullcontext()
-        # 强制要求 parent run 存在且具备 id，避免误创建新的根 trace。
-        if root_run is None or not hasattr(root_run, "id"):
-            logger.debug("跳过 MCP 子 run：缺少可用 root_run name=%s trace_id=%s", name, trace_id or "-")
-            return nullcontext()
-        return self.tracer.start_run(
-            name=name,
-            run_type="tool",
-            inputs=inputs,
-            tags=tags,
-            metadata={"trace_id": trace_id, "mcp_server": self.server_url},
-            parent=root_run,
-        )
+    def _build_transport(self) -> StreamableHttpTransport:
+        """构造带 LangSmith 分布式追踪头的 HTTP 传输层。"""
+        ls_headers: Dict[str, str] = {}
+        if rt := get_current_run_tree():
+            ls_headers = {key: str(value) for key, value in rt.to_headers().items()}
+        return StreamableHttpTransport(url=self.server_url, headers=ls_headers or None)
 
     @staticmethod
     def _normalize_result(result: Any) -> Any:
@@ -220,53 +162,6 @@ class MCPToolClient:
             "description": getattr(tool, "description", ""),
             "inputSchema": getattr(tool, "inputSchema", {}),
         }
-
-    @staticmethod
-    def _summarize_for_trace(value: Any, depth: int = 0) -> Any:
-        """将输入输出压缩为可读摘要，降低 LangSmith 噪声。"""
-        if value is None or isinstance(value, (bool, int, float)):
-            return value
-        if isinstance(value, str):
-            if len(value) <= 200:
-                return value
-            return f"{value[:200]}...<truncated {len(value)} chars>"
-        if depth >= 2:
-            text = str(value)
-            if len(text) > 200:
-                text = f"{text[:200]}...<truncated {len(text)} chars>"
-            return {"type": type(value).__name__, "preview": text}
-        if isinstance(value, list):
-            return {
-                "type": "list",
-                "length": len(value),
-                "sample": [MCPToolClient._summarize_for_trace(item, depth + 1) for item in value[:3]],
-            }
-        if isinstance(value, dict):
-            raw_keys = list(value.keys())[:20]
-            keys = [str(k) for k in raw_keys]
-            summary: Dict[str, Any] = {
-                "type": "dict",
-                "size": len(value),
-                "keys": keys,
-            }
-            if isinstance(value.get("chunks"), list):
-                summary["chunk_count"] = len(value["chunks"])
-            if isinstance(value.get("notes"), list):
-                summary["note_count"] = len(value["notes"])
-            if "sql" in value:
-                sql_text = str(value.get("sql") or "")
-                summary["sql_preview"] = sql_text[:200] + (f"...<truncated {len(sql_text)} chars>" if len(sql_text) > 200 else "")
-            sample_keys = raw_keys[:5]
-            if sample_keys:
-                summary["sample"] = {
-                    str(key): MCPToolClient._summarize_for_trace(value.get(key), depth + 1)
-                    for key in sample_keys
-                }
-            return summary
-        text = str(value)
-        if len(text) <= 200:
-            return {"type": type(value).__name__, "preview": text}
-        return {"type": type(value).__name__, "preview": f"{text[:200]}...<truncated {len(text)} chars>"}
 
     @staticmethod
     def _run_sync(coro):

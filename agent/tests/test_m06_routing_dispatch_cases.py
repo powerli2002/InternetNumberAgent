@@ -69,7 +69,7 @@ def test_validate_plan_downgrade_unavailable_tools() -> None:
 
     step_map = {step["step_id"]: step for step in out["plan_steps"]}
     assert step_map["s1"]["tool"] == "rag"
-    assert step_map["s2"]["tool"] == "none"
+    assert step_map["s2"]["tool"] == "rag"
 
 
 def test_dispatch_dependency_resolution() -> None:
@@ -110,7 +110,6 @@ def test_execute_single_step_routes_to_expected_tool_runner() -> None:
         "nl2sql": "nl2sql",
         "rag": "rag",
         "graph": "graph",
-        "todo": "todo",
     }
 
     for tool_name, expected in tool_to_expected.items():
@@ -120,6 +119,18 @@ def test_execute_single_step_routes_to_expected_tool_runner() -> None:
             "tool": tool_name,
             "arguments": {},
         }
-        result = LangGraphOrchestrator._execute_single_step(fake, step, state, None)
+        result = LangGraphOrchestrator._execute_single_step(fake, step, state)
         assert fake.called[-1] == expected
         assert result["status"] == "ok"
+
+    unsupported_step = {
+        "step_id": "step_todo",
+        "objective": "测试任务",
+        "tool": "todo",
+        "arguments": {},
+    }
+    called_before = list(fake.called)
+    unsupported_result = LangGraphOrchestrator._execute_single_step(fake, unsupported_step, state)
+    assert fake.called == called_before
+    assert unsupported_result["status"] == "ok"
+    assert unsupported_result["result"]["tool"] == "none"

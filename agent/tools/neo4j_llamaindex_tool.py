@@ -30,6 +30,7 @@ class Neo4jLlamaIndexTool:
         api_key: str,
         base_url: str,
         model: str,
+        llm_temperature: float = 0.0,
         database: str = "neo4j",
         max_rows: int = 200,
         max_cypher_length: int = 4000,
@@ -44,6 +45,7 @@ class Neo4jLlamaIndexTool:
             api_key: DashScope/OpenAI 兼容 API Key。
             base_url: DashScope/OpenAI 兼容 Base URL。
             model: 生成 Cypher 的大模型名称。
+            llm_temperature: Text2Cypher 生成温度，默认使用强约束的低温度。
             database: Neo4j 数据库名。
             max_rows: 查询最大返回行数。
             max_cypher_length: Cypher 最大长度限制。
@@ -60,7 +62,12 @@ class Neo4jLlamaIndexTool:
         self.refresh_schema_each_query = bool(refresh_schema_each_query)
 
         # 复用项目内 LlamaIndex 兼容 LLM 适配器，保持统一鉴权与追踪能力。
-        self._llm = DashScopeLlamaLLM(api_key=api_key, base_url=base_url, model=model).llm
+        self._llm = DashScopeLlamaLLM(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=llm_temperature,
+        ).llm
         # 使用 Neo4jPropertyGraphStore 作为 LlamaIndex 图存储后端。
         self._graph_store = Neo4jPropertyGraphStore(
             username=user,

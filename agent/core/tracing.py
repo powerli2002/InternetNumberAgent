@@ -1,11 +1,11 @@
-"""
-链路追踪模块 - LangSmith 集成
+"""LangSmith 追踪配置模块。
 
-通过环境变量 LANGSMITH_TRACING=true 启用追踪。
-启用后，对 LLM 调用、工具调用等关键节点创建 run，
-自动记录输入、输出、耗时、标签和元数据，便于在 LangSmith 控制台中可视化分析。
-
-未启用时，start_run 返回空操作对象，调用方代码无需任何条件判断。
+本模块只负责读取 LangSmith 相关环境变量并提供统一配置，
+不再包装 `trace()` / `tracing_context()` 的生命周期。
+调用方直接使用官方 SDK 创建 run，本模块仅负责：
+1. 读取启用状态、项目名、时区、默认 tags 与 metadata；
+2. 在追踪开启时初始化 LangSmith Client；
+3. 生成统一的 tags / metadata，避免各调用点重复拼装。
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import os
 from typing import Any, Dict, List, Optional
 
 from langsmith import Client
-from langsmith.run_helpers import trace
 
 try:
     from zoneinfo import ZoneInfo
@@ -24,7 +23,7 @@ except Exception:  # Python < 3.9 兼容
 
 
 class LangSmithTracer:
-    """LangSmith 链路追踪封装。
+    """LangSmith 追踪配置容器。
 
     通过环境变量统一控制启用状态，避免生产环境产生不必要的追踪开销。
 
@@ -77,78 +76,20 @@ class LangSmithTracer:
         except Exception:
             return ZoneInfo("UTC")
 
-    def _now_local_iso(self) -> str:
-        """返回当前本地时间的 ISO 字符串，写入 run metadata 便于调试定位。"""
+    def now_local_iso(self) -> str:
+        """返回当前本地时间的 ISO 字符串，便于写入 metadata。"""
         if self._tzinfo is None:
             return datetime.utcnow().isoformat()
         return datetime.now(self._tzinfo).isoformat()
 
-    def start_run(
-        self,
-        name: str,
-        run_type: str = "chain",
-        inputs: Optional[Dict[str, Any]] = None,
-        tags: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        parent: Optional[Any] = None,
-    ):
-        """创建一个追踪 run，返回上下文管理器。
+    def build_tags(self, tags: Optional[List[str]] = None) -> List[str]:
+        """合并默认 tags 与调用方追加 tags，并去重保序。"""
+        return list(dict.fromkeys(list(self.default_tags) + list(tags or [])))
 
-        未启用追踪时返回空操作对象，调用方代码无需改变。
-
-        用法示例：
-            with tracer.start_run("llm_call", inputs={"prompt": ...}) as run:
-                result = llm.invoke(...)
-                run.add_outputs({"result": result})
-        """
-        if not self.enabled:
-            # 未启用时返回空操作对象，接口保持一致
-            return _NoopRun()
-
-        # 合并默认标签与调用方传入的标签
-        merged_tags = list(self.default_tags) + (tags or [])
-
-        # 合并默认元数据，并附上本地时间戳便于排查
-        merged_metadata = {
+    def build_metadata(self, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """合并默认 metadata，并附加本地时间戳。"""
+        return {
             **self.default_metadata,
             **(metadata or {}),
-            "local_time": self._now_local_iso(),
+            "local_time": self.now_local_iso(),
         }
-
-        run_ctx = trace(
-            name=name,
-            run_type=run_type,
-            inputs=inputs,
-            tags=merged_tags,
-            metadata=merged_metadata,
-            parent=parent,
-            project_name=self.project_name,
-            client=self.client,
-        )
-        return _ScopedRun(run_ctx)
-
-
-class _NoopRun:
-    """追踪未启用时的空操作 run，与 _ScopedRun 保持相同接口。"""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def add_outputs(self, _outputs: Optional[Dict[str, Any]] = None) -> None:
-        pass
-
-
-class _ScopedRun:
-    """包装 LangSmith trace 上下文管理器，对外暴露统一接口。"""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def __enter__(self):
-        return self._inner.__enter__()
-
-    def __exit__(self, exc_type, exc, tb):
-        return self._inner.__exit__(exc_type, exc, tb)

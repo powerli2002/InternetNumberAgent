@@ -91,7 +91,7 @@ def build_text2sql_embedding(
     )
 
 
-def build_text2sql_llm(api_key: str, base_url: str, model: str):
+def build_text2sql_llm(api_key: str, base_url: str, model: str, temperature: float = 0.0):
     """使用项目内 DashScope LlamaIndex 适配器构建 LLM。"""
     if not api_key:
         raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用 LLM。")
@@ -103,6 +103,7 @@ def build_text2sql_llm(api_key: str, base_url: str, model: str):
         api_key=api_key,
         base_url=base_url,
         model=model,
+        temperature=temperature,
     ).llm
 
 
@@ -264,6 +265,7 @@ class Text2SQLSettings:
     api_key: str
     base_url: str
     llm_model: str
+    llm_temperature: float
     embedding_backend: str
     embedding_model: str
     allowed_tables: List[str]
@@ -385,6 +387,7 @@ class Text2SQLEngine:
             api_key=settings.api_key,
             base_url=settings.base_url,
             model=settings.llm_model,
+            temperature=settings.llm_temperature,
         )
         embedding_start = time.perf_counter()
         embed_model = build_text2sql_embedding(
@@ -1105,6 +1108,7 @@ def main() -> int:
         api_key=api_key,
         base_url=base_url,
         llm_model=llm_model,
+        llm_temperature=cfg.llm_tool_temperature,
         embedding_backend=embedding_backend,
         embedding_model=embedding_model,
         embedding_device=embedding_device,

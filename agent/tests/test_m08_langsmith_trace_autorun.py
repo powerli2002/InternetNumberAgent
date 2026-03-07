@@ -6,8 +6,10 @@ from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 import agent.core.tracing as tracing_module
+import agent.runtime.langgraph_orchestrator as orchestrator_module
 import agent.services.mcp.client as mcp_client_module
 from agent.core.tracing import LangSmithTracer
 from agent.runtime.langgraph_orchestrator import LangGraphOrchestrator, _NODE_RECORDS_CTX
@@ -24,7 +26,7 @@ class _TraceNodePassthrough:
     def _trace_node(self, _name: str, _state: Dict[str, Any], fn):
         return fn()
 
-    def _execute_single_step(self, step: Dict[str, Any], _state: Dict[str, Any], _root_run=None) -> Dict[str, Any]:
+    def _execute_single_step(self, step: Dict[str, Any], _state: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "step_id": str(step.get("step_id") or ""),
             "status": "ok",
@@ -34,23 +36,11 @@ class _TraceNodePassthrough:
         }
 
 
-class _DummyRun:
-    """模拟 LangSmith run 上下文。"""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def add_outputs(self, _outputs=None):
-        return None
-
-
 class _RecordingRun:
-    """记录 add_outputs 调用的测试 run。"""
+    """记录 add_inputs/add_outputs 调用的测试 run。"""
 
     def __init__(self) -> None:
+        self.inputs: List[Dict[str, Any]] = []
         self.outputs: List[Dict[str, Any]] = []
 
     def __enter__(self):
@@ -59,32 +49,29 @@ class _RecordingRun:
     def __exit__(self, exc_type, exc, tb):
         return False
 
+    def add_inputs(self, inputs=None):
+        if isinstance(inputs, dict):
+            self.inputs.append(inputs)
+
     def add_outputs(self, outputs=None):
         if isinstance(outputs, dict):
             self.outputs.append(outputs)
 
+class _FakeRunTree:
+    """模拟 LangSmith 当前 run tree，用于测试 headers 透传。"""
 
-class _FakeTracer:
-    """用于验证 MCP 子 run parent 绑定关系。"""
+    def __init__(self, headers: Dict[str, str]) -> None:
+        self._headers = headers
 
-    enabled = True
-
-    def __init__(self) -> None:
-        self.calls: List[Dict[str, Any]] = []
-        self.runs: List[_RecordingRun] = []
-
-    def start_run(self, **kwargs):
-        self.calls.append(kwargs)
-        run = _RecordingRun()
-        self.runs.append(run)
-        return run
+    def to_headers(self) -> Dict[str, str]:
+        return dict(self._headers)
 
 
-def test_trace_node_collects_records_without_manual_subrun() -> None:
-    """_trace_node 应仅记录节点聚合信息，不再创建 graph_node:* 子 run。"""
+def test_trace_node_writes_complete_node_audit_to_current_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_trace_node 应把完整节点审计写入当前自动节点 run。"""
     state = {
         "trace_id": "trace-test",
-        "query": "测试问题",
+        "messages": [HumanMessage(content="测试问题")],
         "pending_ids": [],
         "completed_ids": [],
         "ready_ids": [],
@@ -95,6 +82,8 @@ def test_trace_node_collects_records_without_manual_subrun() -> None:
         "need_replan": False,
     }
     records: List[Dict[str, Any]] = []
+    run = _RecordingRun()
+    monkeypatch.setattr(orchestrator_module, "get_current_run_tree", lambda: run)
     token = _NODE_RECORDS_CTX.set(records)
     try:
         out = LangGraphOrchestrator._trace_node(  # type: ignore[misc]
@@ -103,7 +92,13 @@ def test_trace_node_collects_records_without_manual_subrun() -> None:
             state,
             lambda: {
                 "plan_steps": [],
-                "_trace_outputs": {"prompt_records": [{"stage": "plan_request"}], "flag": "ok"},
+                "_trace_outputs": {
+                    "business_input": {"query": "测试问题"},
+                    "prompt_records": [{"stage": "plan_request"}],
+                    "context_payload": {"planner_payload": {"query": "测试问题"}},
+                    "business_output": {"plan_steps": []},
+                    "flag": "ok",
+                },
             },
         )
     finally:
@@ -113,7 +108,16 @@ def test_trace_node_collects_records_without_manual_subrun() -> None:
     assert len(records) == 1
     assert records[0]["node_name"] == "plan"
     assert records[0]["prompt_records"] == [{"stage": "plan_request"}]
+    assert records[0]["business_input"] == {"query": "测试问题"}
+    assert records[0]["context_payload"] == {"planner_payload": {"query": "测试问题"}}
+    assert records[0]["business_output"] == {"plan_steps": []}
     assert records[0]["trace_extras"]["flag"] == "ok"
+    assert len(run.inputs) == 1
+    assert run.inputs[0]["prompt_records"] == [{"stage": "plan_request"}]
+    assert run.inputs[0]["context_payload"] == {"planner_payload": {"query": "测试问题"}}
+    assert len(run.outputs) == 1
+    assert run.outputs[0]["business_output"] == {"plan_steps": []}
+    assert run.outputs[0]["trace_extras"]["flag"] == "ok"
 
 
 def test_execute_ready_thread_pool_inherits_contextvars() -> None:
@@ -157,14 +161,19 @@ def test_mcp_run_sync_preserves_context_in_running_loop() -> None:
     assert asyncio.run(_outer()) == "trace-parent"
 
 
-def test_mcp_tool_run_uses_root_parent_and_avoids_orphan_trace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MCP 客户端子 run 仅在存在 root_run 时创建，且必须绑定 parent。"""
+def test_mcp_tool_propagates_langsmith_headers_without_manual_subrun(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP 客户端应只透传当前 LangSmith headers，不再手工创建客户端子 run。"""
+
+    class _FakeTransport:
+        def __init__(self, *, url: str, headers: Dict[str, str] | None = None) -> None:
+            self.url = url
+            self.headers = headers
 
     class _FakeClient:
         calls: List[Dict[str, Any]] = []
 
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
+        def __init__(self, transport, *_args, **_kwargs) -> None:
+            self.transport = transport
 
         async def __aenter__(self):
             return self
@@ -173,73 +182,62 @@ def test_mcp_tool_run_uses_root_parent_and_avoids_orphan_trace(monkeypatch: pyte
             return False
 
         async def call_tool(self, **kwargs):
+            kwargs["headers"] = dict(self.transport.headers or {})
             _FakeClient.calls.append(kwargs)
             return SimpleNamespace(data={"ok": True, "tool": kwargs.get("name")})
 
+    monkeypatch.setattr(mcp_client_module, "StreamableHttpTransport", _FakeTransport)
     monkeypatch.setattr(mcp_client_module, "Client", _FakeClient)
+    monkeypatch.setattr(
+        mcp_client_module,
+        "get_current_run_tree",
+        lambda: _FakeRunTree({"x-langsmith-trace": "trace-header", "x-langsmith-parent": "node-run"}),
+    )
 
-    tracer = _FakeTracer()
-    client = MCPToolClient(server_url="http://127.0.0.1:2032/mcp", tracer=tracer)
-    root_run = SimpleNamespace(id="root-run-id")
+    client = MCPToolClient(server_url="http://127.0.0.1:2032/mcp")
 
     payload = client.call_tool(
         name="rag_search",
         arguments={"query": "测试"},
         trace_id="trace-1",
-        root_run=root_run,
     )
     assert payload["ok"] is True
     assert payload["tool"] == "rag_search"
-    assert len(tracer.calls) == 1
-    assert tracer.calls[0]["name"] == "mcp_tool:rag_search"
-    assert tracer.calls[0]["parent"] is root_run
-    assert tracer.calls[0]["metadata"]["trace_id"] == "trace-1"
-    assert len(tracer.runs[0].outputs) == 1
     assert _FakeClient.calls[0]["meta"]["trace_id"] == "trace-1"
+    assert _FakeClient.calls[0]["headers"] == {
+        "x-langsmith-trace": "trace-header",
+        "x-langsmith-parent": "node-run",
+    }
 
-    tracer.calls.clear()
     _FakeClient.calls.clear()
+    monkeypatch.setattr(mcp_client_module, "get_current_run_tree", lambda: None)
     payload_no_parent = client.call_tool(
         name="rag_search",
         arguments={"query": "测试"},
         trace_id="trace-2",
-        root_run=None,
     )
     assert payload_no_parent["ok"] is True
-    assert len(tracer.calls) == 0
     assert _FakeClient.calls[0]["meta"]["trace_id"] == "trace-2"
+    assert _FakeClient.calls[0]["headers"] == {}
 
 
-def test_tracer_sampling_is_request_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """采样应按请求一次决策，子 run 不可独立采样。"""
+def test_tracer_builds_tags_and_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LangSmithTracer 应只负责配置加载与 tags/metadata 合并。"""
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
     monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
     monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "ws-test")
     monkeypatch.setenv("LANGSMITH_PROJECT", "proj-test")
-
-    calls: List[Dict[str, Any]] = []
-
-    def _fake_trace(**kwargs):
-        calls.append(kwargs)
-        return _DummyRun()
+    monkeypatch.setenv("LANGSMITH_DEFAULT_TAGS", "fusion,langgraph")
 
     monkeypatch.setattr(tracing_module, "Client", lambda *args, **kwargs: object())
-    monkeypatch.setattr(tracing_module, "trace", _fake_trace)
-
-    # 场景一：根 run 未采样，子 run 不应被独立采样。
-    monkeypatch.setenv("LANGSMITH_SAMPLE_RATE", "0")
     tracer = LangSmithTracer(project_name="proj-test")
-    with tracer.start_run(name="root", run_type="chain") as root:
-        with tracer.start_run(name="child", run_type="chain", parent=root):
-            pass
-    assert len(calls) == 0
 
-    # 场景二：根 run 采样时，子 run 继承同一请求采样结果。
-    monkeypatch.setenv("LANGSMITH_SAMPLE_RATE", "1")
-    tracer2 = LangSmithTracer(project_name="proj-test")
-    with tracer2.start_run(name="root2", run_type="chain") as root2:
-        with tracer2.start_run(name="child2", run_type="chain", parent=root2):
-            pass
-    assert len(calls) == 2
-    assert calls[0]["name"] == "root2"
-    assert calls[1]["name"] == "child2"
+    assert tracer.enabled is True
+    assert tracer.project_name == "proj-test"
+    assert tracer.client is not None
+    assert tracer.build_tags(["langgraph", "qa"]) == ["fusion", "langgraph", "qa"]
+    metadata = tracer.build_metadata({"trace_id": "trace-1"})
+    assert metadata["service"] == "fusion-agent"
+    assert metadata["trace_id"] == "trace-1"
+    assert metadata["timezone"] == tracer.timezone
+    assert "local_time" in metadata

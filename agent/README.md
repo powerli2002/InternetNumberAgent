@@ -12,7 +12,9 @@ python agent/cli/main.py
 
 说明：CLI 默认不设置外层超时；工具执行期间会输出开始/结束日志与耗时。
 
-.venv/bin/python -m agent.scripts.langgraph_dev --config langgraph.json --port 8123
+.venv/bin/python -m agent.scripts.langgraph_dev --config langgraph.json --port 8123 --no-reload
+
+说明：当前导出的 LangGraph 主图状态以 `messages` 作为唯一对话状态。项目主 HTTP 服务仍使用 `PostgresSaver` 持久化线程状态；但 `langgraph dev` / Studio 入口会改用 LangGraph API 自带 persistence，因此 `agent/langgraph_app.py` 不再导出带自定义 checkpointer 的图，避免本地调试启动时报错。可在 LangGraph Studio 中直接用 Chat 模式调试。`/threads/{id}/runs/stream` 已切到 LangGraph 原生 `custom + updates` 流式模式，不再先完整生成答案再切块。
 
 
 启动 本地llm qwen3.5-4B
@@ -28,12 +30,21 @@ nohup python start_vllm.py
 - `LLM_BACKEND=local`：使用 `LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_LLM_MODEL`。
 - 配置缺失会直接报错，不做静默回退。
 - 建议把所有运行参数统一维护在 `conf/.env`（`AgentConfig` 启动时自动加载）。
+- 温度参数同样统一由 `conf/.env` 管理：`LLM_TEMPERATURE`、`LLM_TOOL_TEMPERATURE`、`LLM_CONTEXT_COMPRESS_TEMPERATURE`。
 
 本机 vLLM 启动示例：
 
 ```bash
-python -m agent.scripts.start_vllm --model Qwen/Qwen3-4B --port 2222 --api-key your-local-key
+python agent/model/start_vllm.py
 ```
+
+补充说明：
+
+- 启动脚本会默认读取 `conf/.env` 中的 `LOCAL_LLM_MODEL`、`LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_VLLM_MAX_MODEL_LEN`；命令行参数优先级更高。
+- 启动脚本默认不显式传递 `trust_remote_code`，避免对已内置架构模型打印“参数无效”告警。
+- 当 `tensor_parallel_size > 2` 时，脚本会自动添加 `--disable-custom-all-reduce`，减少当前 4 卡 PCIe 环境下的重复告警。
+- 对 `Qwen/Qwen3.5-4B`，脚本还会默认追加 `--attention-backend TRITON_ATTN`、`--mm-encoder-attn-backend TRITON_ATTN`、`--language-model-only`、`--skip-mm-profiling`，并通过 `--default-chat-template-kwargs '{"enable_thinking": false}'` 关闭默认 thinking，优先走纯文本快速响应路径。
+- `Qwen/Qwen3.5-4B` 首次冷启动需先下载大体积权重；下载完成前，OpenAI 兼容接口不会开始监听 `2222` 端口。
 
 
 ## 分层结构（推荐新代码落点）
@@ -86,7 +97,10 @@ python -m agent.scripts.start_vllm --model Qwen/Qwen3-4B --port 2222 --api-key y
 
 ### 关键环境变量
 
-- `MAX_CONTEXT_TOKENS`：上下文窗口上限（默认 `4096`）
+- `LOCAL_VLLM_MAX_MODEL_LEN`：同时控制应用侧上下文窗口与本机 vLLM 的 `max_model_len`（默认 `4096`）
+- `LLM_TEMPERATURE`：普通文本生成温度（默认 `0.2`）
+- `LLM_TOOL_TEMPERATURE`：工具/规划型 LLM 温度（默认 `0.0`）
+- `LLM_CONTEXT_COMPRESS_TEMPERATURE`：上下文压缩温度（默认 `0.0`）
 - `WORKING_MEMORY_SIZE` / `EPISODIC_MEMORY_SIZE` / `SEMANTIC_MEMORY_SIZE`：三层记忆容量
 - `RAG_EMBEDDING_BACKEND`：`local_bge`（默认）或 `dashscope`
 - `RAG_EMBEDDING_MODEL`：默认 `BAAI/bge-m3`（可改为本地模型目录）

@@ -41,6 +41,59 @@ def strip_think_blocks(text: str) -> str:
     return cleaned if cleaned else text
 
 
+class _ThinkBlockStreamFilter:
+    """增量过滤流式输出中的 `<think>...</think>` 思考块。"""
+
+    _OPEN_TAG = "<think>"
+    _CLOSE_TAG = "</think>"
+
+    def __init__(self) -> None:
+        self._inside_think = False
+        self._tag_buffer = ""
+
+    def feed(self, chunk: str) -> str:
+        """逐字符处理 chunk，只返回可展示给用户的增量文本。"""
+        if not chunk:
+            return ""
+
+        visible_parts: List[str] = []
+        for char in chunk:
+            if self._tag_buffer:
+                self._tag_buffer += char
+                if self._OPEN_TAG.startswith(self._tag_buffer) or self._CLOSE_TAG.startswith(self._tag_buffer):
+                    if self._tag_buffer == self._OPEN_TAG:
+                        self._inside_think = True
+                        self._tag_buffer = ""
+                    elif self._tag_buffer == self._CLOSE_TAG:
+                        self._inside_think = False
+                        self._tag_buffer = ""
+                    continue
+
+                # 一旦确认不是 think 标签，就把缓存内容按普通文本处理。
+                if not self._inside_think:
+                    visible_parts.append(self._tag_buffer)
+                self._tag_buffer = ""
+                continue
+
+            if char == "<":
+                self._tag_buffer = "<"
+                continue
+
+            if not self._inside_think:
+                visible_parts.append(char)
+
+        return "".join(visible_parts)
+
+    def finalize(self) -> str:
+        """在流结束时冲刷残留缓存。"""
+        if self._tag_buffer and not self._inside_think:
+            leftover = self._tag_buffer
+            self._tag_buffer = ""
+            return leftover
+        self._tag_buffer = ""
+        return ""
+
+
 @dataclass
 class LLMMessage:
     """统一的 LLM 消息格式。"""
@@ -57,12 +110,29 @@ class LLMClient:
         api_key: Optional[str],
         base_url: str,
         model: str,
+        *,
+        default_temperature: float = 0.2,
+        tool_temperature: float = 0.0,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self.default_temperature = float(default_temperature)
+        self.tool_temperature = float(tool_temperature)
 
-    def chat(self, messages: List[LLMMessage], temperature: float = 0.2) -> str:
+    def _resolve_text_temperature(self, temperature: Optional[float]) -> float:
+        """解析文本生成类请求的生效温度。"""
+        if temperature is None:
+            return self.default_temperature
+        return float(temperature)
+
+    def _resolve_tool_temperature(self, temperature: Optional[float]) -> float:
+        """解析工具/结构化调用的生效温度。"""
+        if temperature is None:
+            return self.tool_temperature
+        return float(temperature)
+
+    def chat(self, messages: List[LLMMessage], temperature: Optional[float] = None) -> str:
         """执行对话请求，若缺少依赖则抛出清晰异常。"""
         try:
             from openai import OpenAI  # type: ignore
@@ -73,17 +143,18 @@ class LLMClient:
         if not self.api_key:
             raise RuntimeError("缺少 API Key，无法调用 OpenAI 兼容模型。")
 
+        resolved_temperature = self._resolve_text_temperature(temperature)
         client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
         response = client.chat.completions.create(
             model=self.model,
             messages=[message.__dict__ for message in messages],
-            temperature=temperature,
+            temperature=resolved_temperature,
         )
         raw = response.choices[0].message.content or ""
         return strip_think_blocks(raw)
 
-    def chat_stream(self, messages: List[LLMMessage], temperature: float = 0.2):
-        """流式输出对话内容（逐段返回）。"""
+    def chat_stream(self, messages: List[LLMMessage], temperature: Optional[float] = None):
+        """流式输出对话内容（逐段返回），并增量剥离 think 块。"""
         try:
             from openai import OpenAI  # type: ignore
             from langsmith.wrappers import wrap_openai  # type: ignore
@@ -93,19 +164,26 @@ class LLMClient:
         if not self.api_key:
             raise RuntimeError("缺少 API Key，无法调用 OpenAI 兼容模型。")
 
+        resolved_temperature = self._resolve_text_temperature(temperature)
         client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
         stream = client.chat.completions.create(
             model=self.model,
             messages=[message.__dict__ for message in messages],
-            temperature=temperature,
+            temperature=resolved_temperature,
             stream=True,
         )
+        filter_state = _ThinkBlockStreamFilter()
         for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
             if delta:
-                yield delta
+                visible = filter_state.feed(delta)
+                if visible:
+                    yield visible
+        leftover = filter_state.finalize()
+        if leftover:
+            yield leftover
 
-    def structured_chat(self, messages: List[LLMMessage], schema: dict, temperature: float = 0.2) -> dict:
+    def structured_chat(self, messages: List[LLMMessage], schema: dict, temperature: Optional[float] = None) -> dict:
         """要求模型返回 JSON 结构化输出。"""
         content = self.chat(messages, temperature=temperature)
         try:
@@ -118,7 +196,7 @@ class LLMClient:
         messages: List[LLMMessage],
         tools: List[Dict[str, Any]],
         tool_choice: str = "required",
-        temperature: float = 0.2,
+        temperature: Optional[float] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """使用 Function Calling 获取工具调用参数。"""
         try:
@@ -130,13 +208,14 @@ class LLMClient:
         if not self.api_key:
             raise RuntimeError("缺少 API Key，无法调用 OpenAI 兼容模型。")
 
+        resolved_temperature = self._resolve_tool_temperature(temperature)
         client = wrap_openai(OpenAI(api_key=self.api_key, base_url=self.base_url))
         response = client.chat.completions.create(
             model=self.model,
             messages=[message.__dict__ for message in messages],
             tools=tools,
             tool_choice=tool_choice,
-            temperature=temperature,
+            temperature=resolved_temperature,
         )
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
