@@ -1,0 +1,163 @@
+# RFC3912 - WHOIS Protocol Specification
+
+## 元数据
+- RFC 编号: RFC3912
+- 主题目录: whois
+- 发布状态: DRAFT STANDARD
+- 当前状态: DRAFT STANDARD
+- 发布时间: August 2004
+- 来源工作组: IETF - NON WORKING GROUP
+- 作者: L. Daigle
+- 关键标签: WHOIS, whois 协议, 端口 43, 注册信息查询, WHOIS, NICNAME
+- 废弃旧文档: RFC0954, RFC0812
+- 被这些 RFC 更新: 无
+- 被这些 RFC 废弃: 无
+- 原始格式: ASCII, HTML
+- DOI: 10.17487/RFC3912
+- 元数据地址: https://www.rfc-editor.org/rfc/rfc3912.json
+- 正文地址: https://www.rfc-editor.org/rfc/rfc3912.txt
+
+## 摘要
+
+This document updates the specification of the WHOIS protocol, thereby obsoleting RFC 954.  The update is intended to remove the material from RFC 954 that does not have to do with the on-the-wire protocol, and is no longer applicable in today's Internet.  This document does not attempt to change or update the protocol per se, or document other uses of the protocol that have come into existence since the publication of RFC 954.  [STANDARDS-TRACK]
+
+## 正文
+
+## 1. Introduction
+
+WHOIS is a TCP-based transaction-oriented query/response protocol
+that is widely used to provide information services to Internet
+users.  While originally used to provide "white pages" services and
+information about registered domain names, current deployments cover
+a much broader range of information services.  The protocol delivers
+its content in a human-readable format.  This document updates the
+specification of the WHOIS protocol, thereby obsoleting RFC 954 [1].
+
+For historic reasons, WHOIS lacks many of the protocol design
+attributes, for example internationalisation and strong security,
+that would be expected from any recently-designed IETF protocol.
+This document does not attempt to rectify any of those shortcomings.
+Instead, this memo documents the WHOIS protocol as it is.  In some
+areas, this document does document particular well known shortcomings
+of the WHOIS protocol.  The discussion of possible protocols to carry
+out these functions, with updated capabilities to address the
+
+shortcomings, is being addressed in a separate IETF activity (CRISP
+Working Group).
+
+## 2. Protocol Specification
+
+A WHOIS server listens on TCP port 43 for requests from WHOIS
+clients.  The WHOIS client makes a text request to the WHOIS server,
+then the WHOIS server replies with text content.  All requests are
+terminated with ASCII CR and then ASCII LF.  The response might
+contain more than one line of text, so the presence of ASCII CR or
+ASCII LF characters does not indicate the end of the response.  The
+WHOIS server closes its connection as soon as the output is finished.
+The closed TCP connection is the indication to the client that the
+response has been received.
+
+## 3. Protocol Example
+
+If one places a request of the WHOIS server located at whois.nic.mil
+for information about "Smith", the packets on the wire will look
+like:
+
+client                           server at whois.nic.mil
+
+open TCP   ---- (SYN) ------------------------------>
+<---- (SYN+ACK) -------------------------
+send query ---- "Smith<CR><LF>" -------------------->
+get answer <---- "Info about Smith<CR><LF>" ---------
+<---- "More info about Smith<CR><LF>" ----
+close      <---- (FIN) ------------------------------
+----- (FIN) ----------------------------->
+
+## 4. Internationalisation
+
+The WHOIS protocol has not been internationalised.  The WHOIS
+protocol has no mechanism for indicating the character set in use.
+Originally, the predominant text encoding in use was US-ASCII.  In
+practice, some WHOIS servers, particularly those outside the USA,
+might be using some other character set either for requests, replies,
+or both.  This inability to predict or express text encoding has
+adversely impacted the interoperability (and, therefore, usefulness)
+of the WHOIS protocol.
+
+## 5. Security Considerations
+
+The WHOIS protocol has no provisions for strong security.  WHOIS
+lacks mechanisms for access control, integrity, and confidentiality.
+Accordingly, WHOIS-based services should only be used for information
+which is non-sensitive and intended to be accessible to everyone.
+
+The absence of such security mechanisms means this protocol would not
+normally be acceptable to the IETF at the time of this writing.
+
+## 6. Acknowledgements
+
+Ran Atkinson created an earlier version of this document.  Ken
+Harrenstien, Mary Stahl, and Elizabeth Feinler were the authors of
+the original Draft Standard for WHOIS.
+
+## 7. References
+
+### 7.1. Normative References
+
+[1]  Harrenstien, K., Stahl, M., and E. Feinler, "NICNAME/WHOIS", RFC
+954, October 1985.
+
+## Author's Address
+
+Leslie Daigle
+VeriSign, Inc.
+21355 Ridgetop Circle
+Dulles, VA  20166
+US
+
+EMail: leslie@verisignlabs.com; leslie@thinkingcat.com
+
+Full Copyright Statement
+
+Copyright (C) The Internet Society (2004).
+
+This document is subject to the rights, licenses and restrictions
+contained in BCP 78, and at www.rfc-editor.org, and except as set
+forth therein, the authors retain all their rights.
+
+This document and the information contained herein are provided on an
+"AS IS" basis and THE CONTRIBUTOR, THE ORGANIZATION HE/S HE
+REPRESENTS OR IS SPONSORED BY (IF ANY), THE INTERNET SOCIETY AND THE
+INTERNET ENGINEERING TASK FORCE DISCLAIM ALL WARRANTIES, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTY THAT THE USE OF
+THE INFORMATION HEREIN WILL NOT INFRINGE ANY RIGHTS OR ANY IMPLIED
+WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+
+Intellectual Property
+
+The IETF takes no position regarding the validity or scope of any
+Intellectual Property Rights or other rights that might be claimed to
+pertain to the implementation or use of the technology described in
+this document or the extent to which any license under such rights
+might or might not be available; nor does it represent that it has
+made any independent effort to identify any such rights.  Information
+on the ISOC's procedures with respect to rights in ISOC Documents can
+be found in BCP 78 and BCP 79.
+
+Copies of IPR disclosures made to the IETF Secretariat and any
+assurances of licenses to be made available, or the result of an
+attempt made to obtain a general license or permission for the use of
+such proprietary rights by implementers or users of this
+specification can be obtained from the IETF on-line IPR repository at
+http://www.ietf.org/ipr.
+
+The IETF invites any interested party to bring to its attention any
+copyrights, patents or patent applications, or other proprietary
+rights that may cover technology that may be required to implement
+this standard.  Please address the information to the IETF at ietf-
+ipr@ietf.org.
+
+Acknowledgement
+
+Funding for the RFC Editor function is currently provided by the
+Internet Society.

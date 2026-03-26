@@ -16,7 +16,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def _load_context_builder_class():
     """按文件路径加载 ContextBuilder，避免测试环境缺少 LangGraph 依赖时触发包级导入。"""
     module_path = PROJECT_ROOT / "agent" / "runtime" / "context_builder.py"
-    spec = importlib.util.spec_from_file_location("agent_runtime_context_builder_test", module_path)
+    spec = importlib.util.spec_from_file_location(
+        "agent_runtime_context_builder_test", module_path
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"无法加载 ContextBuilder 模块: {module_path}")
     module = importlib.util.module_from_spec(spec)
@@ -90,6 +92,20 @@ def test_context_builder_uses_configured_compress_temperature() -> None:
     assert llm.temperatures == [0.15]
 
 
+def test_context_builder_default_token_counter_uses_local_qwen_tokenizer() -> None:
+    """默认 token 计数器应使用项目内置的 Qwen tokenizer 文件。"""
+    from tokenizers import Tokenizer
+
+    ContextBuilder = _load_context_builder_class()
+    tokenizer_path = PROJECT_ROOT / "agent" / "model" / "data" / "tokenizer.json"
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    text = "测试极速计算Token"
+
+    assert ContextBuilder._default_token_counter(text) == len(
+        tokenizer.encode(text).ids
+    )
+
+
 def test_llm_client_separates_text_and_tool_temperatures(monkeypatch) -> None:
     """统一 LLM 客户端应区分普通文本生成温度与工具调用温度。"""
     recorded_calls: list[dict] = []
@@ -101,14 +117,18 @@ def test_llm_client_separates_text_and_tool_temperatures(monkeypatch) -> None:
                 message = types.SimpleNamespace(
                     tool_calls=[
                         types.SimpleNamespace(
-                            function=types.SimpleNamespace(name="route", arguments='{"kind":"tool"}')
+                            function=types.SimpleNamespace(
+                                name="route", arguments='{"kind":"tool"}'
+                            )
                         )
                     ],
                     content=None,
                 )
             else:
                 message = types.SimpleNamespace(content="普通回答")
-            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=message)]
+            )
 
     class _FakeOpenAI:
         def __init__(self, **_kwargs) -> None:
@@ -135,7 +155,12 @@ def test_llm_client_separates_text_and_tool_temperatures(monkeypatch) -> None:
     text = client.chat([LLMMessage(role="user", content="你好")])
     name, payload = client.tool_call(
         [LLMMessage(role="user", content="请选择工具")],
-        tools=[{"type": "function", "function": {"name": "route", "parameters": {"type": "object"}}}],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "route", "parameters": {"type": "object"}},
+            }
+        ],
     )
 
     assert text == "普通回答"

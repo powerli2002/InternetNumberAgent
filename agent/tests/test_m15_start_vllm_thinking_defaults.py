@@ -14,7 +14,11 @@ def _make_args(model: str, default_chat_template_kwargs: str = "") -> Namespace:
         max_model_len=16384,
         gpu_memory_utilization=0.8,
         max_num_batched_tokens=512,
-        tensor_parallel_size=4,
+        quantization="",
+        load_format="",
+        dtype="",
+        tensor_parallel_size=1,
+        cuda_visible_devices="0",
         pipeline_parallel_size=1,
         trust_remote_code=None,
         disable_custom_all_reduce=None,
@@ -45,3 +49,24 @@ def test_start_vllm_does_not_inject_thinking_flag_for_other_models() -> None:
     command = _build_command(args)
 
     assert "--default-chat-template-kwargs" not in command
+
+
+def test_start_vllm_defaults_awq_profile_for_qwen35_awq_repo() -> None:
+    args = _make_args("QuantTrio/Qwen3.5-4B-AWQ")
+
+    command = _build_command(args)
+
+    assert "--quantization" in command
+    quantization_index = command.index("--quantization")
+    assert command[quantization_index + 1] == "awq"
+    assert "--dtype" in command
+    dtype_index = command.index("--dtype")
+    assert command[dtype_index + 1] == "half"
+
+
+def test_start_vllm_single_gpu_does_not_force_disable_custom_all_reduce() -> None:
+    args = _make_args("QuantTrio/Qwen3.5-4B-AWQ")
+
+    command = _build_command(args)
+
+    assert "--disable-custom-all-reduce" not in command

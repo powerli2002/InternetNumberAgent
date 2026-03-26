@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 from typing import List
 
@@ -12,17 +11,19 @@ from agent.evaluate.core.config import (
     DEFAULT_FAILURE_RATE_THRESHOLD,
     DEFAULT_LANGSMITH_LIMIT,
     DEFAULT_TRACE_SINCE_HOURS,
+    ensure_langsmith_tracing_enabled,
     resolve_langsmith_project,
 )
-from agent.evaluate.core.schemas import AnswerSample, QuerySample, load_query_samples, write_jsonl
-from agent.evaluate.core.trace_extract import extract_trace_artifacts, fetch_root_run_by_trace
-
-
-def _ensure_langsmith_tracing_enabled() -> None:
-    """检查 LangSmith tracing 已开启。"""
-    enabled = (os.getenv("LANGSMITH_TRACING") or "").strip().lower()
-    if enabled != "true":
-        raise RuntimeError("必须开启 LANGSMITH_TRACING=true 才能执行 fill_answers")
+from agent.evaluate.core.schemas import (
+    AnswerSample,
+    QuerySample,
+    load_query_samples,
+    write_jsonl,
+)
+from agent.evaluate.core.trace_extract import (
+    extract_trace_artifacts,
+    fetch_root_run_by_trace,
+)
 
 
 def fill_answers(
@@ -33,7 +34,7 @@ def fill_answers(
     max_failure_rate: float,
 ) -> List[AnswerSample]:
     """执行批量问答并产出 AnswerSample。"""
-    _ensure_langsmith_tracing_enabled()
+    ensure_langsmith_tracing_enabled()
     if not query_samples:
         raise ValueError("query_samples 为空")
 
@@ -61,7 +62,9 @@ def fill_answers(
                 since_hours=trace_since_hours,
                 limit=langsmith_limit,
             )
-            artifacts = extract_trace_artifacts(query=sample.query, answer=answer_text, root_run=root_run)
+            artifacts = extract_trace_artifacts(
+                query=sample.query, answer=answer_text, root_run=root_run
+            )
 
             answers.append(
                 AnswerSample(
@@ -75,8 +78,13 @@ def fill_answers(
                     node_records=list(artifacts.get("node_records") or []),
                     final_state_output=dict(artifacts.get("final_state_output") or {}),
                     main_flow_trace=dict(artifacts.get("main_flow_trace") or {}),
+                    tool_execution_records=list(
+                        artifacts.get("tool_execution_records") or []
+                    ),
                     tool_calls=list(artifacts.get("tool_calls") or []),
-                    trajectory_messages=list(artifacts.get("trajectory_messages") or []),
+                    trajectory_messages=list(
+                        artifacts.get("trajectory_messages") or []
+                    ),
                     plan_text=str(artifacts.get("plan_text") or ""),
                     observation_text=str(artifacts.get("observation_text") or ""),
                     memory_text=str(artifacts.get("memory_text") or ""),
@@ -87,7 +95,9 @@ def fill_answers(
                     reference_answer=sample.reference_answer,
                 )
             )
-            print(f"[fill_answers] {index}/{len(query_samples)} ok id={sample.id} trace_id={trace_id}")
+            print(
+                f"[fill_answers] {index}/{len(query_samples)} ok id={sample.id} trace_id={trace_id}"
+            )
         except Exception as exc:
             failed += 1
             answers.append(
@@ -104,7 +114,9 @@ def fill_answers(
                     reference_answer=sample.reference_answer,
                 )
             )
-            print(f"[fill_answers] {index}/{len(query_samples)} error id={sample.id} error={exc}")
+            print(
+                f"[fill_answers] {index}/{len(query_samples)} error id={sample.id} error={exc}"
+            )
 
     write_jsonl(out_path, [item.to_dict() for item in answers])
 
@@ -122,8 +134,12 @@ def fill_answers(
 def build_arg_parser() -> argparse.ArgumentParser:
     """构建命令行参数。"""
     parser = argparse.ArgumentParser(description="批量补齐答案并提取 LangSmith trace")
-    parser.add_argument("--in", dest="in_path", required=True, help="输入 queries.jsonl")
-    parser.add_argument("--out", dest="out_path", required=True, help="输出 answers.jsonl")
+    parser.add_argument(
+        "--in", dest="in_path", required=True, help="输入 queries.jsonl"
+    )
+    parser.add_argument(
+        "--out", dest="out_path", required=True, help="输出 answers.jsonl"
+    )
     parser.add_argument(
         "--trace-since-hours",
         type=float,

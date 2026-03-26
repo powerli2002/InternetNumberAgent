@@ -24,6 +24,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -99,7 +101,9 @@ class ContextBuilder:
         """Gather：收集系统、历史、记忆、证据、笔记。"""
         # 先把系统指令与用户问题放在上下文最高优先级
         chunks = [
-            ContextChunk(title="Role & Policy", content=system_prompt.strip(), score=1.0),
+            ContextChunk(
+                title="Role & Policy", content=system_prompt.strip(), score=1.0
+            ),
             ContextChunk(title="Task", content=user_query.strip(), score=1.0),
         ]
 
@@ -179,7 +183,9 @@ class ContextBuilder:
             raise RuntimeError("缺少 llm_client，无法执行统一 LLM 上下文压缩。")
         return self._compress_context_tree(text, self.max_tokens)
 
-    def _compress_context_tree(self, context: str, target_tokens: int, depth: int = 0) -> str:
+    def _compress_context_tree(
+        self, context: str, target_tokens: int, depth: int = 0
+    ) -> str:
         """按 Evidence / Other 分桶递归压缩，直到收敛到目标预算。"""
         text = (context or "").strip()
         if not text:
@@ -187,11 +193,19 @@ class ContextBuilder:
         if depth > 6:
             raise RuntimeError("上下文 LLM 压缩递归超过限制，未能收敛。")
 
-        evidence_context, other_context, evidence_first = self._extract_evidence_context(text)
+        evidence_context, other_context, evidence_first = (
+            self._extract_evidence_context(text)
+        )
         if evidence_context and other_context:
-            targets = self._allocate_target_tokens([evidence_context, other_context], target_tokens)
-            compressed_evidence = self._compress_with_llm(evidence_context, targets[0], depth + 1)
-            compressed_other = self._compress_with_llm(other_context, targets[1], depth + 1)
+            targets = self._allocate_target_tokens(
+                [evidence_context, other_context], target_tokens
+            )
+            compressed_evidence = self._compress_with_llm(
+                evidence_context, targets[0], depth + 1
+            )
+            compressed_other = self._compress_with_llm(
+                other_context, targets[1], depth + 1
+            )
             compressed = self._join_compressed_parts(
                 evidence_context=compressed_evidence,
                 other_context=compressed_other,
@@ -207,7 +221,9 @@ class ContextBuilder:
             raise RuntimeError("LLM 压缩未能收敛到目标长度。")
         return self._compress_context_tree(compressed, target_tokens, depth + 1)
 
-    def _compress_with_llm(self, context: str, target_tokens: int, depth: int = 0) -> str:
+    def _compress_with_llm(
+        self, context: str, target_tokens: int, depth: int = 0
+    ) -> str:
         """对单段文本执行 LLM 压缩；超出单次输入预算时分块递归压缩。"""
         text = (context or "").strip()
         if not text:
@@ -233,7 +249,9 @@ class ContextBuilder:
         if compressed_tokens <= safe_target:
             return compressed
         if compressed_tokens >= current_tokens:
-            chunks = self._split_into_llm_chunks(text, max(1, min(input_budget, safe_target)))
+            chunks = self._split_into_llm_chunks(
+                text, max(1, min(input_budget, safe_target))
+            )
             if len(chunks) <= 1:
                 raise RuntimeError("LLM 压缩未能收敛到目标长度。")
             compressed = self._compress_chunk_sequence(chunks, safe_target, depth + 1)
@@ -243,15 +261,21 @@ class ContextBuilder:
                 raise RuntimeError("分块 LLM 压缩未能收敛到目标长度。")
         return self._compress_with_llm(compressed, safe_target, depth + 1)
 
-    def _compress_chunk_sequence(self, chunks: List[str], target_tokens: int, depth: int) -> str:
+    def _compress_chunk_sequence(
+        self, chunks: List[str], target_tokens: int, depth: int
+    ) -> str:
         """按目标预算压缩分块序列，再按原顺序拼接。"""
         if not chunks:
             return ""
         chunk_targets = self._allocate_target_tokens(chunks, target_tokens)
         compressed_chunks: List[str] = []
         for chunk, chunk_target in zip(chunks, chunk_targets):
-            compressed_chunks.append(self._compress_with_llm(chunk, chunk_target, depth + 1))
-        merged = "\n\n".join(item.strip() for item in compressed_chunks if item and item.strip()).strip()
+            compressed_chunks.append(
+                self._compress_with_llm(chunk, chunk_target, depth + 1)
+            )
+        merged = "\n\n".join(
+            item.strip() for item in compressed_chunks if item and item.strip()
+        ).strip()
         if not merged:
             raise RuntimeError("LLM 分块压缩返回空结果。")
         return merged
@@ -266,7 +290,9 @@ class ContextBuilder:
             raise RuntimeError("缺少 llm_client，无法执行统一 LLM 上下文压缩。")
         source_tokens = max(1, self.token_counter(context))
         safe_target = max(1, int(target_tokens))
-        target_ratio = min(self.compress_target_ratio, max(0.05, safe_target / source_tokens))
+        target_ratio = min(
+            self.compress_target_ratio, max(0.05, safe_target / source_tokens)
+        )
         prompt = CONTEXT_COMPRESS_PROMPT.format(
             target_ratio=f"{target_ratio:.2f}",
             target_tokens=safe_target,
@@ -280,10 +306,12 @@ class ContextBuilder:
         )
         output = (compressed or "").strip()
         if not output:
-            return context # 如果压缩失败，返回原始上下文
+            return context  # 如果压缩失败，返回原始上下文
         return output
 
-    def _allocate_target_tokens(self, parts: List[str], total_target_tokens: int) -> List[int]:
+    def _allocate_target_tokens(
+        self, parts: List[str], total_target_tokens: int
+    ) -> List[int]:
         """按原始 token 占比给各段分配压缩目标预算。"""
         if not parts:
             return []
@@ -294,14 +322,18 @@ class ContextBuilder:
         allocated = sum(targets)
 
         if allocated < safe_total:
-            order = sorted(range(len(weights)), key=lambda idx: weights[idx], reverse=True)
+            order = sorted(
+                range(len(weights)), key=lambda idx: weights[idx], reverse=True
+            )
             cursor = 0
             while allocated < safe_total and order:
                 targets[order[cursor % len(order)]] += 1
                 allocated += 1
                 cursor += 1
         elif allocated > safe_total:
-            order = sorted(range(len(targets)), key=lambda idx: targets[idx], reverse=True)
+            order = sorted(
+                range(len(targets)), key=lambda idx: targets[idx], reverse=True
+            )
             cursor = 0
             guard = 0
             while allocated > safe_total and order and guard < len(order) * safe_total:
@@ -333,7 +365,9 @@ class ContextBuilder:
             block = text[start:end].strip()
             if not block:
                 continue
-            bucket = "evidence" if match.group("name").strip() == "Evidence" else "other"
+            bucket = (
+                "evidence" if match.group("name").strip() == "Evidence" else "other"
+            )
             if first_bucket is None:
                 first_bucket = bucket
             if bucket == "evidence":
@@ -347,18 +381,26 @@ class ContextBuilder:
             first_bucket == "evidence",
         )
 
-    def _join_compressed_parts(self, evidence_context: str, other_context: str, evidence_first: bool) -> str:
+    def _join_compressed_parts(
+        self, evidence_context: str, other_context: str, evidence_first: bool
+    ) -> str:
         """按原始桶顺序把压缩后的两部分重新拼回单段上下文。"""
         ordered_parts = (
             [evidence_context, other_context]
             if evidence_first
             else [other_context, evidence_context]
         )
-        return "\n\n".join(part.strip() for part in ordered_parts if part and part.strip()).strip()
+        return "\n\n".join(
+            part.strip() for part in ordered_parts if part and part.strip()
+        ).strip()
 
     def _split_into_llm_chunks(self, text: str, input_budget: int) -> List[str]:
         """先按段落拆块；段落仍超预算时直接按固定 token 窗口继续切小。"""
-        paragraph_blocks = [block.strip() for block in re.split(r"\n{2,}", text.strip()) if block.strip()]
+        paragraph_blocks = [
+            block.strip()
+            for block in re.split(r"\n{2,}", text.strip())
+            if block.strip()
+        ]
         if not paragraph_blocks:
             return [text.strip()]
 
@@ -447,7 +489,9 @@ class ContextBuilder:
         # 2) Select：按评分排序，优先保留高价值片段
         # 3) Structure：分区组织，减少模型上下文混乱
         # 4) Compress：超长时裁剪，确保不超过 token 限制
-        chunks = self.gather(system_prompt, user_query, history, memories, evidences, notes)
+        chunks = self.gather(
+            system_prompt, user_query, history, memories, evidences, notes
+        )
         selected = self.select(chunks)
         structured = self.structure(selected)
         before_tokens = self.token_counter(structured)
@@ -473,8 +517,11 @@ class ContextBuilder:
         return compressed, trace_payload
 
     @staticmethod
-    def _build_chunk_stats(chunks: List[ContextChunk], selected: List[ContextChunk]) -> Dict[str, Any]:
+    def _build_chunk_stats(
+        chunks: List[ContextChunk], selected: List[ContextChunk]
+    ) -> Dict[str, Any]:
         """汇总上下文分块统计，便于追踪模型输入构成。"""
+
         def _classify(title: str) -> str:
             if title.startswith("Role"):
                 return "Role & Policy"
@@ -500,10 +547,25 @@ class ContextBuilder:
         }
 
     @staticmethod
-    def _default_token_counter(text: str) -> int:
-        """粗略 token 估算：按中文/英文字符长度估算。"""
-        import tiktoken  # type: ignore
+    @lru_cache(maxsize=1)
+    def _default_tokenizer():
+        """加载本地 Qwen tokenizer，并在进程内复用单例。"""
+        try:
+            from tokenizers import Tokenizer  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(
+                "未安装 tokenizers，无法加载本地 Qwen tokenizer。"
+            ) from exc
 
-        # 仅用于粗略估算，不保证与模型精确一致
-        enc = tiktoken.get_encoding("cl100k_base")
-        return len(enc.encode(text))
+        tokenizer_path = (
+            Path(__file__).resolve().parents[1] / "model" / "data" / "tokenizer.json"
+        )
+        if not tokenizer_path.exists():
+            raise RuntimeError(f"未找到 Qwen tokenizer 文件：{tokenizer_path}")
+        return Tokenizer.from_file(str(tokenizer_path))
+
+    @staticmethod
+    def _default_token_counter(text: str) -> int:
+        """使用本地 Qwen tokenizer 统计文本 token 数。"""
+        tokenizer = ContextBuilder._default_tokenizer()
+        return len(tokenizer.encode(text).ids)

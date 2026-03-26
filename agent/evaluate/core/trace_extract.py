@@ -46,7 +46,13 @@ def _is_run_outputs_ready(run: Any) -> bool:
     if not isinstance(outputs, dict):
         return False
     # 只要出现核心字段之一，即可认为已可用于评测提取。
-    for key in ("node_records", "final_state_output", "main_flow_trace", "answer", "metadata"):
+    for key in (
+        "node_records",
+        "final_state_output",
+        "main_flow_trace",
+        "answer",
+        "metadata",
+    ):
         if key in outputs:
             return True
     return False
@@ -86,7 +92,9 @@ def fetch_root_run_by_trace(
     if project.strip():
         kwargs["project_name"] = project
     if since_hours > 0:
-        kwargs["start_time"] = datetime.now(timezone.utc) - timedelta(hours=float(since_hours))
+        kwargs["start_time"] = datetime.now(timezone.utc) - timedelta(
+            hours=float(since_hours)
+        )
     attempts = max(1, int(max_retries))
     last_seen_runs = 0
     for _ in range(attempts):
@@ -95,8 +103,12 @@ def fetch_root_run_by_trace(
         matched = [run for run in runs if _extract_request_trace_id(run) == trace_id]
         if matched:
             matched = sorted(matched, key=_extract_start_time)
-            langgraph_roots = [run for run in matched if str(getattr(run, "name", "")) == "langgraph_agent"]
-            candidate = (langgraph_roots[0] if langgraph_roots else matched[0])
+            langgraph_roots = [
+                run
+                for run in matched
+                if str(getattr(run, "name", "")) == "langgraph_agent"
+            ]
+            candidate = langgraph_roots[0] if langgraph_roots else matched[0]
             if _is_run_outputs_ready(candidate):
                 return candidate
         time.sleep(max(0.0, float(retry_interval_seconds)))
@@ -109,8 +121,10 @@ def fetch_root_run_by_trace(
     matched = [run for run in runs if _extract_request_trace_id(run) == trace_id]
     if matched:
         matched = sorted(matched, key=_extract_start_time)
-        langgraph_roots = [run for run in matched if str(getattr(run, "name", "")) == "langgraph_agent"]
-        candidate = (langgraph_roots[0] if langgraph_roots else matched[0])
+        langgraph_roots = [
+            run for run in matched if str(getattr(run, "name", "")) == "langgraph_agent"
+        ]
+        candidate = langgraph_roots[0] if langgraph_roots else matched[0]
         if _is_run_outputs_ready(candidate):
             return candidate
 
@@ -120,64 +134,119 @@ def fetch_root_run_by_trace(
     )
 
 
-def _collect_tool_calls(node_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """从 node_records 收集工具调用。"""
-    calls: List[Dict[str, Any]] = []
-    seen = set()
+def _collect_tool_execution_records(
+    node_records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """从 node_records 提取完整工具执行记录，保留实际调用顺序。"""
+    input_records: List[Dict[str, Any]] = []
+    output_records: Dict[str, Dict[str, Any]] = {}
     for record in node_records:
-        prompt_records = record.get("prompt_records") if isinstance(record, dict) else None
+        prompt_records = (
+            record.get("prompt_records") if isinstance(record, dict) else None
+        )
         if not isinstance(prompt_records, list):
             continue
         for item in prompt_records:
             if not isinstance(item, dict):
                 continue
-            if item.get("stage") != "tool_dispatch_inputs":
-                continue
-            tools = item.get("tools") if isinstance(item.get("tools"), list) else []
-            for tool in tools:
-                if not isinstance(tool, dict):
-                    continue
-                name = str(tool.get("tool") or "").strip()
-                if not name:
-                    continue
-                arguments = tool.get("arguments") if isinstance(tool.get("arguments"), dict) else {}
-                signature = json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False, sort_keys=True)
-                if signature in seen:
-                    continue
-                seen.add(signature)
-                calls.append(
-                    {
-                        "name": name,
-                        "arguments": arguments,
-                        "step_id": str(tool.get("step_id") or ""),
-                    }
+            stage = str(item.get("stage") or "").strip()
+            if stage == "tool_dispatch_inputs":
+                tools_raw = item.get("tools")
+                tools: List[Dict[str, Any]] = (
+                    tools_raw if isinstance(tools_raw, list) else []
                 )
-    return calls
-
-
-def _collect_tool_results(node_records: List[Dict[str, Any]]) -> Dict[str, str]:
-    """收集工具执行结果摘要（按 step_id 索引）。"""
-    results: Dict[str, str] = {}
-    for record in node_records:
-        prompt_records = record.get("prompt_records") if isinstance(record, dict) else None
-        if not isinstance(prompt_records, list):
-            continue
-        for item in prompt_records:
-            if not isinstance(item, dict):
+                for tool in tools:
+                    if not isinstance(tool, dict):
+                        continue
+                    name = str(tool.get("tool") or "").strip()
+                    if not name:
+                        continue
+                    input_records.append(
+                        {
+                            "step_id": str(tool.get("step_id") or ""),
+                            "name": name,
+                            "arguments": tool.get("arguments")
+                            if isinstance(tool.get("arguments"), dict)
+                            else {},
+                        }
+                    )
                 continue
-            if item.get("stage") != "tool_dispatch_outputs":
+
+            if stage != "tool_dispatch_outputs":
                 continue
-            output_items = item.get("results") if isinstance(item.get("results"), list) else []
+            output_items_raw = item.get("results")
+            output_items: List[Dict[str, Any]] = (
+                output_items_raw if isinstance(output_items_raw, list) else []
+            )
             for out in output_items:
                 if not isinstance(out, dict):
                     continue
                 step_id = str(out.get("step_id") or "").strip()
                 if not step_id:
                     continue
-                preview = str(out.get("result_preview") or "")
-                if preview:
-                    results[step_id] = preview
-    return results
+                output_records[step_id] = {
+                    "status": str(out.get("status") or "unknown"),
+                    "error": str(out.get("error") or ""),
+                    "result_preview": str(out.get("result_preview") or ""),
+                    "evidences_size": int(out.get("evidences_size") or 0),
+                    "sources_size": int(out.get("sources_size") or 0),
+                }
+
+    merged_records: List[Dict[str, Any]] = []
+    for item in input_records:
+        step_id = str(item.get("step_id") or "")
+        output = output_records.get(step_id, {})
+        merged_records.append(
+            {
+                "step_id": step_id,
+                "name": str(item.get("name") or ""),
+                "arguments": item.get("arguments")
+                if isinstance(item.get("arguments"), dict)
+                else {},
+                "status": str(output.get("status") or "unknown"),
+                "error": str(output.get("error") or ""),
+                "result_preview": str(output.get("result_preview") or ""),
+                "evidences_size": int(output.get("evidences_size") or 0),
+                "sources_size": int(output.get("sources_size") or 0),
+            }
+        )
+    return merged_records
+
+
+def _collect_tool_calls(
+    tool_execution_records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """从工具执行记录中提取工具调用。"""
+    calls: List[Dict[str, Any]] = []
+    for record in tool_execution_records:
+        if not isinstance(record, dict):
+            continue
+        name = str(record.get("name") or "").strip()
+        if not name:
+            continue
+        calls.append(
+            {
+                "name": name,
+                "arguments": record.get("arguments")
+                if isinstance(record.get("arguments"), dict)
+                else {},
+                "step_id": str(record.get("step_id") or ""),
+            }
+        )
+    return calls
+
+
+def _build_tool_response_text(tool_execution_record: Dict[str, Any]) -> str:
+    """把单步工具执行结果拼成稳定的文本摘要。"""
+    status = str(tool_execution_record.get("status") or "unknown")
+    error = str(tool_execution_record.get("error") or "")
+    preview = str(tool_execution_record.get("result_preview") or "")
+    lines = [f"status={status}"]
+    if error:
+        lines.append(f"error={error}")
+    if preview:
+        lines.append(f"result_preview={preview}")
+    return "\n".join(lines)
 
 
 def _collect_plan_text(node_records: List[Dict[str, Any]]) -> str:
@@ -191,7 +260,10 @@ def _collect_plan_text(node_records: List[Dict[str, Any]]) -> str:
         return ""
 
     final_output = _safe_json_loads(plan_record.get("final_output"))
-    plan_steps = final_output.get("plan_steps") if isinstance(final_output.get("plan_steps"), list) else []
+    plan_steps_raw = final_output.get("plan_steps")
+    plan_steps: List[Dict[str, Any]] = (
+        plan_steps_raw if isinstance(plan_steps_raw, list) else []
+    )
     reason = str(final_output.get("plan_reason") or "").strip()
     lines: List[str] = []
     if reason:
@@ -209,23 +281,35 @@ def _collect_memory_text(node_records: List[Dict[str, Any]]) -> str:
     """提取记忆节点信息。"""
     memory_record = None
     for record in node_records:
-        if isinstance(record, dict) and str(record.get("node_name") or "") == "collect_memory_notes":
+        if (
+            isinstance(record, dict)
+            and str(record.get("node_name") or "") == "collect_memory_notes"
+        ):
             memory_record = record
             break
     if not isinstance(memory_record, dict):
         return ""
     payload = _safe_json_loads(memory_record.get("final_output"))
-    memories = payload.get("memories") if isinstance(payload.get("memories"), list) else []
-    notes = payload.get("notes") if isinstance(payload.get("notes"), list) else []
+    memories_raw = payload.get("memories")
+    memories: List[Any] = memories_raw if isinstance(memories_raw, list) else []
+    notes_raw = payload.get("notes")
+    notes: List[Any] = notes_raw if isinstance(notes_raw, list) else []
     return f"memories={len(memories)}; notes={len(notes)}"
 
 
-def _collect_observation_text(final_state_output: Dict[str, Any], tool_calls: List[Dict[str, Any]]) -> str:
+def _collect_observation_text(
+    final_state_output: Dict[str, Any], tool_calls: List[Dict[str, Any]]
+) -> str:
     """构建 observation 文本摘要。"""
-    conflicts = final_state_output.get("conflicts") if isinstance(final_state_output.get("conflicts"), list) else []
-    pending_ids = final_state_output.get("pending_ids") if isinstance(final_state_output.get("pending_ids"), list) else []
-    completed_ids = (
-        final_state_output.get("completed_ids") if isinstance(final_state_output.get("completed_ids"), list) else []
+    conflicts_raw = final_state_output.get("conflicts")
+    conflicts: List[Any] = conflicts_raw if isinstance(conflicts_raw, list) else []
+    pending_ids_raw = final_state_output.get("pending_ids")
+    pending_ids: List[Any] = (
+        pending_ids_raw if isinstance(pending_ids_raw, list) else []
+    )
+    completed_ids_raw = final_state_output.get("completed_ids")
+    completed_ids: List[Any] = (
+        completed_ids_raw if isinstance(completed_ids_raw, list) else []
     )
     return (
         f"completed={len(completed_ids)}; pending={len(pending_ids)}; "
@@ -266,14 +350,16 @@ def _build_evidence_summary(
         for item in evidence_items:
             source = str(item.get("source") or "unknown").strip() or "unknown"
             source_counts[source] = source_counts.get(source, 0) + 1
-        source_stat = ", ".join(f"{key}:{value}" for key, value in sorted(source_counts.items()))
+        source_stat = ", ".join(
+            f"{key}:{value}" for key, value in sorted(source_counts.items())
+        )
         lines = [
             f"evidence_count={len(evidence_items)}; tool_calls={len(tool_calls)}; sources={source_stat}",
         ]
         # 为避免评分提示过长，仅拼接前 6 条证据摘要。
         for index, item in enumerate(evidence_items[:6], start=1):
             lines.append(
-                f"[{index}] source={item.get('source','')}; "
+                f"[{index}] source={item.get('source', '')}; "
                 f"title={str(item.get('title') or '')[:80]}; "
                 f"content={str(item.get('content') or '')[:220]}"
             )
@@ -289,13 +375,19 @@ def _build_evidence_summary(
     )
 
 
-def build_trajectory_messages(query: str, answer: str, tool_calls: List[Dict[str, Any]], tool_results: Dict[str, str]) -> List[Dict[str, Any]]:
+def build_trajectory_messages(
+    query: str,
+    answer: str,
+    tool_execution_records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     """构建 TrajectoryComprehensiveGrader 所需的 messages。"""
     messages: List[Dict[str, Any]] = [{"role": "user", "content": query}]
-    for call in tool_calls:
-        name = str(call.get("name") or "")
-        args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
-        step_id = str(call.get("step_id") or "")
+    for record in tool_execution_records:
+        name = str(record.get("name") or "")
+        args = (
+            record.get("arguments") if isinstance(record.get("arguments"), dict) else {}
+        )
+        step_id = str(record.get("step_id") or "")
         messages.append(
             {
                 "role": "assistant",
@@ -310,36 +402,36 @@ def build_trajectory_messages(query: str, answer: str, tool_calls: List[Dict[str
                 ],
             }
         )
-        if step_id and step_id in tool_results:
-            messages.append({"role": "tool", "content": tool_results[step_id], "tool_call_id": step_id})
+        tool_response = _build_tool_response_text(record)
+        if tool_response:
+            messages.append(
+                {"role": "tool", "content": tool_response, "tool_call_id": step_id}
+            )
     messages.append({"role": "assistant", "content": answer})
     return messages
 
 
-def extract_trace_artifacts(query: str, answer: str, root_run: Any) -> Dict[str, Any]:
-    """从 root run 输出提取评测所需字段。"""
-    outputs = getattr(root_run, "outputs", None)
-    if not isinstance(outputs, dict):
-        raise RuntimeError("root run 输出为空，无法提取 trace 字段")
-
-    node_records = outputs.get("node_records") if isinstance(outputs.get("node_records"), list) else []
-    final_state_output = outputs.get("final_state_output") if isinstance(outputs.get("final_state_output"), dict) else {}
-    main_flow_trace = outputs.get("main_flow_trace") if isinstance(outputs.get("main_flow_trace"), dict) else {}
-
-    tool_calls = _collect_tool_calls(node_records)
-    tool_results = _collect_tool_results(node_records)
+def rebuild_trace_artifacts(
+    *,
+    query: str,
+    answer: str,
+    node_records: List[Dict[str, Any]],
+    final_state_output: Dict[str, Any],
+    main_flow_trace: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """基于已保存 trace 载荷重建评分所需字段，供后补重评分复用。"""
+    tool_execution_records = _collect_tool_execution_records(node_records)
+    tool_calls = _collect_tool_calls(tool_execution_records)
     trajectory_messages = build_trajectory_messages(
         query=query,
         answer=answer,
-        tool_calls=tool_calls,
-        tool_results=tool_results,
+        tool_execution_records=tool_execution_records,
     )
 
     plan_text = _collect_plan_text(node_records)
     memory_text = _collect_memory_text(node_records)
     observation_text = _collect_observation_text(final_state_output, tool_calls)
     evidence_items = _collect_evidence_items(final_state_output)
-
     evidence_summary = _build_evidence_summary(
         final_state_output=final_state_output,
         evidence_items=evidence_items,
@@ -349,7 +441,8 @@ def extract_trace_artifacts(query: str, answer: str, root_run: Any) -> Dict[str,
     return {
         "node_records": node_records,
         "final_state_output": final_state_output,
-        "main_flow_trace": main_flow_trace,
+        "main_flow_trace": main_flow_trace or {},
+        "tool_execution_records": tool_execution_records,
         "tool_calls": tool_calls,
         "trajectory_messages": trajectory_messages,
         "plan_text": plan_text,
@@ -358,3 +451,31 @@ def extract_trace_artifacts(query: str, answer: str, root_run: Any) -> Dict[str,
         "evidence_items": evidence_items,
         "evidence_summary": evidence_summary,
     }
+
+
+def extract_trace_artifacts(query: str, answer: str, root_run: Any) -> Dict[str, Any]:
+    """从 root run 输出提取评测所需字段。"""
+    outputs = getattr(root_run, "outputs", None)
+    if not isinstance(outputs, dict):
+        raise RuntimeError("root run 输出为空，无法提取 trace 字段")
+
+    node_records_raw = outputs.get("node_records")
+    node_records: List[Dict[str, Any]] = (
+        node_records_raw if isinstance(node_records_raw, list) else []
+    )
+    final_state_output_raw = outputs.get("final_state_output")
+    final_state_output: Dict[str, Any] = (
+        final_state_output_raw if isinstance(final_state_output_raw, dict) else {}
+    )
+    main_flow_trace_raw = outputs.get("main_flow_trace")
+    main_flow_trace: Dict[str, Any] = (
+        main_flow_trace_raw if isinstance(main_flow_trace_raw, dict) else {}
+    )
+
+    return rebuild_trace_artifacts(
+        query=query,
+        answer=answer,
+        node_records=node_records,
+        final_state_output=final_state_output,
+        main_flow_trace=main_flow_trace,
+    )

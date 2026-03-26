@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
+
 # ps aux | grep start_vllm
 # nohup python start_vllm.py
 # curl http://127.0.0.1:2222/v1/models
@@ -37,9 +38,34 @@ def _read_int_env(name: str, default: int, *, minimum: int | None = None) -> int
     try:
         value = int(raw_value)
     except ValueError as exc:
-        raise RuntimeError(f"环境变量 {name} 必须是整数，当前值为：{raw_value}") from exc
+        raise RuntimeError(
+            f"环境变量 {name} 必须是整数，当前值为：{raw_value}"
+        ) from exc
     if minimum is not None and value < minimum:
         raise RuntimeError(f"环境变量 {name} 必须 >= {minimum}，当前值为：{value}")
+    return value
+
+
+def _read_float_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"环境变量 {name} 必须是数字，当前值为：{raw_value}"
+        ) from exc
+    if minimum is not None and value < minimum:
+        raise RuntimeError(f"环境变量 {name} 必须 >= {minimum}，当前值为：{value}")
+    if maximum is not None and value > maximum:
+        raise RuntimeError(f"环境变量 {name} 必须 <= {maximum}，当前值为：{value}")
     return value
 
 
@@ -60,10 +86,25 @@ def _parse_args() -> argparse.Namespace:
     _load_project_env()
     default_host, default_port = _read_default_host_port()
     parser = argparse.ArgumentParser(description="启动本机 vLLM OpenAI 兼容服务")
-    parser.add_argument("--model", default=os.environ.get("LOCAL_LLM_MODEL", "Qwen/Qwen3.5-4B"), help="vLLM 模型 ID")
-    parser.add_argument("--host", default=default_host, help="监听地址，默认读取 LOCAL_LLM_BASE_URL")
-    parser.add_argument("--port", type=int, default=default_port, help="监听端口，默认读取 LOCAL_LLM_BASE_URL")
-    parser.add_argument("--api-key", default=os.environ.get("LOCAL_LLM_API_KEY", "local-dev-key"), help="OpenAI 兼容接口 API Key")
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("LOCAL_LLM_MODEL", "QuantTrio/Qwen3.5-4B-AWQ"),
+        help="vLLM 模型 ID",
+    )
+    parser.add_argument(
+        "--host", default=default_host, help="监听地址，默认读取 LOCAL_LLM_BASE_URL"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=default_port,
+        help="监听端口，默认读取 LOCAL_LLM_BASE_URL",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("LOCAL_LLM_API_KEY", "local-dev-key"),
+        help="OpenAI 兼容接口 API Key",
+    )
     parser.add_argument(
         "--max-model-len",
         type=int,
@@ -73,7 +114,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.8,
+        default=_read_float_env(
+            "LOCAL_VLLM_GPU_MEMORY_UTILIZATION", 0.8, minimum=0.01, maximum=1.0
+        ),
         help="GPU 显存占用比例（0~1）",
     )
     parser.add_argument(
@@ -83,10 +126,30 @@ def _parse_args() -> argparse.Namespace:
         help="单批次最大 token 数（降低峰值显存）",
     )
     parser.add_argument(
+        "--quantization",
+        default=os.environ.get("LOCAL_VLLM_QUANTIZATION", ""),
+        help="量化后端，例如 awq、gptq；留空则由脚本或模型配置自动判断",
+    )
+    parser.add_argument(
+        "--load-format",
+        default=os.environ.get("LOCAL_VLLM_LOAD_FORMAT", ""),
+        help="可选覆盖权重加载格式，例如 safetensors、bitsandbytes",
+    )
+    parser.add_argument(
+        "--dtype",
+        default=os.environ.get("LOCAL_VLLM_DTYPE", ""),
+        help="可选覆盖权重 dtype，例如 half、bfloat16；AWQ 默认自动使用 half",
+    )
+    parser.add_argument(
         "--tensor-parallel-size",
         type=int,
-        default=4,
-        help="张量并行卡数（多卡推理常用参数）",
+        default=_read_int_env("LOCAL_VLLM_TENSOR_PARALLEL_SIZE", 1, minimum=1),
+        help="张量并行卡数，默认读取 LOCAL_VLLM_TENSOR_PARALLEL_SIZE",
+    )
+    parser.add_argument(
+        "--cuda-visible-devices",
+        default=os.environ.get("LOCAL_VLLM_CUDA_VISIBLE_DEVICES", "").strip(),
+        help="可选指定 vLLM 可见 GPU，例如 0 或 1,2；留空则继承当前环境",
     )
     parser.add_argument(
         "--pipeline-parallel-size",
@@ -179,6 +242,28 @@ def _build_command(args: argparse.Namespace) -> List[str]:
     if args.pipeline_parallel_size > 1:
         command.extend(["--pipeline-parallel-size", str(args.pipeline_parallel_size)])
 
+    # 当前项目把 Qwen3.5 的 4-bit 部署作为常见路径处理：
+    # 量化仓默认优先从模型名识别 AWQ/GPTQ，再允许环境变量或命令行显式覆盖。
+    quantization = (args.quantization or "").strip().lower()
+    normalized_model_name = args.model.upper()
+    if not quantization:
+        if "AWQ" in normalized_model_name:
+            quantization = "awq"
+        elif "GPTQ" in normalized_model_name:
+            quantization = "gptq"
+    if quantization:
+        command.extend(["--quantization", quantization])
+
+    load_format = (args.load_format or "").strip()
+    if load_format:
+        command.extend(["--load-format", load_format])
+
+    dtype = (args.dtype or "").strip().lower()
+    if not dtype and quantization == "awq":
+        dtype = "half"
+    if dtype:
+        command.extend(["--dtype", dtype])
+
     # 默认不显式透传 trust_remote_code，避免对 Qwen3/Qwen3.5 这类已内置架构模型打印“无效参数”告警。
     if args.trust_remote_code is True:
         command.append("--trust-remote-code")
@@ -236,7 +321,9 @@ def _build_command(args: argparse.Namespace) -> List[str]:
     # 因此在 vLLM 启动阶段直接注入默认 chat_template_kwargs，避免每次请求单独透传。
     default_chat_template_kwargs = (args.default_chat_template_kwargs or "").strip()
     if not default_chat_template_kwargs and "Qwen3.5" in args.model:
-        default_chat_template_kwargs = json.dumps({"enable_thinking": False}, ensure_ascii=False)
+        default_chat_template_kwargs = json.dumps(
+            {"enable_thinking": False}, ensure_ascii=False
+        )
     if default_chat_template_kwargs:
         try:
             parsed_kwargs = json.loads(default_chat_template_kwargs)
@@ -254,9 +341,10 @@ def _build_command(args: argparse.Namespace) -> List[str]:
         )
 
     if args.tool_call_parser:
-        command.extend(["--enable-auto-tool-choice", "--tool-call-parser", args.tool_call_parser])
+        command.extend(
+            ["--enable-auto-tool-choice", "--tool-call-parser", args.tool_call_parser]
+        )
     return command
-
 
 
 def _check_port_free(host: str, port: int) -> None:
@@ -271,6 +359,20 @@ def _check_port_free(host: str, port: int) -> None:
         )
 
 
+def _validate_parallel_devices(args: argparse.Namespace) -> None:
+    visible_devices = (args.cuda_visible_devices or "").strip()
+    if not visible_devices:
+        return
+    device_list = [item.strip() for item in visible_devices.split(",") if item.strip()]
+    if not device_list:
+        raise RuntimeError("--cuda-visible-devices 不能为空字符串。")
+    # 思路：用户显式限制了可见卡时，需要保证张量并行度不超过可见卡数量，避免启动后才在 NCCL 阶段报错。
+    if args.tensor_parallel_size > len(device_list):
+        raise RuntimeError(
+            "--tensor-parallel-size 不能大于 --cuda-visible-devices 中配置的 GPU 数量。"
+        )
+
+
 def main() -> int:
     args = _parse_args()
     if args.tensor_parallel_size < 1:
@@ -282,11 +384,14 @@ def main() -> int:
     if not (0.0 < args.gpu_memory_utilization <= 1.0):
         raise RuntimeError("--gpu-memory-utilization 必须在 (0, 1] 范围内。")
 
+    _validate_parallel_devices(args)
     _check_port_free(args.host, args.port)
 
     command = _build_command(args)
     child_env = os.environ.copy()
     child_env["VLLM_USE_MODELSCOPE"] = "True" if args.use_modelscope else "False"
+    if args.cuda_visible_devices:
+        child_env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     process = subprocess.Popen(command, env=child_env)
 
     def _shutdown(signum: int, _frame) -> None:

@@ -23,6 +23,14 @@ DIMENSION_WEIGHTS: Dict[str, float] = {
     "evidence_groundedness": 0.35,
 }
 
+# tool_use_accuracy 维度内部拆分为三个子评分，先在工具大维度内聚合，
+# 再按 DIMENSION_WEIGHTS 参与主链路总分，保证历史 overall 口径稳定。
+TOOL_SUBSCORE_WEIGHTS: Dict[str, float] = {
+    "tool_selection_accuracy": 0.4,
+    "tool_argument_quality": 0.3,
+    "tool_outcome_effectiveness": 0.3,
+}
+
 # 用于 ToolSelection/ToolParameter 等评分器的工具定义。
 # 这里采用编排层的抽象工具名（nl2sql/rag/graph/todo/none），
 # 与运行时 step.tool 保持一致，避免跨层命名不一致带来的误判。
@@ -111,3 +119,19 @@ def ensure_workdir(path: Path) -> Path:
 def resolve_langsmith_project(default: str = "internet-number-qa") -> str:
     """读取 LangSmith 项目名。"""
     return (os.getenv("LANGSMITH_PROJECT") or default).strip() or default
+
+
+def ensure_langsmith_tracing_enabled() -> bool:
+    """为评测链路自动开启 LangSmith tracing。
+
+    `fill_answers` 需要依赖 LangSmith trace 回拉 root run，因此评测入口统一在
+    代码内写入 `LANGSMITH_TRACING=true`，避免每次手工导出环境变量。
+
+    Returns:
+        bool: 是否在本次调用中写入了环境变量。
+    """
+    enabled = (os.getenv("LANGSMITH_TRACING") or "").strip().lower()
+    if enabled == "true":
+        return False
+    os.environ["LANGSMITH_TRACING"] = "true"
+    return True

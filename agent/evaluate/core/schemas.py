@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from pydantic import BaseModel, Field
+
 
 def _require_non_empty_str(name: str, value: Any) -> str:
     """校验字符串字段非空。"""
@@ -25,6 +27,17 @@ def _as_list(value: Any) -> List[Any]:
     return value
 
 
+class GraderScore01Callback(BaseModel):
+    """用于 0~1 评分场景的结构化输出约束。"""
+
+    reason: str = Field(description="reason")
+    score: float = Field(ge=0.0, le=1.0, description="score")
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The metadata of the grader result",
+    )
+
+
 @dataclass
 class QuerySample:
     """阶段 A 生成的题目样本。"""
@@ -41,14 +54,22 @@ class QuerySample:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "QuerySample":
         """从字典构建 QuerySample 并进行字段校验。"""
-        expected_tools = [str(item).strip() for item in _as_list(data.get("expected_tools")) if str(item).strip()]
+        expected_tools = [
+            str(item).strip()
+            for item in _as_list(data.get("expected_tools"))
+            if str(item).strip()
+        ]
         expected_tool_calls_raw = _as_list(data.get("expected_tool_calls"))
         expected_tool_calls: List[Dict[str, Any]] = []
         for item in expected_tool_calls_raw:
             if not isinstance(item, dict):
                 raise ValueError("expected_tool_calls 元素必须为对象")
             expected_tool_calls.append(item)
-        tags = [str(item).strip() for item in _as_list(data.get("tags")) if str(item).strip()]
+        tags = [
+            str(item).strip()
+            for item in _as_list(data.get("tags"))
+            if str(item).strip()
+        ]
         return cls(
             id=_require_non_empty_str("id", data.get("id")),
             query=_require_non_empty_str("query", data.get("query")),
@@ -79,6 +100,7 @@ class AnswerSample:
     node_records: List[Dict[str, Any]] = field(default_factory=list)
     final_state_output: Dict[str, Any] = field(default_factory=dict)
     main_flow_trace: Dict[str, Any] = field(default_factory=dict)
+    tool_execution_records: List[Dict[str, Any]] = field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     trajectory_messages: List[Dict[str, Any]] = field(default_factory=list)
     plan_text: str = ""
@@ -107,6 +129,7 @@ class AnswerSample:
             node_records=list(data.get("node_records") or []),
             final_state_output=dict(data.get("final_state_output") or {}),
             main_flow_trace=dict(data.get("main_flow_trace") or {}),
+            tool_execution_records=list(data.get("tool_execution_records") or []),
             tool_calls=list(data.get("tool_calls") or []),
             trajectory_messages=list(data.get("trajectory_messages") or []),
             plan_text=str(data.get("plan_text") or ""),
@@ -147,10 +170,16 @@ class ScoredSample:
             answer=str(data.get("answer") or ""),
             status=_require_non_empty_str("status", data.get("status")),
             error=str(data.get("error") or ""),
-            scores_raw={str(k): float(v) for k, v in dict(data.get("scores_raw") or {}).items()},
-            scores_dim={str(k): float(v) for k, v in dict(data.get("scores_dim") or {}).items()},
+            scores_raw={
+                str(k): float(v) for k, v in dict(data.get("scores_raw") or {}).items()
+            },
+            scores_dim={
+                str(k): float(v) for k, v in dict(data.get("scores_dim") or {}).items()
+            },
             overall_score=float(data.get("overall_score") or 0.0),
-            score_reasons={str(k): str(v) for k, v in dict(data.get("score_reasons") or {}).items()},
+            score_reasons={
+                str(k): str(v) for k, v in dict(data.get("score_reasons") or {}).items()
+            },
         )
 
     def to_dict(self) -> Dict[str, Any]:

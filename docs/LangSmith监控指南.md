@@ -128,6 +128,21 @@ uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
    - 子 run：自动节点/LLM runs 与 MCP 服务端工具 spans，均有父子关系
    - root outputs：存在 `node_records`、`final_state_output`、`main_flow_trace`
 
+### 4.4 评测结果写回 LangSmith
+
+- `python -m agent.evaluate.pipelines.score_pipeline --push-langsmith --langsmith-mode writeback`
+  - 直接把本地 `scores_raw`、`scores_dim`、`overall_score` 写成 Experiment run outputs 和 feedback。
+  - 优点：不重复调用 grader，Experiment 中能直接看到评分列。
+- `python -m agent.evaluate.pipelines.score_pipeline --push-langsmith --langsmith-mode evaluate`
+  - 保留旧行为：在 LangSmith evaluate 阶段再次执行 grader。
+  - 适合排查 evaluator 自身问题，但会多一次模型调用。
+
+查看方式：
+
+1. 打开 `score_summary.json -> langsmith.experiment_url`。  
+2. 在 Compare / Experiment 页面查看 Feedback 列：`overall_score`、`reasoning_planning`、`tool_use_accuracy`、`tool_selection_accuracy`、`tool_argument_quality`、`tool_outcome_effectiveness`。  
+3. 点开样本后，在 Outputs 面板查看 `scores_raw`、`scores_dim`、`overall_score`、`score_reasons` 与 `tool_execution_records`。  
+
 ## 5. 命令行排障
 
 使用脚本聚合链路并检测是否存在“单请求多 trace”：

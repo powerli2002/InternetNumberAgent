@@ -132,7 +132,17 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
    uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
    ```
 
-2. （可选）本机启动 vLLM（OpenAI 兼容接口）
+2. （可选）同步 RFC 知识并做 RAG 验证
+   ```bash
+   python -m agent.scripts.sync_rfc_docs --root .
+   python agent/knowledge_ingest.py --root . --path agent/knowledge/rfc --collection fusion_docs_rfc_eval --reset
+   python -m agent.scripts.evaluate_rfc_rag --root . --collection fusion_docs_rfc_eval --json-out agent/store/rfc/rag_eval_report.json --fail-under-hit3 0.9 --fail-under-mrr 0.75
+   ```
+   - 当前内置只抓指定 RFC：BGP `4271/4760/6793/7606`，WHOIS/RDAP `3912/7480/7481/7482/7483/9082/9083`
+   - `sync_rfc_docs` 会把 RFC Editor 官方 `txt + json` 组装为结构化 Markdown，并落到 `agent/knowledge/rfc/<topic>/`
+   - 建议先写入独立 collection `fusion_docs_rfc_eval` 做隔离验证；确认召回效果后，再执行 `python agent/knowledge_ingest.py --root . --path agent/knowledge` 增量并入当前主 collection
+
+3. （可选）本机启动 vLLM（OpenAI 兼容接口）
    ```bash
    python agent/model/start_vllm.py
    ```
@@ -140,17 +150,23 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
      - `LLM_BACKEND=local`
      - `LOCAL_LLM_API_KEY=your-local-key`
      - `LOCAL_LLM_BASE_URL=http://127.0.0.1:2222/v1`
-     - `LOCAL_LLM_MODEL=Qwen/Qwen3.5-4B`
-     - `LOCAL_VLLM_MAX_MODEL_LEN=16384`
-     - `LLM_TEMPERATURE=0.2`
-     - `LLM_TOOL_TEMPERATURE=0.0`
-     - `LLM_CONTEXT_COMPRESS_TEMPERATURE=0.0`
-   - `agent/model/start_vllm.py` 当前默认不显式透传 `trust_remote_code`，并在 `tensor_parallel_size > 2` 时自动追加 `--disable-custom-all-reduce`，减少当前 4 张 `RTX 2080 Ti` 环境下的无效告警。
-   - 启动脚本会自动读取 `conf/.env` 中的 `LOCAL_LLM_MODEL`、`LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_VLLM_MAX_MODEL_LEN`，命令行参数仅用于显式覆盖默认值。
-   - 对 `Qwen/Qwen3.5-4B`，脚本会额外默认追加 `--attention-backend TRITON_ATTN`、`--mm-encoder-attn-backend TRITON_ATTN`、`--language-model-only`、`--skip-mm-profiling`，并通过 `--default-chat-template-kwargs '{"enable_thinking": false}'` 默认关闭 thinking，避免本地 Agent 请求被长 `<think>` 链路拖慢。
-   - `Qwen/Qwen3.5-4B` 首次冷启动会先从 Hugging Face 下载约 9.3GB 权重；下载完成前 `2222` 端口不会进入监听状态。
+      - `LOCAL_LLM_MODEL=QuantTrio/Qwen3.5-4B-AWQ`
+      - `LOCAL_VLLM_MAX_MODEL_LEN=16384`
+      - `LOCAL_VLLM_QUANTIZATION=awq`
+      - `LOCAL_VLLM_DTYPE=half`
+      - `LOCAL_VLLM_TENSOR_PARALLEL_SIZE=1`
+      - `LOCAL_VLLM_CUDA_VISIBLE_DEVICES=0`
+      - `LLM_TEMPERATURE=0.2`
+      - `LLM_TOOL_TEMPERATURE=0.0`
+      - `LLM_CONTEXT_COMPRESS_TEMPERATURE=0.0`
+    - `agent/model/start_vllm.py` 当前默认不显式透传 `trust_remote_code`，并在 `tensor_parallel_size > 2` 时自动追加 `--disable-custom-all-reduce`，减少当前 4 张 `RTX 2080 Ti` 环境下的无效告警。
+    - 启动脚本会自动读取 `conf/.env` 中的 `LOCAL_LLM_MODEL`、`LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_VLLM_MAX_MODEL_LEN`、`LOCAL_VLLM_QUANTIZATION`、`LOCAL_VLLM_DTYPE`、`LOCAL_VLLM_TENSOR_PARALLEL_SIZE`、`LOCAL_VLLM_CUDA_VISIBLE_DEVICES`，命令行参数仅用于显式覆盖默认值。
+    - 当前默认本机模型改为 `QuantTrio/Qwen3.5-4B-AWQ`，它是基于 `Qwen/Qwen3.5-4B` 的 4-bit AWQ 量化版本；脚本会自动追加 `--quantization awq`、`--dtype half`。
+    - 当前默认部署为单卡：`LOCAL_VLLM_TENSOR_PARALLEL_SIZE=1` 且 `LOCAL_VLLM_CUDA_VISIBLE_DEVICES=0`，vLLM 仅使用第 0 张 GPU。
+    - 对 `Qwen3.5` 系列，脚本仍会额外默认追加 `--attention-backend TRITON_ATTN`、`--mm-encoder-attn-backend TRITON_ATTN`、`--language-model-only`、`--skip-mm-profiling`，并通过 `--default-chat-template-kwargs '{"enable_thinking": false}'` 默认关闭 thinking，避免本地 Agent 请求被长 `<think>` 链路拖慢。
+    - `QuantTrio/Qwen3.5-4B-AWQ` 首次冷启动会先从 Hugging Face 下载约 6.1GB 权重；下载完成前 `2222` 端口不会进入监听状态。
 
-3. 启动前端（Agent Chat UI）
+4. 启动前端（Agent Chat UI）
    ```bash
    cd agent-chat-ui
    pnpm install
@@ -270,6 +286,13 @@ python -m agent.scripts.trace_by_metadata_id \
 4. 运行多维评分并写入 LangSmith Experiment
 5. 人工修订 `gold.readable.yaml` 后转换为 `gold.jsonl`（仅作为 grader 范例集）
 
+当前评分对外仍保持 4 个主维度：`reasoning_planning / tool_use_accuracy / final_response_quality / evidence_groundedness`。
+其中 `tool_use_accuracy` 已升级为 3 个工具子评分聚合：
+
+- `tool_selection_accuracy`：是否选对工具（集合级 F1）
+- `tool_argument_quality`：工具参数是否完整、正确、无幻觉
+- `tool_outcome_effectiveness`：工具结果是否真正推动最终回答
+
 起步题集已生成：`agent/evaluate/data/queries_seed_30.jsonl`（兼容保留 `queries_seed_26.jsonl`）。
 当前默认分布：`20 RAG（仅 Milvus 可答） + 5 NL2SQL + 5 Neo4j`。
 
@@ -277,9 +300,12 @@ python -m agent.scripts.trace_by_metadata_id \
 
 ```bash
 python -m agent.evaluate.pipelines.generate_queries --count 30 --out agent/evaluate/data/queries.jsonl
+# `fill_answers` 会自动开启 LANGSMITH_TRACING=true
 python -m agent.evaluate.pipelines.fill_answers --in agent/evaluate/data/queries.jsonl --out agent/evaluate/data/answers.jsonl
 python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json
-python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith
+python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
+# 对已完成的 answers.jsonl 做后补工具重评分
+python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.posthoc.jsonl --summary-out agent/evaluate/data/score_summary.posthoc.json --manual-review-out agent/evaluate/data/manual_review.posthoc.csv --posthoc-tool-rescore --posthoc-answers-out agent/evaluate/data/answers.posthoc.jsonl --push-langsmith --langsmith-mode writeback
 python -m agent.evaluate.pipelines.convert_gold_readable --readable agent/evaluate/data/gold.readable.yaml --out agent/evaluate/data/gold.jsonl --base-gold agent/evaluate/data/gold.jsonl --answers agent/evaluate/data/answers.jsonl
 python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json --rubric-labeled-data agent/evaluate/data/gold.jsonl
 ```
@@ -287,10 +313,13 @@ python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubri
 一键串行：
 
 ```bash
-python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith
+# `run_pipeline` 会自动开启 LANGSMITH_TRACING=true；默认推荐直写本地分数到 LangSmith
+python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith --langsmith-mode writeback
 # 若需要在一键流程末尾自动生成 gold.jsonl，可追加：
 # --gold-readable agent/evaluate/data/gold.readable.yaml --gold-out agent/evaluate/data/gold.jsonl --gold-base agent/evaluate/data/gold.jsonl
 ```
+
+说明：重复执行 `--push-langsmith` 时，会按稳定 sample id 更新 LangSmith dataset example，不再因重复样本返回 409。推荐使用 `--langsmith-mode writeback`，这样 LangSmith 里能直接看到 `overall_score`、四维主分、三个 tool 子分及其原因，且不会二次调用 grader；如需保留旧行为，可改用 `--langsmith-mode evaluate`。
 
 ## 详细文档
 

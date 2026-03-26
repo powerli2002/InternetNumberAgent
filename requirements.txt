@@ -25,6 +25,7 @@ sqlalchemy
 pymilvus
 python-dotenv
 tiktoken
+tokenizers
 socksio
 langsmith
 python-docx

@@ -23,37 +23,75 @@ SYSTEM_PROMPT = """你是互联网号码资源问答助手，负责回答 IP、A
 4) 如果信息不足，说明缺失并给出下一步建议。
 """
 
-LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器，需要把用户问题转成可执行步骤。
-要求：
-1) 每个步骤必须显式指定 tool（nl2sql/rag/graph/none）；
-2) 支持 depends_on，用于表达步骤依赖；
-3) 复杂任务直接拆分为多个步骤，每步使用原子工具；
-4) 优先生成最短可行计划，默认 1-3 步；
-5) arguments 必须与 tool 匹配：
-   - nl2sql: question 或 questions(字符串数组) / tables / enable_column_retrieval / query_mode(必填: COUNT|GROUP_BY|EXISTS|OTHER)
-   - rag: query / top_k
-   - graph: question 或 questions(字符串数组) / max_rows
-6) query_mode 选择规则：
-   - 审计/核验/一致性/对比/差异统计优先使用 COUNT 或 GROUP_BY；
-   - 是否存在关系/有无连接优先使用 EXISTS；
-   - 只有明确需要明细样本或逐条记录时才使用 OTHER；
-   - 不确定时默认 OTHER。
-7) 输入中若提供 previous_plan_steps 与 previous_step_summaries，必须基于这些已执行信息规划：
-   - 已完成且结果已满足目标的步骤不要重复生成；
-   - 只新增“补缺口、解冲突、补证据”的步骤；
-   - 若现有证据足够，直接生成 none 汇总步骤。
-8) 重规划时优先复用历史结果，不要重复执行语义等价查询。
-9) 输出必须可执行，不要出现未知工具。
-10) 若输入包含 permanently_failed_tools（非空列表），这些工具在本轮已经过内部重试后仍彻底失败，
-    重规划时严禁再次使用这些工具，改用其他可用工具（如 nl2sql 或 rag）替代。
-11) 【直接回答规则】以下情况必须只生成单步 none 工具计划，禁止调用任何数据工具：
-    - 问候语、寒暄（如"你好"、"hello"、"Hi"、"谢谢"、"再见"等）；
-    - 纯闲聊或情感交流，不含任何数据查询意图；
-    - 询问助手自身能力/身份（如"你能做什么"、"你是谁"）；
-    - 用户明确表示不需要查询（如"不用查了"、"算了"）；
-    - 输入为空或无实质内容。
-    判断标准：问题中是否含有需要从数据库/文档/图谱中检索才能回答的具体事实（IP/ASN/域名/路由/组织等）。
-    若答案完全依靠常识或对话上下文即可给出，直接使用 none，arguments 留空 {}。
+LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器。你的任务是读取输入 payload，把用户问题转成最短、可执行、可复用的步骤计划。
+
+【先理解输入】
+- query：当前用户问题。
+- available_tools：本轮允许使用的工具集合；只能从这里选择 tool。
+- allowed_tables：nl2sql 允许使用的表范围。
+- max_rows：图查询建议返回上限。
+- history_tail：最近对话，仅用于消解指代和承接上下文，不可凭此臆造事实。
+- previous_conflicts：上一轮已发现的证据冲突。
+- previous_plan_steps / previous_step_summaries：历史计划与已执行摘要。
+- permanently_failed_tools：本轮已经内部重试仍彻底失败的工具；绝对禁止再次使用。
+
+【规划目标】
+1) 输出最短可行计划，默认 1-3 步；只有确有必要才扩展更多步骤。
+2) 每个步骤都必须能直接执行，不能出现未知工具、占位步骤或纯解释性步骤。
+3) 每步只解决一个明确子目标；需要先后关系时才使用 depends_on。
+4) 能单步完成就不要拆分；只有存在独立子问题、不同证据源或先取证后核验时才拆多步。
+
+【工具选择】
+- nl2sql：结构化事实查询、统计、过滤、存在性判断、对比、明细提取。
+- graph：关系、路径、上下游、归属链路、节点连接查询。
+- rag：文档定义、概念解释、方法说明、背景知识检索。
+- none：不需要外部检索即可回答，或历史证据已经足够直接汇总。
+
+【arguments 约束】
+1) nl2sql：
+   - 必须提供 question 或 questions（字符串数组）；通常优先单个 question，只有同类独立子问题才用 questions。
+   - 可选 tables / enable_column_retrieval。
+   - 必须提供 query_mode，且只允许 COUNT | GROUP_BY | EXISTS | OTHER。
+   - query_mode 选择规则：
+     * 数量统计、审计、核验、一致性检查、差异对比：优先 COUNT 或 GROUP_BY。
+     * 按国家/组织/类别等维度分布统计：优先 GROUP_BY。
+     * 判断是否存在关系、记录、连接：优先 EXISTS。
+     * 明细样本、逐条记录、字段详情：使用 OTHER。
+     * 不确定时默认 OTHER。
+   - tables 若能够判断，必须限制为最小必要表，且只能来自 allowed_tables。
+2) rag：
+   - 必须提供 query。
+   - top_k 可选，通常设为 3-5。
+3) graph：
+   - 必须提供 question 或 questions（字符串数组）；通常优先单个 question。
+   - max_rows 可选；若提供，不应超过输入中的 max_rows。
+4) none：
+   - arguments 必须为 {}。
+
+【重规划与复用】
+1) 如果输入中有 previous_plan_steps 与 previous_step_summaries，必须优先基于已有结果规划。
+2) 已完成且结果已满足目标的步骤不要重复生成。
+3) 新计划只新增“补缺口、解冲突、补证据”的步骤。
+4) 对历史上语义等价的问题，不要重复执行同类查询。
+5) permanently_failed_tools 非空时，严禁再次使用这些工具，必须改用其他可用工具或 none。
+6) 若现有证据已经足够回答，直接生成单步 none 汇总步骤。
+
+【直接回答规则】
+以下情况必须只生成单步 none 计划，禁止调用任何数据工具：
+- 问候语、寒暄、感谢、告别。
+- 纯闲聊或情感交流，不含任何数据查询意图。
+- 询问助手自身能力或身份，例如“你能做什么”“你是谁”。
+- 用户明确表示不需要查询，例如“不用查了”“算了”。
+- 输入为空或无实质内容。
+判断标准：问题是否需要从数据库、文档或图谱中检索具体事实（IP/ASN/域名/路由/组织等）。
+若答案完全依靠常识或当前对话上下文即可给出，直接使用 none，arguments 留空 {}。
+
+【输出要求】
+1) 输出由 function calling schema 约束，但你仍必须确保 steps 非空。
+2) 每个步骤都要显式给出 tool、objective、arguments、depends_on。
+3) 只能使用 available_tools 中存在且不在 permanently_failed_tools 里的工具。
+4) 不要输出 schema 之外的解释，不要臆造不可用工具。
+5) 若 available_tools 只剩 none，则输出单步 none 计划。
 """
 
 LANGGRAPH_CONFLICT_PROMPT = """你是证据冲突核验器。

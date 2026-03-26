@@ -33,19 +33,31 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.prompts import PromptTemplate
 
 from agent.core.llm import strip_think_blocks
 from agent.core.prompts import NL2SQL_TEXT_TO_SQL_PROMPT
-from agent.core.schema import COLUMN_REVIEW_COMMENTS, TABLE_CONTEXT_HINTS, TABLE_REVIEW_COMMENTS, TABLE_SCHEMA
+from agent.core.schema import (
+    COLUMN_REVIEW_COMMENTS,
+    TABLE_CONTEXT_HINTS,
+    TABLE_REVIEW_COMMENTS,
+    TABLE_SCHEMA,
+)
 from fusiondata.src.utils.logging_manager import logger
 
 
-NL2SQL_LOG_ENABLED = os.getenv("NL2SQL_LOG_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-NL2SQL_TRACE_ID_CTX: contextvars.ContextVar[str] = contextvars.ContextVar("nl2sql_trace_id", default="")
+NL2SQL_LOG_ENABLED = os.getenv("NL2SQL_LOG_ENABLED", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+NL2SQL_TRACE_ID_CTX: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "nl2sql_trace_id", default=""
+)
 DEFAULT_LOCAL_BGE_MODEL = "/root/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181"
 
 
@@ -101,7 +113,9 @@ class DashScopeLlamaEmbedding:
     - 文档相似度计算
     """
 
-    def __init__(self, api_key: str, base_url: str, model: str = "text-embedding-v3") -> None:
+    def __init__(
+        self, api_key: str, base_url: str, model: str = "text-embedding-v3"
+    ) -> None:
         """
         初始化嵌入模型适配器
 
@@ -117,7 +131,9 @@ class DashScopeLlamaEmbedding:
             from llama_index.core.base.embeddings.base import BaseEmbedding  # type: ignore
             from openai import OpenAI  # type: ignore
         except Exception as exc:
-            raise RuntimeError("未安装 llama-index/openai，无法初始化嵌入模型。") from exc
+            raise RuntimeError(
+                "未安装 llama-index/openai，无法初始化嵌入模型。"
+            ) from exc
 
         if not api_key:
             raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法生成嵌入向量。")
@@ -138,7 +154,9 @@ class DashScopeLlamaEmbedding:
                 vectors: List[List[float]] = []
                 for i in range(0, len(texts), batch_size):
                     payload = texts[i : i + batch_size]
-                    response = self._client.embeddings.create(model=self._model, input=payload)
+                    response = self._client.embeddings.create(
+                        model=self._model, input=payload
+                    )
                     vectors.extend([item.embedding for item in response.data])
                 return vectors
 
@@ -177,7 +195,9 @@ class LocalBGELlamaEmbedding:
         try:
             from llama_index.embeddings.huggingface import HuggingFaceEmbedding  # type: ignore
         except Exception as exc:
-            raise RuntimeError("未安装 llama-index-embeddings-huggingface，无法初始化本地 embedding。") from exc
+            raise RuntimeError(
+                "未安装 llama-index-embeddings-huggingface，无法初始化本地 embedding。"
+            ) from exc
 
         resolved_model = (model_name or "").strip()
         if not resolved_model:
@@ -207,7 +227,9 @@ def _resolve_partitioned_milvus_vector_store():
     try:
         from llama_index.vector_stores.milvus import MilvusVectorStore  # type: ignore
     except Exception as exc:
-        raise RuntimeError("缺少 llama-index-vector-stores-milvus 依赖，无法使用 Milvus 索引。") from exc
+        raise RuntimeError(
+            "缺少 llama-index-vector-stores-milvus 依赖，无法使用 Milvus 索引。"
+        ) from exc
     return MilvusVectorStore
 
 
@@ -241,14 +263,18 @@ def build_nl2sql_embedding(
 class DashScopeLlamaLLM:
     """为 LlamaIndex 提供阿里云百炼 LLM 适配。"""
 
-    def __init__(self, api_key: str, base_url: str, model: str, temperature: float = 0.0) -> None:
+    def __init__(
+        self, api_key: str, base_url: str, model: str, temperature: float = 0.0
+    ) -> None:
         try:
             from langsmith.wrappers import wrap_openai  # type: ignore
             from llama_index.core.base.llms.types import LLMMetadata  # type: ignore
             from llama_index.core.llms.custom import CustomLLM  # type: ignore
             from openai import OpenAI  # type: ignore
         except Exception as exc:
-            raise RuntimeError("未安装 llama-index/openai/langsmith，无法初始化 LLM。") from exc
+            raise RuntimeError(
+                "未安装 llama-index/openai/langsmith，无法初始化 LLM。"
+            ) from exc
 
         if not api_key:
             raise RuntimeError("缺少 DASHSCOPE_API_KEY，无法调用 LLM。")
@@ -259,7 +285,9 @@ class DashScopeLlamaLLM:
             _temperature = PrivateAttr()
             _metadata = PrivateAttr()
 
-            def __init__(self, client, model_name: str, temperature_value: float) -> None:
+            def __init__(
+                self, client, model_name: str, temperature_value: float
+            ) -> None:
                 super().__init__()
                 self._client = client
                 self._model = model_name
@@ -348,7 +376,9 @@ class DatabaseClient:
         """获取 SQLAlchemy 引擎，便于复用连接池。"""
         return self._engine
 
-    def run_sql(self, sql: str, timeout_ms: Optional[int] = None, max_rows: Optional[int] = None) -> Dict[str, Any]:
+    def run_sql(
+        self, sql: str, timeout_ms: Optional[int] = None, max_rows: Optional[int] = None
+    ) -> Dict[str, Any]:
         # 统一执行入口，返回列名与行数据
         engine = self._engine
         with engine.connect() as conn:
@@ -402,6 +432,7 @@ class SQLGuard:
         "pg_terminate_backend",
         "pg_cancel_backend",
     }
+
     def __init__(
         self,
         allowed_tables: List[str],
@@ -433,11 +464,15 @@ class SQLGuard:
             raise RuntimeError("仅允许执行 SELECT/CTE 查询。")
 
         for keyword in self._BLOCKED_KEYWORDS:
-            if re.search(rf"\b{re.escape(keyword)}\b", sql_no_strings, flags=re.IGNORECASE):
+            if re.search(
+                rf"\b{re.escape(keyword)}\b", sql_no_strings, flags=re.IGNORECASE
+            ):
                 raise RuntimeError(f"SQL 含有禁止关键字: {keyword}")
 
         for func in self._BLOCKED_FUNCTIONS:
-            if re.search(rf"\b{re.escape(func)}\b", sql_no_strings, flags=re.IGNORECASE):
+            if re.search(
+                rf"\b{re.escape(func)}\b", sql_no_strings, flags=re.IGNORECASE
+            ):
                 raise RuntimeError(f"SQL 含有禁止函数: {func}")
 
         tables = self._extract_tables(sql_no_strings)
@@ -460,7 +495,9 @@ class SQLGuard:
 
     def _extract_tables(self, sql: str) -> List[str]:
         # 解析 FROM/JOIN 后的表名，拒绝子查询以提升安全性
-        if not self.allow_subquery and re.search(r"\b(from|join)\s+\(", sql, flags=re.IGNORECASE):
+        if not self.allow_subquery and re.search(
+            r"\b(from|join)\s+\(", sql, flags=re.IGNORECASE
+        ):
             raise RuntimeError("检测到子查询，当前策略禁止执行。")
         pattern = re.compile(r'\b(from|join)\s+(?:only\s+)?(["\w\.]+)', re.IGNORECASE)
         tables: List[str] = []
@@ -489,7 +526,11 @@ class SQLGuard:
             limit_value = min(current, self.max_rows)
             limit_applied = True
             if current > self.max_rows:
-                sql = sql[: last_match.start(1)] + str(self.max_rows) + sql[last_match.end(1) :]
+                sql = (
+                    sql[: last_match.start(1)]
+                    + str(self.max_rows)
+                    + sql[last_match.end(1) :]
+                )
                 limit_clamped = True
         else:
             sql = f"{sql} LIMIT {self.max_rows}"
@@ -524,6 +565,7 @@ class NL2SQLTool:
     4. 执行验证：在数据库中执行并返回结果
     """
 
+    # 表索引与列索引共用一个 collection，通过 partition 隔离两类节点。
     TABLE_PARTITION = "nl2sql_tables"
     COLUMN_PARTITION = "nl2sql_columns"
     # 默认列索引配置：仅选择相对稳定、类别化程度高的字段
@@ -543,7 +585,14 @@ class NL2SQLTool:
         ],
         "asn_entity": ["country", "status", "source", "org_name"],
         "country_entity": ["country", "country_cn", "country_en", "region"],
-        "industry_entity": ["industry", "parent", "title", "key", "ip_org", "auth_ip_org"],
+        "industry_entity": [
+            "industry",
+            "parent",
+            "title",
+            "key",
+            "ip_org",
+            "auth_ip_org",
+        ],
         "ip_bgp_entity": [
             "country",
             "source",
@@ -558,8 +607,22 @@ class NL2SQLTool:
             "domain",
             "domain_auth",
         ],
-        "ip_inetnum_entity": ["country", "source", "netname", "org", "org_name", "org_name_cn"],
-        "ip_rdap_entity": ["country", "source", "netname", "org", "org_name", "org_name_cn"],
+        "ip_inetnum_entity": [
+            "country",
+            "source",
+            "netname",
+            "org",
+            "org_name",
+            "org_name_cn",
+        ],
+        "ip_rdap_entity": [
+            "country",
+            "source",
+            "netname",
+            "org",
+            "org_name",
+            "org_name_cn",
+        ],
         "ip_route_entity": ["source", "origin"],
         "ipv4_entity": ["country", "source", "status", "org_name"],
         "ipv6_bgp_entity": [
@@ -575,8 +638,22 @@ class NL2SQLTool:
             "org_name_cn_bgp",
         ],
         "ipv6_entity": ["country", "source", "status", "org_name"],
-        "ipv6_inetnum_entity": ["country", "source", "netname", "org", "org_name", "org_name_cn"],
-        "ipv6_rdap_entity": ["country", "source", "netname", "org", "org_name", "org_name_cn"],
+        "ipv6_inetnum_entity": [
+            "country",
+            "source",
+            "netname",
+            "org",
+            "org_name",
+            "org_name_cn",
+        ],
+        "ipv6_rdap_entity": [
+            "country",
+            "source",
+            "netname",
+            "org",
+            "org_name",
+            "org_name_cn",
+        ],
         "ipv6_route_entity": ["source", "origin"],
         "org_entity": ["org_country", "org_country_cn", "org_name", "org_name_cn"],
         "website_entity": ["industry", "title", "key", "url"],
@@ -613,6 +690,7 @@ class NL2SQLTool:
         max_sql_length: int = 4000,
         allow_subquery: bool = False,
     ) -> None:
+        # 基础连接与运行参数：这些字段决定数据库、向量库和模型的访问方式。
         self.postgres_url = postgres_url
         self.allowed_tables = allowed_tables or []
         self.db = DatabaseClient(postgres_url) if postgres_url else None
@@ -625,10 +703,13 @@ class NL2SQLTool:
         self.llm_temperature = float(llm_temperature)
         self.embedding_backend = str(embedding_backend or "local_bge").strip().lower()
         if embedding_model:
+            # 显式传入时优先使用调用方指定模型，便于离线评测或灰度切换。
             self.embedding_model = embedding_model
         elif self.embedding_backend in {"local_bge", "bge", "local"}:
+            # 本地 embedding 默认回落到项目验证过的 bge-m3 路径。
             self.embedding_model = DEFAULT_LOCAL_BGE_MODEL
         else:
+            # 在线 embedding 当前统一使用 DashScope 的 text-embedding-v3。
             self.embedding_model = "text-embedding-v3"
         self.embedding_device = embedding_device or "cpu"
         self.embedding_batch_size = max(1, int(embedding_batch_size))
@@ -637,7 +718,12 @@ class NL2SQLTool:
         self.enable_index_cache = enable_index_cache
         self.force_rebuild_cache = force_rebuild_cache
         # 仅保留允许表的 schema，避免 NL2SQL 访问非核心表
-        self.table_schema = {k: v for k, v in TABLE_SCHEMA.items() if not self.allowed_tables or k in self.allowed_tables}
+        self.table_schema = {
+            k: v
+            for k, v in TABLE_SCHEMA.items()
+            if not self.allowed_tables or k in self.allowed_tables
+        }
+        # 检索参数决定 query-time 召回规模：表索引负责缩表，列索引负责补列值提示。
         self.enable_table_retrieval = enable_table_retrieval
         self.enable_column_retrieval = enable_column_retrieval
         self.table_retriever_top_k = table_retriever_top_k
@@ -645,10 +731,12 @@ class NL2SQLTool:
         self.column_index_max_values = column_index_max_values
         self.column_index_max_value_length = column_index_max_value_length
         self.column_index_config = column_index_config or self.COLUMN_INDEX_CONFIG
+        # SQL 执行护栏：结果规模、执行超时与 SQL 长度上限都在这里统一收口。
         self.max_rows = max_rows
         self.statement_timeout_ms = statement_timeout_ms
         self.max_sql_length = max_sql_length
         self.allow_subquery = allow_subquery
+        # LLM 负责生成 SQL，embedding 负责表/列向量索引，两者都在初始化时固定下来。
         self._llm = DashScopeLlamaLLM(
             api_key=self.api_key or "",
             base_url=self.base_url or "",
@@ -668,11 +756,14 @@ class NL2SQLTool:
             from llama_index.core import Settings  # type: ignore
         except Exception as exc:
             raise RuntimeError("缺少 llama-index 依赖，无法初始化 NL2SQL。") from exc
+        # LlamaIndex 的部分组件会从全局 Settings 读取模型，这里显式注入当前实例配置。
         Settings.llm = self._llm
         Settings.embed_model = self._embed_model
+        # 进程内缓存只保存“最近一次 schema 签名”对应的 retriever，避免重复连 Milvus。
         self._table_retriever_cache = None
         self._cols_retrievers_cache = None
         self._cache_signature = None
+        # embedding 维度只需探测一次，后续复用，减少首次建索引时的额外开销。
         self._embedding_dim = 0
 
     def query(
@@ -691,14 +782,22 @@ class NL2SQLTool:
         - query_mode 为规划器唯一意图位：COUNT/GROUP_BY/EXISTS/OTHER；
         - intent_policy/intent_labels_required 仅用于兼容旧接口，当前不参与逻辑判断。
         """
+        # 思路：先准备 LlamaIndex 依赖与表上下文，再生成 SQL，最后走本地安全校验与执行。
         start_time = time.monotonic()
         try:
             from llama_index.core import SQLDatabase  # type: ignore
             from llama_index.core import VectorStoreIndex  # type: ignore
-            from llama_index.core.objects import ObjectIndex, SQLTableNodeMapping, SQLTableSchema  # type: ignore
+            from llama_index.core.objects import (
+                ObjectIndex,
+                SQLTableNodeMapping,
+                SQLTableSchema,
+            )  # type: ignore
             from llama_index.core.schema import TextNode  # type: ignore
+
             try:
-                from llama_index.core.indices.struct_store.sql_retriever import NLSQLRetriever  # type: ignore
+                from llama_index.core.indices.struct_store.sql_retriever import (
+                    NLSQLRetriever,
+                )  # type: ignore
             except Exception:
                 from llama_index.core.indices.struct_store import NLSQLRetriever  # type: ignore
         except Exception as exc:
@@ -709,12 +808,18 @@ class NL2SQLTool:
         if not self.api_key:
             raise RuntimeError("未配置 DASHSCOPE_API_KEY，无法执行 NL2SQL。")
 
+        # 调用方可传子集表；未传时回落到全局 allowlist。
         table_names = tables or self.allowed_tables
         if not table_names:
             raise RuntimeError("未提供可用表名，无法执行 NL2SQL。")
         # 兼容过渡参数：当前链路不再使用 intent_policy/intent_labels_required。
         _ = (intent_policy, intent_labels_required)
-        use_columns = self.enable_column_retrieval if enable_column_retrieval is None else enable_column_retrieval
+        # 是否启用列检索由调用参数覆盖实例默认值，方便 planner 按步骤动态切换。
+        use_columns = (
+            self.enable_column_retrieval
+            if enable_column_retrieval is None
+            else enable_column_retrieval
+        )
         resolved_query_mode = self._normalize_query_mode(query_mode)
         _log_nl2sql(
             "NL2SQL开始 question=%s tables=%s enable_columns=%s query_mode=%s",
@@ -725,29 +830,46 @@ class NL2SQLTool:
         )
         # 连接数据库并准备 LLM/Embedding
         step_time = time.monotonic()
+        # SQLDatabase 只暴露允许表，避免底层 schema 反射到无关表。
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
-        _log_nl2sql("NL2SQL步骤 SQLDatabase初始化耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        _log_nl2sql(
+            "NL2SQL步骤 SQLDatabase初始化耗时=%dms",
+            int((time.monotonic() - step_time) * 1000),
+        )
         step_time = time.monotonic()
         llm = self._llm
         if hasattr(llm, "set_trace_id"):
+            # trace_id 会透传到 LangSmith，便于将 SQL 生成 run 挂到主链路下。
             llm.set_trace_id(trace_id)
         embed_model = self._embed_model
-        _log_nl2sql("NL2SQL步骤 模型与设置耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        _log_nl2sql(
+            "NL2SQL步骤 模型与设置耗时=%dms", int((time.monotonic() - step_time) * 1000)
+        )
 
         # 为每张表构建上下文提示，帮助模型理解字段语义
         step_time = time.monotonic()
-        table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
+        table_context = {
+            k: v for k, v in self._build_table_context().items() if k in table_names
+        }
         table_schema = [
             SQLTableSchema(
                 table_name=table,
+                # context_str 会进入 LlamaIndex 的 schema prompt，用来补充裸表结构之外的业务口径。
                 context_str=table_context.get(table, ""),
             )
             for table in table_names
         ]
-        _log_nl2sql("NL2SQL步骤 表上下文构建耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        _log_nl2sql(
+            "NL2SQL步骤 表上下文构建耗时=%dms",
+            int((time.monotonic() - step_time) * 1000),
+        )
         # 基于表结构与列值构建/加载检索器，避免每次重建索引
         table_node_mapping = SQLTableNodeMapping(db)
-        table_top_k = self.table_retriever_top_k if self.enable_table_retrieval else len(table_names)
+        table_top_k = (
+            self.table_retriever_top_k
+            if self.enable_table_retrieval
+            else len(table_names)
+        )
         step_time = time.monotonic()
         table_retriever, cols_retrievers = self._get_or_build_retrievers(
             table_names=table_names,
@@ -759,9 +881,14 @@ class NL2SQLTool:
             vector_index_cls=VectorStoreIndex,
             enable_columns=use_columns,
         )
-        _log_nl2sql("NL2SQL步骤 检索器准备耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        _log_nl2sql(
+            "NL2SQL步骤 检索器准备耗时=%dms", int((time.monotonic() - step_time) * 1000)
+        )
 
-        first_query = self._compose_query_mode_guided_question(question=question, query_mode=resolved_query_mode)
+        # 将 planner 产出的 query_mode 附加到问题文本，约束模型优先生成 count/group by/exists 类 SQL。
+        first_query = self._compose_query_mode_guided_question(
+            question=question, query_mode=resolved_query_mode
+        )
         nlsql_retriever = self._build_nlsql_retriever(
             retriever_cls=NLSQLRetriever,
             db=db,
@@ -770,8 +897,10 @@ class NL2SQLTool:
             cols_retrievers=cols_retrievers,
             table_context=table_context,
         )
+        # 当前实现只生成一次 SQL，不在工具内做多轮 self-correction。
         sql_query = self._generate_sql_once(nlsql_retriever, first_query)
 
+        # LlamaIndex 只负责生成 SQL；真正执行前必须经过本地白名单和只读校验。
         guard = SQLGuard(
             allowed_tables=table_names,
             max_rows=self.max_rows,
@@ -783,6 +912,7 @@ class NL2SQLTool:
         step_time = time.monotonic()
         # 执行 SQL
         exec_result = self._execute(safe_sql)
+        # SQLAlchemy Row 对象转为普通 list，便于 MCP/HTTP 序列化。
         rows = [list(row) for row in exec_result.get("rows", [])]
         result_payload = {
             "columns": exec_result.get("columns", []),
@@ -797,8 +927,12 @@ class NL2SQLTool:
                 "generation_mode": "planner_driven",
             },
         }
-        _log_nl2sql("NL2SQL步骤 SQL执行耗时=%dms", int((time.monotonic() - step_time) * 1000))
-        _log_nl2sql("NL2SQL完成 总耗时=%dms", int((time.monotonic() - start_time) * 1000))
+        _log_nl2sql(
+            "NL2SQL步骤 SQL执行耗时=%dms", int((time.monotonic() - step_time) * 1000)
+        )
+        _log_nl2sql(
+            "NL2SQL完成 总耗时=%dms", int((time.monotonic() - start_time) * 1000)
+        )
         return NL2SQLResult(sql=safe_sql, result=result_payload)
 
     def _build_nlsql_retriever(
@@ -811,6 +945,7 @@ class NL2SQLTool:
         table_context: Dict[str, str],
     ):
         """构建 NLSQLRetriever，便于按策略切换 prompt。"""
+        # 这里把“自定义 prompt + 表检索 + 列检索 + 表语义上下文”统一接到 LlamaIndex 上。
         return retriever_cls(
             sql_database=db,
             llm=llm,
@@ -825,14 +960,20 @@ class NL2SQLTool:
     def _generate_sql_once(self, nlsql_retriever, question: str) -> str:
         """执行一次 SQL 生成并返回 SQL 文本。"""
         step_time = time.monotonic()
+        # LlamaIndex 返回两份信息：retrieved_nodes 与 metadata，SQL 优先从 metadata.result 读取。
         retrieved_nodes, metadata = nlsql_retriever.retrieve_with_metadata(question)
         sql_query = metadata.get("result") if isinstance(metadata, dict) else None
         if not sql_query and retrieved_nodes:
+            # 兼容少数实现路径：SQL 被放在第一个节点文本里。
             sql_query = getattr(retrieved_nodes[0].node, "text", "") or ""
-        _log_nl2sql("NL2SQL步骤 SQL生成耗时=%dms", int((time.monotonic() - step_time) * 1000))
+        _log_nl2sql(
+            "NL2SQL步骤 SQL生成耗时=%dms", int((time.monotonic() - step_time) * 1000)
+        )
         return str(sql_query or "")
 
-    def _compose_query_mode_guided_question(self, question: str, query_mode: str) -> str:
+    def _compose_query_mode_guided_question(
+        self, question: str, query_mode: str
+    ) -> str:
         """将规划阶段给定的 query_mode 透传给 SQL 生成提示。"""
         directive = f"[QUERY_MODE={self._normalize_query_mode(query_mode)}]"
         return f"{question}\n\n{directive}"
@@ -851,6 +992,7 @@ class NL2SQLTool:
         load_columns: bool = False,
     ) -> Dict[str, Any]:
         """预热 NL2SQL 检索器，提前加载/构建索引到内存，降低首次查询耗时。"""
+        # 思路：预热流程与正式查询复用同一套索引构建逻辑，只是不进入 SQL 生成与执行阶段。
         start_time = time.monotonic()
         try:
             from llama_index.core import SQLDatabase  # type: ignore
@@ -865,15 +1007,22 @@ class NL2SQLTool:
         if not self.api_key:
             raise RuntimeError("未配置 DASHSCOPE_API_KEY，无法预热索引。")
 
+        # 允许只预热部分表，方便启动时按热点表渐进加载。
         table_names = tables or self.allowed_tables
         if not table_names:
             raise RuntimeError("未提供可用表名，无法预热索引。")
 
-        _log_nl2sql("NL2SQL预热开始 tables=%s load_columns=%s", ",".join(table_names), load_columns)
+        _log_nl2sql(
+            "NL2SQL预热开始 tables=%s load_columns=%s",
+            ",".join(table_names),
+            load_columns,
+        )
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
         embed_model = self._embed_model
 
-        table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
+        table_context = {
+            k: v for k, v in self._build_table_context().items() if k in table_names
+        }
         table_schema = [
             SQLTableSchema(
                 table_name=table,
@@ -882,7 +1031,11 @@ class NL2SQLTool:
             for table in table_names
         ]
         table_node_mapping = SQLTableNodeMapping(db)
-        table_top_k = self.table_retriever_top_k if self.enable_table_retrieval else len(table_names)
+        table_top_k = (
+            self.table_retriever_top_k
+            if self.enable_table_retrieval
+            else len(table_names)
+        )
         self._get_or_build_retrievers(
             table_names=table_names,
             table_schema=table_schema,
@@ -900,7 +1053,10 @@ class NL2SQLTool:
     def _execute(self, sql: str) -> Dict[str, Any]:
         if not self.db:
             raise RuntimeError("未配置数据库连接，无法执行 SQL。")
-        return self.db.run_sql(sql, timeout_ms=self.statement_timeout_ms, max_rows=self.max_rows)
+        # 统一复用 DatabaseClient，确保正式执行路径与离线预热/调试路径一致。
+        return self.db.run_sql(
+            sql, timeout_ms=self.statement_timeout_ms, max_rows=self.max_rows
+        )
 
     def _build_table_context(self) -> Dict[str, str]:
         """将 summary.md 的字段信息转为 NL2SQL 提示上下文。"""
@@ -947,7 +1103,7 @@ class NL2SQLTool:
             if value is None:
                 continue
             try:
-                dim = int(value() if callable(value) else value)
+                dim = int(cast(Any, value() if callable(value) else value))
             except Exception:
                 continue
             if dim > 0:
@@ -966,7 +1122,8 @@ class NL2SQLTool:
         except Exception as exc:
             raise RuntimeError("缺少 pymilvus，无法检查 Milvus collection。") from exc
         connections.connect(host=self.milvus_host, port=str(self.milvus_port))
-        return utility.has_collection(self.milvus_collection)
+        has_collection = cast(Any, utility.has_collection)
+        return bool(has_collection(self.milvus_collection))
 
     def _milvus_partition_exists(self, partition_name: str) -> bool:
         try:
@@ -974,11 +1131,13 @@ class NL2SQLTool:
         except Exception as exc:
             raise RuntimeError("缺少 pymilvus，无法检查 Milvus partition。") from exc
         connections.connect(host=self.milvus_host, port=str(self.milvus_port))
-        if not utility.has_collection(self.milvus_collection):
+        has_collection = cast(Any, utility.has_collection)
+        if not bool(has_collection(self.milvus_collection)):
             return False
         collection = Collection(self.milvus_collection)
         try:
-            return collection.has_partition(partition_name)
+            has_partition = cast(Any, collection.has_partition)
+            return bool(has_partition(partition_name))
         except Exception:
             return False
 
@@ -988,12 +1147,15 @@ class NL2SQLTool:
         except Exception as exc:
             raise RuntimeError("缺少 pymilvus，无法创建 Milvus partition。") from exc
         connections.connect(host=self.milvus_host, port=str(self.milvus_port))
-        if not utility.has_collection(self.milvus_collection):
+        has_collection = cast(Any, utility.has_collection)
+        if not bool(has_collection(self.milvus_collection)):
             return
         collection = Collection(self.milvus_collection)
         try:
-            if not collection.has_partition(partition_name):
-                collection.create_partition(partition_name)
+            has_partition = cast(Any, collection.has_partition)
+            if not bool(has_partition(partition_name)):
+                create_partition = cast(Any, collection.create_partition)
+                create_partition(partition_name)
         except Exception:
             # 分区创建失败时不阻断流程，让向量写入阶段报错提示。
             return
@@ -1004,17 +1166,21 @@ class NL2SQLTool:
         except Exception as exc:
             raise RuntimeError("缺少 pymilvus，无法清理 Milvus partition。") from exc
         connections.connect(host=self.milvus_host, port=str(self.milvus_port))
-        if not utility.has_collection(self.milvus_collection):
+        has_collection = cast(Any, utility.has_collection)
+        if not bool(has_collection(self.milvus_collection)):
             return
         collection = Collection(self.milvus_collection)
         try:
-            if collection.has_partition(partition_name):
+            has_partition = cast(Any, collection.has_partition)
+            if bool(has_partition(partition_name)):
                 # Milvus 要求分区被释放后才能删除；否则会报“partition is loaded”。
                 try:
-                    collection.release()
+                    release = cast(Any, collection.release)
+                    release()
                 except Exception:
                     pass
-                collection.drop_partition(partition_name)
+                drop_partition = cast(Any, collection.drop_partition)
+                drop_partition(partition_name)
         except Exception:
             return
 
@@ -1048,7 +1214,10 @@ class NL2SQLTool:
         if "port" in sig.parameters:
             _set("port", str(self.milvus_port))
         if "connection_args" in sig.parameters:
-            kwargs["connection_args"] = {"host": self.milvus_host, "port": str(self.milvus_port)}
+            kwargs["connection_args"] = {
+                "host": self.milvus_host,
+                "port": str(self.milvus_port),
+            }
 
         vector_store = vector_store_cls(**kwargs)
         # 确保 collection 已加载，避免检索阶段出现“collection not loaded”。
@@ -1057,12 +1226,14 @@ class NL2SQLTool:
                 vector_store.client.load_collection(self.milvus_collection)
             elif hasattr(vector_store, "_collection"):
                 # 兼容旧版本实现。
-                vector_store._collection.load()
+                collection = getattr(vector_store, "_collection")
+                collection.load()
         except Exception:
             pass
         return vector_store
 
     def _milvus_cache_ready(self, build_tables: bool, build_columns: bool) -> bool:
+        # 只有 collection 存在且必需分区都存在时，才能认为缓存可直接复用。
         if not self._milvus_collection_exists():
             return False
         if build_tables and not self._milvus_partition_exists(self.TABLE_PARTITION):
@@ -1097,6 +1268,7 @@ class NL2SQLTool:
         force: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """预构建 NL2SQL 的表/列检索索引，供服务启动前调用。"""
+        # 思路：先计算 schema 签名判断缓存是否可复用，再按需重建表索引和列索引。
         if not self.enable_index_cache:
             return {"status": "disabled"}
         if not self.postgres_url:
@@ -1110,8 +1282,11 @@ class NL2SQLTool:
 
         signature = self._compute_schema_signature(table_names)
         force_rebuild = self.force_rebuild_cache if force is None else force
-        cache_ready = self._is_cache_valid(signature) and self._milvus_cache_ready(build_tables, build_columns)
+        cache_ready = self._is_cache_valid(signature) and self._milvus_cache_ready(
+            build_tables, build_columns
+        )
         if not force_rebuild and cache_ready:
+            # manifest 与 Milvus 分区都命中时，直接跳过重建。
             return {"status": "skipped", "signature": signature}
 
         if force_rebuild or not cache_ready:
@@ -1124,15 +1299,22 @@ class NL2SQLTool:
 
         try:
             from llama_index.core import SQLDatabase, VectorStoreIndex  # type: ignore
-            from llama_index.core.objects import ObjectIndex, SQLTableNodeMapping, SQLTableSchema  # type: ignore
+            from llama_index.core.objects import (
+                ObjectIndex,
+                SQLTableNodeMapping,
+                SQLTableSchema,
+            )  # type: ignore
             from llama_index.core.schema import TextNode  # type: ignore
         except Exception as exc:
             raise RuntimeError("缺少 llama-index 依赖，无法预构建索引。") from exc
 
+        # 预构建时同样只反射指定表，保证离线构建结果与在线查询口径一致。
         db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
         embed_model = self._embed_model
 
-        table_context = {k: v for k, v in self._build_table_context().items() if k in table_names}
+        table_context = {
+            k: v for k, v in self._build_table_context().items() if k in table_names
+        }
         table_schema = [
             SQLTableSchema(
                 table_name=table,
@@ -1143,6 +1325,7 @@ class NL2SQLTool:
         table_node_mapping = SQLTableNodeMapping(db)
 
         if build_tables:
+            # 表索引负责 query-time 缩表，是 NL2SQL 首轮召回的主入口。
             self._build_table_retriever(
                 table_schema=table_schema,
                 table_node_mapping=table_node_mapping,
@@ -1152,6 +1335,7 @@ class NL2SQLTool:
             )
 
         if build_columns and self.enable_column_retrieval:
+            # 列索引只构建配置允许的列，避免对大表全列做高成本离散值抽样。
             self._build_column_retrievers(
                 table_names=table_names,
                 embed_model=embed_model,
@@ -1159,7 +1343,11 @@ class NL2SQLTool:
                 vector_index_cls=VectorStoreIndex,
             )
 
-        self._write_index_manifest(signature, table_names, build_columns=build_columns and self.enable_column_retrieval)
+        self._write_index_manifest(
+            signature,
+            table_names,
+            build_columns=build_columns and self.enable_column_retrieval,
+        )
         return {"status": "built", "signature": signature}
 
     def _get_or_build_retrievers(
@@ -1174,8 +1362,12 @@ class NL2SQLTool:
         enable_columns: bool,
     ):
         """优先复用缓存索引，必要时重建。"""
+        # 思路：先看进程内缓存，再看 Milvus 缓存，最后才做真实重建。
         signature = self._compute_schema_signature(table_names)
-        if self._cache_signature == signature and self._table_retriever_cache is not None:
+        if (
+            self._cache_signature == signature
+            and self._table_retriever_cache is not None
+        ):
             _log_nl2sql("NL2SQL检索器 命中内存缓存 signature=%s", signature)
             return self._table_retriever_cache, self._cols_retrievers_cache
 
@@ -1198,8 +1390,11 @@ class NL2SQLTool:
                     )
                     if cols_retrievers is not None and not cols_retrievers:
                         _log_nl2sql("NL2SQL检索器 列索引缓存为空，将仅使用表索引")
-                if table_retriever and (not enable_columns or cols_retrievers is not None):
+                if table_retriever and (
+                    not enable_columns or cols_retrievers is not None
+                ):
                     _log_nl2sql("NL2SQL检索器 Milvus 缓存加载成功")
+                    # 命中后立即回填内存缓存，减少同进程后续请求的 Milvus 往返。
                     self._table_retriever_cache = table_retriever
                     self._cols_retrievers_cache = cols_retrievers
                     self._cache_signature = signature
@@ -1208,6 +1403,7 @@ class NL2SQLTool:
 
         if self.enable_index_cache and (self.force_rebuild_cache or not cache_valid):
             if self.force_rebuild_cache:
+                # 强制重建时连 manifest 一起清掉，避免残留旧版本签名。
                 self._clear_cache_dir()
             self._drop_milvus_partition(self.TABLE_PARTITION)
             if enable_columns:
@@ -1221,7 +1417,10 @@ class NL2SQLTool:
             vector_index_cls=vector_index_cls,
             table_top_k=table_top_k,
         )
-        _log_nl2sql("NL2SQL检索器 表索引重建耗时=%dms", int((time.monotonic() - build_time) * 1000))
+        _log_nl2sql(
+            "NL2SQL检索器 表索引重建耗时=%dms",
+            int((time.monotonic() - build_time) * 1000),
+        )
         cols_retrievers = None
         if enable_columns:
             build_time = time.monotonic()
@@ -1231,11 +1430,17 @@ class NL2SQLTool:
                 text_node_cls=text_node_cls,
                 vector_index_cls=vector_index_cls,
             )
-            _log_nl2sql("NL2SQL检索器 列索引重建耗时=%dms", int((time.monotonic() - build_time) * 1000))
+            _log_nl2sql(
+                "NL2SQL检索器 列索引重建耗时=%dms",
+                int((time.monotonic() - build_time) * 1000),
+            )
 
         if self.enable_index_cache:
-            self._write_index_manifest(signature, table_names, build_columns=enable_columns)
+            self._write_index_manifest(
+                signature, table_names, build_columns=enable_columns
+            )
 
+        # 新构建出的 retriever 同时回填到实例缓存，供当前进程内后续请求复用。
         self._table_retriever_cache = table_retriever
         self._cols_retrievers_cache = cols_retrievers
         self._cache_signature = signature
@@ -1252,8 +1457,10 @@ class NL2SQLTool:
         # 基于表结构构建向量索引，支持“相关表”检索
         from llama_index.core.objects import ObjectIndex  # type: ignore
         from llama_index.core.storage.storage_context import StorageContext  # type: ignore
+
         vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
         self._ensure_milvus_partition(self.TABLE_PARTITION)
+        # StorageContext 绑定到底层 Milvus vector store，后续建索引和检索都走同一个存储配置。
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         table_index = ObjectIndex.from_objects(
             table_schema,
@@ -1280,8 +1487,14 @@ class NL2SQLTool:
         try:
             from llama_index.core.indices.vector_store import VectorStoreIndex  # type: ignore
             from llama_index.core.objects import ObjectIndex  # type: ignore
-            vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
-            table_index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+
+            vector_store = self._create_milvus_vector_store(
+                embed_model, overwrite=False
+            )
+            # 这里不是重建向量，而是直接从 Milvus 反向挂载出一个可检索的 VectorStoreIndex。
+            table_index = VectorStoreIndex.from_vector_store(
+                vector_store, embed_model=embed_model
+            )
             object_index = ObjectIndex.from_objects_and_index(
                 table_schema,
                 table_index,
@@ -1304,13 +1517,19 @@ class NL2SQLTool:
             return None
         try:
             from llama_index.core.indices.vector_store import VectorStoreIndex  # type: ignore
-            from llama_index.core.vector_stores.types import MetadataFilter, MetadataFilters  # type: ignore
+            from llama_index.core.vector_stores.types import (
+                MetadataFilter,
+                MetadataFilters,
+            )  # type: ignore
         except Exception as exc:
             _log_nl2sql("NL2SQL检索器 列索引加载依赖异常=%s", exc)
             return None
 
+        # 列索引以“统一大索引 + metadata 过滤”的方式组织，而不是每列单独一个 collection。
         vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
-        column_index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+        column_index = VectorStoreIndex.from_vector_store(
+            vector_store, embed_model=embed_model
+        )
 
         cols_retrievers: Dict[str, Dict[str, Any]] = {}
         for table_name in table_names:
@@ -1319,6 +1538,7 @@ class NL2SQLTool:
                 continue
             table_retrievers: Dict[str, Any] = {}
             for column_name in column_names:
+                # 查询阶段依靠 metadata 过滤把同一个向量索引切成“表-列”粒度的检索器。
                 filters = MetadataFilters(
                     filters=[
                         MetadataFilter(key="table", value=table_name),
@@ -1328,7 +1548,9 @@ class NL2SQLTool:
                 retriever = column_index.as_retriever(
                     similarity_top_k=self.column_retriever_top_k,
                     filters=filters,
-                    vector_store_kwargs=self._milvus_query_kwargs(self.COLUMN_PARTITION),
+                    vector_store_kwargs=self._milvus_query_kwargs(
+                        self.COLUMN_PARTITION
+                    ),
                 )
                 table_retrievers[column_name] = retriever
             if table_retrievers:
@@ -1339,16 +1561,24 @@ class NL2SQLTool:
     def _compute_schema_signature(self, table_names: List[str]) -> str:
         """基于表结构与列配置生成稳定签名。"""
         tables = sorted(table_names)
+        # 签名覆盖 schema、注释、列索引配置和 embedding 参数，确保任一关键条件变化都会触发重建。
         payload = {
             "tables": tables,
             "schema": {t: self.table_schema.get(t, []) for t in tables},
             "context": {t: TABLE_CONTEXT_HINTS.get(t, "") for t in tables},
-            "table_review_comments": {t: TABLE_REVIEW_COMMENTS.get(t, "") for t in tables},
+            "table_review_comments": {
+                t: TABLE_REVIEW_COMMENTS.get(t, "") for t in tables
+            },
             "column_review_comments": {
-                t: {c: COLUMN_REVIEW_COMMENTS.get(t, {}).get(c, "") for c in self.table_schema.get(t, [])}
+                t: {
+                    c: COLUMN_REVIEW_COMMENTS.get(t, {}).get(c, "")
+                    for c in self.table_schema.get(t, [])
+                }
                 for t in tables
             },
-            "column_index_config": {t: self.column_index_config.get(t, []) for t in tables},
+            "column_index_config": {
+                t: self.column_index_config.get(t, []) for t in tables
+            },
             "column_index_max_values": self.column_index_max_values,
             "column_index_max_value_length": self.column_index_max_value_length,
             "embedding_backend": self.embedding_backend,
@@ -1370,14 +1600,18 @@ class NL2SQLTool:
         if not manifest_path or not manifest_path.exists():
             return None
         try:
+            # manifest 只保存轻量元信息，真正的向量数据仍在 Milvus。
             return json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             return None
 
-    def _write_index_manifest(self, signature: str, table_names: List[str], build_columns: bool) -> None:
+    def _write_index_manifest(
+        self, signature: str, table_names: List[str], build_columns: bool
+    ) -> None:
         if not self.index_cache_dir:
             return
         self.index_cache_dir.mkdir(parents=True, exist_ok=True)
+        # manifest 用于跨进程判断“当前磁盘/向量缓存是否与代码口径一致”。
         payload = {
             "schema_signature": signature,
             "tables": sorted(table_names),
@@ -1391,7 +1625,9 @@ class NL2SQLTool:
         }
         manifest_path = self._manifest_path()
         if manifest_path:
-            manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            manifest_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
     def _is_cache_valid(self, signature: str) -> bool:
         manifest = self._load_index_manifest()
@@ -1400,6 +1636,7 @@ class NL2SQLTool:
         if manifest.get("schema_signature") != signature:
             return False
         manifest_collection = manifest.get("collection")
+        # collection 名变化等价于切换了一套向量空间，此时必须重建。
         if manifest_collection and manifest_collection != self.milvus_collection:
             return False
         return True
@@ -1432,10 +1669,14 @@ class NL2SQLTool:
             return None
         try:
             from sqlalchemy import MetaData, Table, select  # type: ignore
-            from llama_index.core.vector_stores.types import MetadataFilter, MetadataFilters  # type: ignore
+            from llama_index.core.vector_stores.types import (
+                MetadataFilter,
+                MetadataFilters,
+            )  # type: ignore
         except Exception as exc:
             raise RuntimeError("未安装 SQLAlchemy，无法构建列索引。") from exc
 
+        # 思路：先从 PostgreSQL 抽取每个候选列的 distinct value，再统一写入 Milvus 并按 metadata 切检索器。
         engine = self.db.get_engine()
         metadata = MetaData()
         cols_retrievers: Dict[str, Dict[str, Any]] = {}
@@ -1449,14 +1690,19 @@ class NL2SQLTool:
             try:
                 table = Table(table_name, metadata, autoload_with=engine)
             except Exception:
+                # 单表反射失败时跳过，不影响其他表构建。
                 continue
             table_retrievers: Dict[str, Any] = {}
             for column_name in column_names:
                 if column_name not in table.c:
+                    # 配置与实际数据库不一致时直接跳过该列，避免整批失败。
                     continue
                 column = table.c[column_name]
                 # 取列的去重值作为索引文本，限制数量避免过大
-                values = self._fetch_distinct_values(engine, select(column).distinct().limit(self.column_index_max_values))
+                values = self._fetch_distinct_values(
+                    engine,
+                    select(column).distinct().limit(self.column_index_max_values),
+                )
                 nodes = self._build_column_nodes(
                     values,
                     text_node_cls,
@@ -1473,9 +1719,11 @@ class NL2SQLTool:
             return None
 
         from llama_index.core.storage.storage_context import StorageContext  # type: ignore
+
         vector_store = self._create_milvus_vector_store(embed_model, overwrite=False)
         self._ensure_milvus_partition(self.COLUMN_PARTITION)
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        # 所有列值节点共享一个列索引，查询时再用 metadata 过滤精确到单列。
         column_index = vector_index_cls(
             all_nodes,
             embed_model=embed_model,
@@ -1504,9 +1752,15 @@ class NL2SQLTool:
         """执行列值查询，统一返回值列表。"""
         with engine.connect() as conn:
             result = conn.execute(stmt)  # type: ignore
+            # 这里只返回第一列值，调用方已通过 select(column) 保证结果结构固定。
             return [row[0] for row in result.fetchall()]
 
-    def _build_column_nodes(self, values: List[Any], text_node_cls, metadata: Optional[Dict[str, Any]] = None) -> List[Any]:
+    def _build_column_nodes(
+        self,
+        values: List[Any],
+        text_node_cls,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Any]:
         """将列值标准化为可向量化节点。"""
         nodes = []
         seen = set()
@@ -1520,6 +1774,7 @@ class NL2SQLTool:
             if text in seen:
                 continue
             seen.add(text)
+            # metadata 会在查询阶段作为过滤条件，定位到具体 table/column。
             nodes.append(text_node_cls(text=text, metadata=metadata or {}))
         return nodes
 
@@ -1528,9 +1783,15 @@ class NL2SQLTool:
         if value is None:
             return None
         if isinstance(value, (list, tuple, set)):
-            parts = [str(item).strip() for item in value if item is not None and str(item).strip()]
+            # 数组列会被拍平成逗号分隔文本，便于 embedding 模型理解。
+            parts = [
+                str(item).strip()
+                for item in value
+                if item is not None and str(item).strip()
+            ]
             return ", ".join(parts) if parts else None
         if isinstance(value, dict):
+            # JSON/字典值统一转字符串，保留结构信息同时避免对象不可序列化。
             return json.dumps(value, ensure_ascii=False)
         text = str(value).strip()
         return text or None
