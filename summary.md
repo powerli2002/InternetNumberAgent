@@ -36,6 +36,14 @@
 
 图查询链路当前默认使用 `neo4j_llamaindex_query`：由 MCP 工具内部通过 LlamaIndex 读取 Neo4j schema、生成 Cypher 并执行；主编排不再预先生成 Cypher。
 
+2026-03-26 起，LangGraph 主编排补充了 4 条运行时约束：
+
+- `build_context` 优先消费当前轮 `step_results` 的结构化结果，不再优先依赖 evidence preview，避免查询结果在进入上下文前被摘要截断。
+- ContextBuilder 仅在结构化上下文超过 token 预算时才调用 LLM 压缩；未超窗时直接保留原始结构化上下文。
+- LangGraph 主图入口新增 `reset_turn_state`，新 turn 开始时会显式清空上一轮遗留的 `step_results/evidences/context/conflicts` 等易变执行态，避免跨轮次污染。
+- `validate_plan` 会把“数量统计 + 前 N 示例”这类混合 NL2SQL 请求拆成两个独立步骤；纯 `none` 计划回合会跳过数据工具与 note 检索，并在回答阶段按“当前 query + 历史消息”生成回复，避免简单问题被直接短路。
+- MCP 服务启动时会预构建 NL2SQL 的 Milvus 表/列索引；运行期同一进程内按 schema signature 加锁，避免并发请求重复重建同一份索引。
+
 ---
 
 ## 2. 数据格式与落库规则

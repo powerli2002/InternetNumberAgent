@@ -30,6 +30,7 @@ import inspect
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -763,8 +764,21 @@ class NL2SQLTool:
         self._table_retriever_cache = None
         self._cols_retrievers_cache = None
         self._cache_signature = None
+        # 运行期可能有多个请求同时命中同一套表配置；按 signature 加锁，
+        # 避免多个线程并发重建同一份表/列索引，导致首查放大为重复重建。
+        self._cache_build_locks: Dict[str, threading.Lock] = {}
+        self._cache_build_locks_guard = threading.Lock()
         # embedding 维度只需探测一次，后续复用，减少首次建索引时的额外开销。
         self._embedding_dim = 0
+
+    def _get_cache_build_lock(self, signature: str) -> threading.Lock:
+        """按 schema signature 获取进程内构建锁。"""
+        with self._cache_build_locks_guard:
+            lock = self._cache_build_locks.get(signature)
+            if lock is None:
+                lock = threading.Lock()
+                self._cache_build_locks[signature] = lock
+        return lock
 
     def query(
         self,
@@ -1055,7 +1069,9 @@ class NL2SQLTool:
             raise RuntimeError("未配置数据库连接，无法执行 SQL。")
         # 统一复用 DatabaseClient，确保正式执行路径与离线预热/调试路径一致。
         return self.db.run_sql(
-            sql, timeout_ms=self.statement_timeout_ms, max_rows=self.max_rows
+            sql,
+            timeout_ms=self.statement_timeout_ms,
+            max_rows=self.max_rows,
         )
 
     def _build_table_context(self) -> Dict[str, str]:
@@ -1281,74 +1297,75 @@ class NL2SQLTool:
             raise RuntimeError("未提供可用表名，无法预构建索引。")
 
         signature = self._compute_schema_signature(table_names)
-        force_rebuild = self.force_rebuild_cache if force is None else force
-        cache_ready = self._is_cache_valid(signature) and self._milvus_cache_ready(
-            build_tables, build_columns
-        )
-        if not force_rebuild and cache_ready:
-            # manifest 与 Milvus 分区都命中时，直接跳过重建。
-            return {"status": "skipped", "signature": signature}
+        with self._get_cache_build_lock(signature):
+            force_rebuild = self.force_rebuild_cache if force is None else force
+            cache_ready = self._is_cache_valid(signature) and self._milvus_cache_ready(
+                build_tables, build_columns
+            )
+            if not force_rebuild and cache_ready:
+                # manifest 与 Milvus 分区都命中时，直接跳过重建。
+                return {"status": "skipped", "signature": signature}
 
-        if force_rebuild or not cache_ready:
+            if force_rebuild or not cache_ready:
+                if build_tables:
+                    self._drop_milvus_partition(self.TABLE_PARTITION)
+                if build_columns:
+                    self._drop_milvus_partition(self.COLUMN_PARTITION)
+                if force_rebuild:
+                    self._clear_cache_dir()
+
+            try:
+                from llama_index.core import SQLDatabase, VectorStoreIndex  # type: ignore
+                from llama_index.core.objects import (
+                    ObjectIndex,
+                    SQLTableNodeMapping,
+                    SQLTableSchema,
+                )  # type: ignore
+                from llama_index.core.schema import TextNode  # type: ignore
+            except Exception as exc:
+                raise RuntimeError("缺少 llama-index 依赖，无法预构建索引。") from exc
+
+            # 预构建时同样只反射指定表，保证离线构建结果与在线查询口径一致。
+            db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
+            embed_model = self._embed_model
+
+            table_context = {
+                k: v for k, v in self._build_table_context().items() if k in table_names
+            }
+            table_schema = [
+                SQLTableSchema(
+                    table_name=table,
+                    context_str=table_context.get(table, ""),
+                )
+                for table in table_names
+            ]
+            table_node_mapping = SQLTableNodeMapping(db)
+
             if build_tables:
-                self._drop_milvus_partition(self.TABLE_PARTITION)
-            if build_columns:
-                self._drop_milvus_partition(self.COLUMN_PARTITION)
-            if force_rebuild:
-                self._clear_cache_dir()
+                # 表索引负责 query-time 缩表，是 NL2SQL 首轮召回的主入口。
+                self._build_table_retriever(
+                    table_schema=table_schema,
+                    table_node_mapping=table_node_mapping,
+                    embed_model=embed_model,
+                    vector_index_cls=VectorStoreIndex,
+                    table_top_k=self.table_retriever_top_k,
+                )
 
-        try:
-            from llama_index.core import SQLDatabase, VectorStoreIndex  # type: ignore
-            from llama_index.core.objects import (
-                ObjectIndex,
-                SQLTableNodeMapping,
-                SQLTableSchema,
-            )  # type: ignore
-            from llama_index.core.schema import TextNode  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("缺少 llama-index 依赖，无法预构建索引。") from exc
+            if build_columns and self.enable_column_retrieval:
+                # 列索引只构建配置允许的列，避免对大表全列做高成本离散值抽样。
+                self._build_column_retrievers(
+                    table_names=table_names,
+                    embed_model=embed_model,
+                    text_node_cls=TextNode,
+                    vector_index_cls=VectorStoreIndex,
+                )
 
-        # 预构建时同样只反射指定表，保证离线构建结果与在线查询口径一致。
-        db = SQLDatabase.from_uri(self.postgres_url, include_tables=table_names)
-        embed_model = self._embed_model
-
-        table_context = {
-            k: v for k, v in self._build_table_context().items() if k in table_names
-        }
-        table_schema = [
-            SQLTableSchema(
-                table_name=table,
-                context_str=table_context.get(table, ""),
+            self._write_index_manifest(
+                signature,
+                table_names,
+                build_columns=build_columns and self.enable_column_retrieval,
             )
-            for table in table_names
-        ]
-        table_node_mapping = SQLTableNodeMapping(db)
-
-        if build_tables:
-            # 表索引负责 query-time 缩表，是 NL2SQL 首轮召回的主入口。
-            self._build_table_retriever(
-                table_schema=table_schema,
-                table_node_mapping=table_node_mapping,
-                embed_model=embed_model,
-                vector_index_cls=VectorStoreIndex,
-                table_top_k=self.table_retriever_top_k,
-            )
-
-        if build_columns and self.enable_column_retrieval:
-            # 列索引只构建配置允许的列，避免对大表全列做高成本离散值抽样。
-            self._build_column_retrievers(
-                table_names=table_names,
-                embed_model=embed_model,
-                text_node_cls=TextNode,
-                vector_index_cls=VectorStoreIndex,
-            )
-
-        self._write_index_manifest(
-            signature,
-            table_names,
-            build_columns=build_columns and self.enable_column_retrieval,
-        )
-        return {"status": "built", "signature": signature}
+            return {"status": "built", "signature": signature}
 
     def _get_or_build_retrievers(
         self,
@@ -1370,81 +1387,92 @@ class NL2SQLTool:
         ):
             _log_nl2sql("NL2SQL检索器 命中内存缓存 signature=%s", signature)
             return self._table_retriever_cache, self._cols_retrievers_cache
+        with self._get_cache_build_lock(signature):
+            if (
+                self._cache_signature == signature
+                and self._table_retriever_cache is not None
+            ):
+                _log_nl2sql("NL2SQL检索器 锁内命中内存缓存 signature=%s", signature)
+                return self._table_retriever_cache, self._cols_retrievers_cache
 
-        table_retriever = None
-        cols_retrievers = None
-        cache_valid = self._is_cache_valid(signature)
-        if self.enable_index_cache and not self.force_rebuild_cache:
-            if cache_valid and self._milvus_cache_ready(True, enable_columns):
-                _log_nl2sql("NL2SQL检索器 尝试加载 Milvus 缓存 signature=%s", signature)
-                table_retriever = self._load_table_retriever_from_milvus(
-                    table_schema=table_schema,
-                    table_node_mapping=table_node_mapping,
-                    table_top_k=table_top_k,
-                    embed_model=embed_model,
-                )
-                if enable_columns:
-                    cols_retrievers = self._load_column_retrievers_from_milvus(
-                        table_names=table_names,
+            table_retriever = None
+            cols_retrievers = None
+            cache_valid = self._is_cache_valid(signature)
+            if self.enable_index_cache and not self.force_rebuild_cache:
+                if cache_valid and self._milvus_cache_ready(True, enable_columns):
+                    _log_nl2sql(
+                        "NL2SQL检索器 尝试加载 Milvus 缓存 signature=%s", signature
+                    )
+                    table_retriever = self._load_table_retriever_from_milvus(
+                        table_schema=table_schema,
+                        table_node_mapping=table_node_mapping,
+                        table_top_k=table_top_k,
                         embed_model=embed_model,
                     )
-                    if cols_retrievers is not None and not cols_retrievers:
-                        _log_nl2sql("NL2SQL检索器 列索引缓存为空，将仅使用表索引")
-                if table_retriever and (
-                    not enable_columns or cols_retrievers is not None
-                ):
-                    _log_nl2sql("NL2SQL检索器 Milvus 缓存加载成功")
-                    # 命中后立即回填内存缓存，减少同进程后续请求的 Milvus 往返。
-                    self._table_retriever_cache = table_retriever
-                    self._cols_retrievers_cache = cols_retrievers
-                    self._cache_signature = signature
-                    return table_retriever, cols_retrievers
-                _log_nl2sql("NL2SQL检索器 Milvus 缓存加载失败，准备重建")
+                    if enable_columns:
+                        cols_retrievers = self._load_column_retrievers_from_milvus(
+                            table_names=table_names,
+                            embed_model=embed_model,
+                        )
+                        if cols_retrievers is not None and not cols_retrievers:
+                            _log_nl2sql("NL2SQL检索器 列索引缓存为空，将仅使用表索引")
+                    if table_retriever and (
+                        not enable_columns or cols_retrievers is not None
+                    ):
+                        _log_nl2sql("NL2SQL检索器 Milvus 缓存加载成功")
+                        # 命中后立即回填内存缓存，减少同进程后续请求的 Milvus 往返。
+                        self._table_retriever_cache = table_retriever
+                        self._cols_retrievers_cache = cols_retrievers
+                        self._cache_signature = signature
+                        return table_retriever, cols_retrievers
+                    _log_nl2sql("NL2SQL检索器 Milvus 缓存加载失败，准备重建")
 
-        if self.enable_index_cache and (self.force_rebuild_cache or not cache_valid):
-            if self.force_rebuild_cache:
-                # 强制重建时连 manifest 一起清掉，避免残留旧版本签名。
-                self._clear_cache_dir()
-            self._drop_milvus_partition(self.TABLE_PARTITION)
-            if enable_columns:
-                self._drop_milvus_partition(self.COLUMN_PARTITION)
+            if self.enable_index_cache and (
+                self.force_rebuild_cache or not cache_valid
+            ):
+                if self.force_rebuild_cache:
+                    # 强制重建时连 manifest 一起清掉，避免残留旧版本签名。
+                    self._clear_cache_dir()
+                self._drop_milvus_partition(self.TABLE_PARTITION)
+                if enable_columns:
+                    self._drop_milvus_partition(self.COLUMN_PARTITION)
 
-        build_time = time.monotonic()
-        table_retriever = self._build_table_retriever(
-            table_schema=table_schema,
-            table_node_mapping=table_node_mapping,
-            embed_model=embed_model,
-            vector_index_cls=vector_index_cls,
-            table_top_k=table_top_k,
-        )
-        _log_nl2sql(
-            "NL2SQL检索器 表索引重建耗时=%dms",
-            int((time.monotonic() - build_time) * 1000),
-        )
-        cols_retrievers = None
-        if enable_columns:
             build_time = time.monotonic()
-            cols_retrievers = self._build_column_retrievers(
-                table_names=table_names,
+            table_retriever = self._build_table_retriever(
+                table_schema=table_schema,
+                table_node_mapping=table_node_mapping,
                 embed_model=embed_model,
-                text_node_cls=text_node_cls,
                 vector_index_cls=vector_index_cls,
+                table_top_k=table_top_k,
             )
             _log_nl2sql(
-                "NL2SQL检索器 列索引重建耗时=%dms",
+                "NL2SQL检索器 表索引重建耗时=%dms",
                 int((time.monotonic() - build_time) * 1000),
             )
+            cols_retrievers = None
+            if enable_columns:
+                build_time = time.monotonic()
+                cols_retrievers = self._build_column_retrievers(
+                    table_names=table_names,
+                    embed_model=embed_model,
+                    text_node_cls=text_node_cls,
+                    vector_index_cls=vector_index_cls,
+                )
+                _log_nl2sql(
+                    "NL2SQL检索器 列索引重建耗时=%dms",
+                    int((time.monotonic() - build_time) * 1000),
+                )
 
-        if self.enable_index_cache:
-            self._write_index_manifest(
-                signature, table_names, build_columns=enable_columns
-            )
+            if self.enable_index_cache:
+                self._write_index_manifest(
+                    signature, table_names, build_columns=enable_columns
+                )
 
-        # 新构建出的 retriever 同时回填到实例缓存，供当前进程内后续请求复用。
-        self._table_retriever_cache = table_retriever
-        self._cols_retrievers_cache = cols_retrievers
-        self._cache_signature = signature
-        return table_retriever, cols_retrievers
+            # 新构建出的 retriever 同时回填到实例缓存，供当前进程内后续请求复用。
+            self._table_retriever_cache = table_retriever
+            self._cols_retrievers_cache = cols_retrievers
+            self._cache_signature = signature
+            return table_retriever, cols_retrievers
 
     def _build_table_retriever(
         self,

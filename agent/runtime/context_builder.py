@@ -495,7 +495,9 @@ class ContextBuilder:
         selected = self.select(chunks)
         structured = self.structure(selected)
         before_tokens = self.token_counter(structured)
-        compressed = self.compress(structured)
+        compressed = structured
+        if before_tokens > self.max_tokens:
+            compressed = self.compress(structured)
         after_tokens = self.token_counter(compressed)
 
         trace_payload: Dict[str, Any] = {

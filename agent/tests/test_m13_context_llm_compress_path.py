@@ -49,6 +49,29 @@ def test_context_compress_always_uses_llm_even_when_within_budget() -> None:
     assert compressed == "压缩后上下文"
 
 
+def test_build_with_trace_skips_llm_when_context_within_budget() -> None:
+    """完整构建流程在未超预算时不应触发 LLM 压缩。"""
+    llm = _FakeLLM(response="压缩后上下文")
+    builder = ContextBuilder(
+        max_tokens=200,
+        token_counter=lambda text: len(text),
+        llm_client=llm,  # type: ignore[arg-type]
+    )
+
+    context, trace_payload = builder.build_with_trace(
+        system_prompt="系统提示",
+        user_query="查询 AS4134",
+        history=[],
+        memories=[],
+        evidences=[],
+        notes=[],
+    )
+
+    assert llm.called == 0
+    assert context == trace_payload["context_before_compress"]
+    assert trace_payload["token_stats"]["compression_applied"] is False
+
+
 def test_context_compress_splits_evidence_and_other_then_calls_llm() -> None:
     """包含 Evidence 时，应分成 Evidence 与 Other 两桶分别调用 LLM。"""
     llm = _FakeLLM(

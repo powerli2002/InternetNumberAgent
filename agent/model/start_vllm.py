@@ -3,6 +3,7 @@
 
 默认参数已配置为可直接执行：
     nohup python start_vllm.py
+    /home/lzj/fusionprocessing/.venv/bin/python /home/lzj/fusionprocessing/agent/model/start_vllm.py
 """
 
 from __future__ import annotations

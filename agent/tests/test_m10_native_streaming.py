@@ -6,9 +6,9 @@ from typing import Any, Dict, Iterable, List
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
+import pytest
 
 import agent.runtime.langgraph_orchestrator as orchestrator_module
-import agent.services.http.server as server_module
 from agent.runtime.langgraph_orchestrator import LangGraphOrchestrator
 
 
@@ -30,16 +30,32 @@ class _StreamingNodeHelper:
 def test_generate_answer_node_emits_custom_stream_events(monkeypatch) -> None:
     """generate_answer 节点应通过 LangGraph custom stream 输出增量文本。"""
     streamed_events: List[Dict[str, Any]] = []
-    monkeypatch.setattr(orchestrator_module, "get_stream_writer", lambda: lambda payload: streamed_events.append(payload))
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_stream_writer",
+        lambda: lambda payload: streamed_events.append(payload),
+    )
 
-    out = LangGraphOrchestrator._generate_answer_node(_StreamingNodeHelper(), {"context": "上下文"})  # type: ignore[misc]
+    out = LangGraphOrchestrator._generate_answer_node(
+        _StreamingNodeHelper(), {"context": "上下文"}
+    )  # type: ignore[misc]
 
     assert out["answer"] == "最终回答"
     assert isinstance(out["messages"][0], AIMessage)
     assert out["messages"][0].content == "最终回答"
     assert streamed_events == [
-        {"event": "messages", "role": "assistant", "content": "最终", "node": "generate_answer"},
-        {"event": "messages", "role": "assistant", "content": "回答", "node": "generate_answer"},
+        {
+            "event": "messages",
+            "role": "assistant",
+            "content": "最终",
+            "node": "generate_answer",
+        },
+        {
+            "event": "messages",
+            "role": "assistant",
+            "content": "回答",
+            "node": "generate_answer",
+        },
     ]
     assert out["_trace_outputs"]["business_output"]["chunk_count"] == 2
 
@@ -59,7 +75,15 @@ class _FakeGraph:
                 "stream_mode": stream_mode,
             }
         )
-        yield ("custom", {"event": "messages", "role": "assistant", "content": "答", "node": "generate_answer"})
+        yield (
+            "custom",
+            {
+                "event": "messages",
+                "role": "assistant",
+                "content": "答",
+                "node": "generate_answer",
+            },
+        )
         yield ("updates", {"generate_answer": {"answer": "答案"}})
 
     def get_state(self, config):
@@ -71,7 +95,7 @@ class _FakeGraph:
                 "conflicts": [],
                 "replan_count": 0,
                 "evidences": [],
-                "plan_reason": "直接回答",
+                "plan_reason": "无需检索",
             }
         )
 
@@ -92,7 +116,9 @@ class _StreamingOrchestratorHelper:
             {"stage": "main_flow_start"},
         )
 
-    def _build_root_trace_context(self, _user_message: str, _trace_id: str, _thread_id: str):
+    def _build_root_trace_context(
+        self, _user_message: str, _trace_id: str, _thread_id: str
+    ):
         return nullcontext(SimpleNamespace())
 
     def _build_auto_trace_context(self, _run: Any, _trace_id: str):
@@ -105,7 +131,7 @@ class _StreamingOrchestratorHelper:
             "thread_id": kwargs["thread_id"],
             "sources": ["rag"],
             "conflicts": [],
-            "plan_reason": "直接回答",
+            "plan_reason": "无需检索",
             "replan_count": 0,
             "evidence_count": 0,
             "evidence_sources": [],
@@ -128,14 +154,22 @@ def test_stream_response_uses_langgraph_native_stream_and_updates_metadata() -> 
     events = list(stream_iter)
 
     assert events == [
-        ("custom", {"event": "messages", "role": "assistant", "content": "答", "node": "generate_answer"}),
+        (
+            "custom",
+            {
+                "event": "messages",
+                "role": "assistant",
+                "content": "答",
+                "node": "generate_answer",
+            },
+        ),
         ("updates", {"generate_answer": {"answer": "答案"}}),
     ]
     assert helper.graph.stream_calls[0]["stream_mode"] == ["custom", "updates"]
     assert helper.graph.get_state_calls == [{"configurable": {"thread_id": "thread-1"}}]
     assert helper.finalize_calls[0]["answer"] == "答案"
     assert metadata["sources"] == ["rag"]
-    assert metadata["plan_reason"] == "直接回答"
+    assert metadata["plan_reason"] == "无需检索"
 
 
 class _FakeStore:
@@ -153,7 +187,15 @@ class _FakeStreamingAgent:
         return (
             iter(
                 [
-                    ("custom", {"event": "messages", "role": "assistant", "content": "答", "node": "generate_answer"}),
+                    (
+                        "custom",
+                        {
+                            "event": "messages",
+                            "role": "assistant",
+                            "content": "答",
+                            "node": "generate_answer",
+                        },
+                    ),
                     ("updates", {"generate_answer": {"answer": "答案"}}),
                 ]
             ),
@@ -162,11 +204,18 @@ class _FakeStreamingAgent:
 
     def get_state(self, thread_id: str):
         assert thread_id == "thread-1"
-        return SimpleNamespace(values={"answer": "答案", "messages": [AIMessage(content="答案")]})
+        return SimpleNamespace(
+            values={"answer": "答案", "messages": [AIMessage(content="答案")]}
+        )
 
 
 def test_http_stream_endpoint_forwards_native_custom_and_updates(monkeypatch) -> None:
     """HTTP SSE 应把 custom/updates 事件转成前端可消费的消息流。"""
+    try:
+        import agent.services.http.server as server_module
+    except RuntimeError as exc:
+        pytest.skip(f"测试环境缺少 HTTP 服务依赖: {exc}")
+
     monkeypatch.setattr(server_module, "store", _FakeStore())
     monkeypatch.setattr(server_module, "agent", _FakeStreamingAgent())
 
@@ -188,4 +237,3 @@ def test_http_stream_endpoint_forwards_native_custom_and_updates(monkeypatch) ->
     assert '"content": "答"' in body
     assert "event: updates" in body
     assert "event: values" in body
-

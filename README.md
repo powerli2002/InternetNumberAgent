@@ -35,7 +35,7 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 
 ## 编排链路简化（2026-02-26）
 
-1. LangGraph 主图移除 `classify` 节点，入口节点调整为 `plan`。
+1. LangGraph 主图移除 `classify` 节点；当前入口节点为 `reset_turn_state`，先清空上一轮遗留执行态，再进入 `plan`。
 2. `available_tools` 探测下沉到 `plan` 节点，并在每轮重规划前重新探测。
 3. 运行时 metadata 不再输出 `question_type`，统一聚焦计划与执行证据。
 
@@ -51,7 +51,11 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 2. `execute` 阶段不再做规则式意图判断，只消费并透传 `query_mode` 到 MCP/NL2SQL。
 3. NL2SQL 不再执行“聚合硬拦截+重生”；改为在同次 SQL 生成 prompt 中按 `query_mode` 引导 SQL 形态。
 4. MCP `nl2sql_query` 新增 `query_mode`；`intent_policy/intent_labels_required` 进入兼容保留（deprecated）状态。
-5. ContextBuilder 统一改为 LLM 压缩：先拆分 `Evidence/Other` 分桶，再分别调用 LLM；单桶超窗时分块调用 LLM 后回拼。
+5. ContextBuilder 的 `build_with_trace()` 仅在上下文超过 `max_tokens` 时才调用 LLM 压缩；未超窗时直接保留结构化上下文。
+6. `build_context` 优先消费当前轮 `step_results` 的结构化结果，不再优先依赖 `evidence preview`，避免 SQL 结果在进入上下文前被二次截断。
+7. LangGraph 主图入口新增 `reset_turn_state`，显式清空上一轮遗留的 `step_results/evidences/context/conflicts` 等易变状态，避免跨 turn 污染 `conflict_check` 与后续节点。
+8. `validate_plan` 会把“数量统计 + 前 N 示例”这类混合 NL2SQL 请求拆成两个独立步骤，避免生成非法聚合 SQL。
+9. 对问候/感谢/能力询问等纯 `none` 计划回合，主图不再调用数据工具与 note 检索；回答阶段改为用“system + 历史消息 + 当前 query”生成回复，避免直接短路，也避免简单问题被检索上下文污染。
 
 ## 稳定性修复（2026-02-08）
 
@@ -106,11 +110,12 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
      ```
    - 如需单独执行：`python -m agent.scripts.ensure_core_schema --config conf/config.docker.yaml --root .`
 
-3. （可选）预构建 NL2SQL 索引
+3. （可选）离线预构建 NL2SQL 索引
    ```bash
    python -m agent.scripts.build_nl2sql_indexes
    ```
    - NL2SQL 表/列索引将写入 Milvus（单 collection + 分区），本地仅保留轻量 manifest
+   - 当前 MCP 服务启动时也会阻塞式校验/预构建索引；此脚本更适合部署前预热、强制重建或排障
 
 4. 启动智能体服务（MCP / API）
    ```bash
@@ -126,8 +131,8 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
-   # 可选：预构建 NL2SQL 索引
-   python -m agent.scripts.build_nl2sql_indexes
+    # 可选：离线预构建 NL2SQL 索引（MCP 启动时也会自动校验/预构建）
+    python -m agent.scripts.build_nl2sql_indexes
    uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
    uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
    ```
@@ -214,6 +219,7 @@ python -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 - `VECTOR_COLLECTION`（RAG 向量集合，默认 `fusion_docs`）
 - `NEO4J_DATABASE`（默认 `neo4j`）
 - `GRAPH_MAX_ROWS` / `GRAPH_MAX_CYPHER_LENGTH`（图查询行数与 Cypher 长度上限）
+- `NL2SQL_MAX_ROWS`（NL2SQL 默认基线行数上限；当前明细模式不单独抬高，统一保持该 LIMIT）
 - `GRAPH_REFRESH_SCHEMA_EACH_QUERY`（默认 `true`，图查询前刷新 schema）
 - `CONTEXT_COMPRESS_MODE`（兼容保留字段，当前固定按 `llm` 处理）
 - `CONTEXT_COMPRESS_TARGET_RATIO`（LLM 压缩目标比例，默认 `0.7`）

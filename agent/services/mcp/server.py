@@ -15,6 +15,7 @@ from agent.tools.nl2sql_tool import NL2SQLTool
 from agent.tools.note_tool import NoteTool
 from agent.tools.rag_tool import RAGTool, build_rag_embedding
 from agent.tools.todo_tool import TodoTool
+from fusiondata.src.utils.logging_manager import logger
 
 
 class _MCPRuntime:
@@ -71,12 +72,37 @@ class _MCPRuntime:
         self.note_tool = NoteTool(self.config.notes_dir)
         self.todo_tool = TodoTool(self.config.project_root / "agent" / "todo.json")
 
+    def warmup_nl2sql_indexes(self) -> None:
+        """在 MCP 启动阶段预构建 NL2SQL 表/列索引。"""
+        table_names = list(self.config.allowed_tables or [])
+        logger.info(
+            "MCP 启动预构建 NL2SQL 索引 tables=%s build_columns=%s",
+            ",".join(table_names),
+            True,
+        )
+        result = self.nl2sql_tool.prepare_index_cache(
+            table_names=table_names,
+            build_tables=True,
+            build_columns=True,
+        )
+        logger.info(
+            "MCP 启动预构建 NL2SQL 索引完成 status=%s signature=%s",
+            result.get("status"),
+            result.get("signature", ""),
+        )
 
-def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
+
+def create_mcp_server(
+    config: Optional[AgentConfig] = None,
+    runtime: Optional[_MCPRuntime] = None,
+) -> FastMCP:
     """创建 FastMCP server。"""
     cfg = config or AgentConfig.load()
-    runtime = _MCPRuntime(cfg)
-    mcp = FastMCP(name="fusion-tools", instructions="Fusion 工具层（NL2SQL / RAG / Neo4j-LlamaIndex / Note / Todo）")
+    runtime = runtime or _MCPRuntime(cfg)
+    mcp = FastMCP(
+        name="fusion-tools",
+        instructions="Fusion 工具层（NL2SQL / RAG / Neo4j-LlamaIndex / Note / Todo）",
+    )
 
     @mcp.tool
     def health() -> Dict[str, Any]:
@@ -100,7 +126,11 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
         - intent_policy / intent_labels_required 为兼容字段，已废弃但暂时保留。
         """
         # 用 ls_trace context manager 而非 @traceable 装饰器，避免修改 FastMCP 所见的函数签名。
-        with ls_trace("nl2sql_query", run_type="tool", inputs={"question": question, "query_mode": query_mode}):
+        with ls_trace(
+            "nl2sql_query",
+            run_type="tool",
+            inputs={"question": question, "query_mode": query_mode},
+        ):
             result = runtime.nl2sql_tool.query(
                 question,
                 tables=tables,
@@ -113,7 +143,9 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
     @mcp.tool
     def rag_search(query: str, top_k: int = 5, trace_id: str = "") -> Dict[str, Any]:
         """执行文档向量检索。"""
-        with ls_trace("rag_search", run_type="tool", inputs={"query": query, "top_k": top_k}):
+        with ls_trace(
+            "rag_search", run_type="tool", inputs={"query": query, "top_k": top_k}
+        ):
             chunks = runtime.rag_tool.search(query, top_k=max(1, int(top_k)))
             return {
                 "query": query,
@@ -142,7 +174,11 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
         with ls_trace(
             "neo4j_llamaindex_query",
             run_type="tool",
-            inputs={"question": question, "max_rows": max_rows, "is_repair": repair_context is not None},
+            inputs={
+                "question": question,
+                "max_rows": max_rows,
+                "is_repair": repair_context is not None,
+            },
         ):
             return runtime.graph_llamaindex_tool.query(
                 question,
@@ -154,7 +190,9 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
     @mcp.tool
     def note_search(query: str, limit: int = 3, trace_id: str = "") -> Dict[str, Any]:
         """搜索笔记。"""
-        with ls_trace("note_search", run_type="tool", inputs={"query": query, "limit": limit}):
+        with ls_trace(
+            "note_search", run_type="tool", inputs={"query": query, "limit": limit}
+        ):
             notes = runtime.note_tool.search(query, limit=max(1, int(limit)))
             return {"notes": notes}
 
@@ -197,8 +235,10 @@ def create_mcp_server(config: Optional[AgentConfig] = None) -> FastMCP:
 
 
 config = AgentConfig.load()
-mcp_server = create_mcp_server(config)
+runtime = _MCPRuntime(config)
+mcp_server = create_mcp_server(config, runtime=runtime)
 # http_app 返回 Starlette ASGI 应用；添加 TracingMiddleware 使 Server 端接收 Client
 # 传来的 langsmith-trace header，将工具调用嵌套挂到主链路 trace 树下。
 app = mcp_server.http_app(path="/mcp", transport="streamable-http")
 app.add_middleware(TracingMiddleware)
+app.add_event_handler("startup", runtime.warmup_nl2sql_indexes)
