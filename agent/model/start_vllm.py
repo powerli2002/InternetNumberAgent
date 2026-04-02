@@ -73,14 +73,15 @@ def _read_float_env(
 def _read_default_host_port() -> tuple[str, int]:
     base_url = os.environ.get("LOCAL_LLM_BASE_URL", "").strip()
     if not base_url:
-        return "127.0.0.1", 2222
+        return "0.0.0.0", 2222
     parsed = urlparse(base_url)
     if not parsed.scheme or not parsed.hostname:
         raise RuntimeError(f"LOCAL_LLM_BASE_URL 格式非法，当前值为：{base_url}")
     port = parsed.port
     if port is None:
         port = 443 if parsed.scheme == "https" else 80
-    return parsed.hostname, port
+    # 监听地址与访问地址解耦：服务端默认监听 0.0.0.0，避免容器后端无法访问宿主机 127.0.0.1。
+    return "0.0.0.0", port
 
 
 def _parse_args() -> argparse.Namespace:

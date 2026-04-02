@@ -277,8 +277,9 @@
 9. **chapter_5 示例路径已补齐**：仓库已包含 `agent/knowledge/bgp/hijack_detection.md`，可直接按文档复现索引构建示例。
 10. **Compose 已移除自动 CSV 导入服务**：`docker/docker-compose.yml` 不再包含 `loader`，避免“每次启动都执行导入”；如需导入需手动执行 `python -m agent.scripts.load_all_csv`。
 11. **NL2SQL Prompt 新增注释语义辅助**：`agent/core/schema.py` 会解析 `database/core_schema_comments.review.sql` 中的 `COMMENT ON TABLE/COLUMN`，并在 `agent/tools/nl2sql_tool.py` 组装表上下文时拼接“表说明 + 字段释义”辅助 SQL 生成。
-12. **双库一致性导入已并入 `load_all_csv`**：默认执行 PostgreSQL + Neo4j，Neo4j 失败会重试一次，仍失败则回滚到旧快照（PG prepared transaction + Neo4j 单事务）。
-13. **Neo4j 主图导入入口迁移**：标准入口为 `python -m agent.scripts.neo4j_graph_loader`；`agent.tools.neo4j_graph_loader` 仅保留兼容转调。
+12. **NL2SQL Prompt 新增硬约束**：未出现在当前步骤 `{schema}` 中的表禁止出现在 SQL 中；`text[]/bigint[]` 等数组列禁止与标量列直接做 `=` JOIN。
+13. **双库一致性导入已并入 `load_all_csv`**：默认执行 PostgreSQL + Neo4j，Neo4j 失败会重试一次，仍失败则回滚到旧快照（PG prepared transaction + Neo4j 单事务）。
+14. **Neo4j 主图导入入口迁移**：标准入口为 `python -m agent.scripts.neo4j_graph_loader`；`agent.tools.neo4j_graph_loader` 仅保留兼容转调。
 14. **MCP 图查询对外收敛**：仅暴露 `neo4j_llamaindex_query`，不再对外暴露 `neo4j_query`。
 
 以上即为当前项目的完整数据格式、功能与表间关联说明，可直接用于面试项目讲解或后续 Agent/知识图谱落地。

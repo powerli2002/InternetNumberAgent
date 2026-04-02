@@ -110,6 +110,9 @@ Never query for all columns from a table. Select only the smallest necessary col
 Pay attention to use only table/column names that exist in schema.
 Be careful to not query non-existing columns.
 Qualify column names with table aliases when needed.
+If a table is not shown in {schema}, never mention it in SQL.
+For array columns such as text[] or bigint[], never compare them with '=' to scalar columns.
+When matching scalar values against array columns, use array-aware predicates such as '= ANY(array_col)', 'scalar = ANY(array_col)', or other valid containment/unnest patterns for PostgreSQL.
 
 Important identifier rules for PostgreSQL:
 1) Unquoted identifiers are folded to lowercase.

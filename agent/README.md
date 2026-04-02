@@ -15,6 +15,9 @@ python agent/cli/main.py
 启动 langsmith 监控对话
 .venv/bin/python -m agent.scripts.langgraph_dev --config langgraph.json --port 8123 --no-reload
 
+启动前端
+cd /home/lzj/fusionprocessing/agent-chat-ui && pnpm exec next dev -H 0.0.0.0 -p 2225
+
 说明：当前导出的 LangGraph 主图状态以 `messages` 作为唯一对话状态。项目主 HTTP 服务仍使用 `PostgresSaver` 持久化线程状态；但 `langgraph dev` / Studio 入口会改用 LangGraph API 自带 persistence，因此 `agent/langgraph_app.py` 不再导出带自定义 checkpointer 的图，避免本地调试启动时报错。可在 LangGraph Studio 中直接用 Chat 模式调试。`/threads/{id}/runs/stream` 已切到 LangGraph 原生 `custom + updates` 流式模式，不再先完整生成答案再切块。
 
 
@@ -22,7 +25,7 @@ python agent/cli/main.py
 kill $(lsof -ti tcp:2222)
 pkill -f "VLLM::EngineCore" 
 cd /home/lzj/fusionprocessing/agent/model
-nohup python start_vllm.py
+/home/lzj/fusionprocessing/.venv/bin/python start_vllm.py --host 0.0.0.0
 
 
 ## LLM 后端切换（cloud/local）
@@ -42,6 +45,7 @@ python agent/model/start_vllm.py
 补充说明：
 
 - 启动脚本会默认读取 `conf/.env` 中的 `LOCAL_LLM_MODEL`、`LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_VLLM_MAX_MODEL_LEN`；命令行参数优先级更高。
+- 建议将 `LOCAL_LLM_BASE_URL` 配置为宿主机真实 IP（例如 `http://10.99.8.28:2222/v1`），不要使用 `127.0.0.1`，否则 Docker 内 `agent-api` 无法访问宿主机 vLLM。
 - 启动脚本默认不显式传递 `trust_remote_code`，避免对已内置架构模型打印“参数无效”告警。
 - 当 `tensor_parallel_size > 2` 时，脚本会自动添加 `--disable-custom-all-reduce`，减少当前 4 卡 PCIe 环境下的重复告警。
 - 对 `Qwen/Qwen3.5-4B`，脚本还会默认追加 `--attention-backend TRITON_ATTN`、`--mm-encoder-attn-backend TRITON_ATTN`、`--language-model-only`、`--skip-mm-profiling`，并通过 `--default-chat-template-kwargs '{"enable_thinking": false}'` 关闭默认 thinking，优先走纯文本快速响应路径。

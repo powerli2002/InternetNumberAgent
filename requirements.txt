@@ -3,8 +3,8 @@ psycopg2-binary
 pytricia
 PyYAML
 jsoncomment
-fastapi[all]
-uvicorn
+fastapi[all]==0.129.2
+uvicorn==0.41.0
 tqdm
 tld
 IPy
@@ -15,12 +15,13 @@ openai
 langchain
 langchain-openai
 langgraph
-langgraph-checkpoint-postgres
+langgraph-checkpoint-postgres==3.0.4
 langgraph-cli[inmem]
-llama-index
+llama-index==0.14.15
 llama-index-llms-openai
-llama-index-vector-stores-milvus>=0.2.0,<0.3.0
-llama-index-graph-stores-neo4j>=0.5.0,<0.6.0
+llama-index-embeddings-huggingface==0.6.1
+llama-index-vector-stores-milvus==1.0.0
+llama-index-graph-stores-neo4j==0.5.1
 sqlalchemy
 pymilvus
 python-dotenv
@@ -29,7 +30,7 @@ tokenizers
 socksio
 langsmith
 python-docx
-fastmcp
+fastmcp==3.0.1
 markitdown
 sentence-transformers
 py-openjudge
