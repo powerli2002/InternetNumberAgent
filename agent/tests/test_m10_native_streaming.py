@@ -64,8 +64,25 @@ class _FakeGraph:
     """模拟 LangGraph stream/get_state 行为。"""
 
     def __init__(self) -> None:
+        self.invoke_calls: List[Dict[str, Any]] = []
         self.stream_calls: List[Dict[str, Any]] = []
         self.get_state_calls: List[Dict[str, Any]] = []
+
+    def invoke(self, init_state, *, config=None):
+        self.invoke_calls.append(
+            {
+                "init_state": init_state,
+                "config": config,
+            }
+        )
+        return {
+            "answer": "答案",
+            "sources": ["rag"],
+            "conflicts": [],
+            "replan_count": 0,
+            "evidences": [],
+            "plan_reason": "无需检索",
+        }
 
     def stream(self, init_state, *, config=None, stream_mode=None):
         self.stream_calls.append(
@@ -107,28 +124,29 @@ class _StreamingOrchestratorHelper:
         self.graph = _FakeGraph()
         self.finalize_calls: List[Dict[str, Any]] = []
 
-    def _prepare_turn(self, user_message: str, thread_id: str | None):
-        return (
-            str(thread_id or "thread-test"),
-            {"configurable": {"thread_id": str(thread_id or "thread-test")}},
-            "trace-test",
-            {"messages": [HumanMessage(content=user_message)]},
-            {"stage": "main_flow_start"},
+    def _turn_setup_middleware(self, user_message: str, thread_id: str | None):
+        resolved_thread_id = str(thread_id or "thread-test")
+        return SimpleNamespace(
+            user_message=user_message,
+            thread_id=resolved_thread_id,
+            thread_config={"configurable": {"thread_id": resolved_thread_id}},
+            trace_id="trace-test",
+            init_state={"messages": [HumanMessage(content=user_message)]},
+            main_flow_trace={"stage": "main_flow_start"},
         )
 
-    def _build_root_trace_context(
-        self, _user_message: str, _trace_id: str, _thread_id: str
-    ):
+    def _trace_scope_middleware(self, _turn_context: Any):
         return nullcontext(SimpleNamespace())
 
-    def _build_auto_trace_context(self, _run: Any, _trace_id: str):
-        return nullcontext()
+    def _node_audit_middleware(self):
+        return nullcontext([])
 
-    def _finalize_run(self, **kwargs):
+    def _finalize_middleware(self, **kwargs):
         self.finalize_calls.append(kwargs["final_state"])
+        turn_context = kwargs["turn_context"]
         return "答案", {
-            "trace_id": kwargs["trace_id"],
-            "thread_id": kwargs["thread_id"],
+            "trace_id": turn_context.trace_id,
+            "thread_id": turn_context.thread_id,
             "sources": ["rag"],
             "conflicts": [],
             "plan_reason": "无需检索",
@@ -136,6 +154,29 @@ class _StreamingOrchestratorHelper:
             "evidence_count": 0,
             "evidence_sources": [],
         }
+
+
+def test_respond_uses_turn_middlewares_and_returns_final_metadata() -> None:
+    """respond 应通过 turn middleware 骨架执行 graph.invoke 并统一收尾。"""
+    helper = _StreamingOrchestratorHelper()
+
+    answer, metadata = LangGraphOrchestrator.respond(  # type: ignore[misc]
+        helper,
+        "测试问题",
+        thread_id="thread-1",
+    )
+
+    assert answer == "答案"
+    assert helper.graph.invoke_calls == [
+        {
+            "init_state": {"messages": [HumanMessage(content="测试问题")]},
+            "config": {"configurable": {"thread_id": "thread-1"}},
+        }
+    ]
+    assert helper.finalize_calls[0]["answer"] == "答案"
+    assert metadata["trace_id"] == "trace-test"
+    assert metadata["thread_id"] == "thread-1"
+    assert metadata["sources"] == ["rag"]
 
 
 def test_stream_response_uses_langgraph_native_stream_and_updates_metadata() -> None:

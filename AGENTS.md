@@ -1,62 +1,70 @@
-# fusionprocessing - Codex 编程指导
+# fusionprocessing - Agent 入口规范
 
-## 项目目标（当前）
-- 构建“互联网号码资源问答系统”MVP：以 fusionprocessing 数据融合层为基础，将 RIR/WHOIS/RDAP、BGP、DNS/网站等多源数据清洗对齐，形成 16 张核心表写入 PostgreSQL；同时提供 Milvus 向量索引与 Neo4j 语义图谱；在智能体层（FusionAgent）统一调度 NL2SQL/RAG/记忆，实现可解释问答与可观测链路。
-- 结构化数据为事实源（PostgreSQL），向量/图谱可从结构化表重建；答复要有证据（SQL 结果/文档片段）。
+## 角色定位
+- 本仓库当前目标是构建“互联网号码资源问答系统”MVP：以 `fusiondata/` 为融合处理层，将 RIR/WHOIS/RDAP、BGP、DNS/网站等多源数据清洗对齐后写入 PostgreSQL 16 张核心表，并由 `FusionAgent` 统一调度 NL2SQL、RAG 与图查询，生成带证据的回答。
+- PostgreSQL 是事实源，Milvus 与 Neo4j 属于可重建的派生索引；回答必须能回溯到 SQL 结果、文档片段或图谱关系。
 
-## 系统结构与关键目录
-- `fusiondata/src/`：数据处理流水线（解析/清洗/实体化/格式化器）。
-- `fusiondata/setup.py`：融合流程统一入口。
-- `fusiondata/bgp_data/`：BGP 原始/解码数据与抓取脚本。
-- `agent/scripts/`：CSV 导入与辅助脚本（如 `python -m agent.scripts.load_all_csv`）。
-- `agent/`：FusionAgent、上下文工程、记忆、工具、追踪；API 在 `agent/interfaces/http/server.py`。
-- `agent/mcp/`：FastMCP 工具服务与客户端（NL2SQL/RAG/Neo4j/Note/Todo）。
-- `agent/protocols/a2a/`：A2A 协议模型与客户端（HTTP+SSE）。
-- `agent/workers/`：A2A Worker 服务与子代理执行器。
-- `agent/tools/`：底层工具实现（由 MCP Server 封装暴露）。
-- `conf/`：配置与 `.env`；`config.yaml`（本机）/`config.docker.yaml`（容器）。
-- `fusiondata/data/format/`：实体 CSV 输出；多为日期快照。
-- `docs/`：项目与部署文档；`summary.md` 为 16 表与关系的权威摘要。
-- `agent-chat-ui/`：可选前端，使用 LangGraph 风格 API 访问 `agent/interfaces/http/server.py`。
+## 当前代码结构
+- `fusiondata/src/`：数据清洗、实体化、格式化流水线。
+- `fusiondata/setup.py`：融合处理入口。
+- `agent/runtime/`：FusionAgent、LangGraph 主编排、上下文构建。
+- `agent/services/http/`：HTTP API 服务。
+- `agent/services/mcp/`：FastMCP 工具服务与客户端。
+- `agent/tools/`：NL2SQL、RAG、Neo4j、Note、Todo 等底层工具。
+- `agent/scripts/`：导入、建索引、评测、排障脚本。
+- `conf/`：配置与 `.env`。
+- `docs/`：当前权威文档与 AI 指南。
 
-## 数据与模型约束（必须遵守）
-- **仅 16 张核心实体表**为默认落库目标；避免生成 `*_audit` 或原始表，除非明确要求。
-- CSV 多为日期快照，**表名不带日期**；导入时选择最新或指定日期（`current_date`/`--date`）。
-- 多值字段以 **Python 列表字符串**存储，导入时解析为数组类型（`text[]`/`bigint[]`）。
-- `admin_info/tech_info/abuse_info` 为 **JSON 字符串**，落库为 `json/jsonb`。
-- IP 单点不作为图谱节点，**以 Prefix 为核心实体**；Registry（inetnum/rdap/route）作为 Prefix 属性。
-- `website_entity_base.csv` 使用 **`;` 分隔**且首列可能为空；与 `domain_cn.csv` 合并时注意。
-- RIR 注册归属与 BGP 观测归属并行保留：`ip_bgp_entity.route` vs `ip_bgp_entity.bgp`。
+## 硬约束
+- 默认落库目标只有 16 张核心实体表；不要引入 `*_audit`、原始镜像表或额外中间表，除非用户明确要求。
+- CSV 多为日期快照，数据库表名不带日期；导入时选择最新或指定日期。
+- 多值字段以 Python 列表字符串存储，导入时解析为数组类型。
+- `admin_info`、`tech_info`、`abuse_info` 为 JSON 字符串，落库为 `json/jsonb`。
+- 图谱以 Prefix 为核心实体，不把 IP 单点作为核心节点。
+- `website_entity_base.csv` 使用 `;` 分隔，且首列可能为空。
+- 代码实现禁止无明确需求的回退策略；流程不成立时应直接报错并暴露决策点。
+- 注释必须使用简体中文；复杂逻辑先写清思路再实现。
 
-## 运行与验证（常用）
-- 导入 16 表：`python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --ensure-core`
-- MCP 工具服务：`uvicorn agent.interfaces.mcp.server:app --host 0.0.0.0 --port 2032`
-- A2A Worker 服务：`uvicorn agent.interfaces.a2a.server:app --host 0.0.0.0 --port 2031`
-- API：`uvicorn agent.interfaces.http.server:app --host 0.0.0.0 --port 2025`
-- 向量索引：`python agent/knowledge_ingest.py --root . --path agent/knowledge --reset`
-- Neo4j 图谱：`python -m agent.scripts.neo4j_graph_loader --batch-size 1000`
-- AS 疆域分析：`python agent/tools/as_territory_tools.py --config conf/config.docker.yaml --root . [--load-neo4j]`
+## 文档入口
+- 总入口：`docs/README.md`
+- 系统功能：`docs/01-overview/system-overview.md`
+- 当前架构：`docs/02-architecture/overall-architecture.md`
+- 查询链路：`docs/02-architecture/query-pipelines.md`
+- Text2SQL：`docs/02-architecture/text2sql.md`
+- 数据模型：`docs/03-data/core-schema.md`
+- 部署运行：`docs/04-operations/deployment.md`
+- 观测排障：`docs/04-operations/observability.md`、`docs/04-operations/troubleshooting.md`
+- AI 协作：`docs/05-ai/repo-guide.md`
+- Harness 规范：`docs/05-ai/harness-programming.md`
+- 文档治理：`docs/05-ai/documentation-governance.md`
+- 历史文档：`docs/90-archive/`（不作为当前实现依据）
 
-## 开发规范
-- **严禁使用 回退策略**，如果执行不符合期望流程，直接返回或中断，不需要在异常处理中写降级逻辑。如果整体方案不可行，则报告并询问需要的决策。
-- **精简代码结构**：尽量减少代码文件的新增。在逻辑清晰的前提下可以适当不拆分函数，避免过度封装导致文件跳转繁琐。
-- 代码优先放在：**智能体链路→`agent/`**；**工具/脚本→`agent/tools/`、`agent/scripts/`**。
-- 保持脚本 **幂等**（可重复执行不重复写入）。
-- 修改配置时优先更新 `conf/.env`，可以在conf中配置显示密钥，以便调试。
-- PostgreSQL 数据卷挂载路径需保持 `../mount/...`，避免数据损坏。
-- **注释与逻辑说明**：代码注释必须使用简体中文，遇到复杂逻辑时，必须先在注释中写明思路再进行代码实现。
-- 需求不清晰时先提问或给出可执行的具体方案。
+## Harness 编程规范摘要
+- `AGENTS.md` 只保留硬约束和索引，不承载大段实现细节。
+- 开始修改前，先读 `docs/README.md`，再按任务类型进入对应权威文档。
+- 优先修改已有文档，不随意新增平行说明。
+- 同一主题只能有一个当前权威文档；其余内容要么合并，要么归档。
+- 文档必须服务两类读者：先让人快速理解系统功能，再让 AI 能按文档定位代码和约束。
+- 历史方案可以保留到 `docs/90-archive/`，但必须显式标注非当前实现。
 
+## 文档治理摘要
+- 修改文档时禁止“增量补丁式追加”更新记录；应直接重写正文，保证整篇文档始终为最新状态。
+- 若代码与文档冲突，以代码为准，并在同次任务中修正文档。
+- 发现过期文档时，不绕过、不搁置，必须在当前任务内完成修正、归档或删除。
+- 重大改动至少同步检查：系统总览、架构、数据模型、部署运行、AI 指南。
+- `docs/90-archive/` 仅用于保留历史背景，不得作为设计或实现决策依据。
 
-## 重大修改必须同步文档（强制）
-凡涉及以下任一项的“重大修改”，**必须回写文档**：
-- 数据模型/表结构、字段语义、导入逻辑、核心关联关系。
-- 关键链路（FusionAgent 路由、NL2SQL/RAG/记忆、上下文模板）。
-- 部署方式、配置项、端口、数据卷、依赖服务。
-- 重要脚本入口或运行流程。
+## 重大修改必须同步文档
+- 数据模型、表结构、字段语义、导入逻辑、核心关系发生变化。
+- FusionAgent 路由、LangGraph 编排、MCP 工具、记忆或上下文工程发生变化。
+- 部署方式、配置项、端口、存储路径、依赖服务发生变化。
+- 重要脚本入口、运行命令或排障流程发生变化。
 
-至少更新以下文件中与变更相关的部分：
-- `summary.md`（16 表与关系变更）
-- `docs/互联网号码资源问答系统技术文档.md`（架构/工具/流程）
-- `README.md` (部署/流程/架构)
-必要时同步 `docs/` 其他说明文件。
+至少同步检查以下位置：
+- `docs/README.md`
+- `docs/02-architecture/overall-architecture.md`
+- `docs/03-data/core-schema.md`
+- `docs/04-operations/deployment.md`
+- `docs/05-ai/documentation-governance.md`
+
+根目录 `summary.md` 仅保留兼容性入口，当前数据模型权威内容以 `docs/03-data/core-schema.md` 为准。

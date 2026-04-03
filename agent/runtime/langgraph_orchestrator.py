@@ -31,9 +31,9 @@ from __future__ import annotations
 
 import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import contextvars
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
 import time
@@ -102,6 +102,18 @@ class AgentGraphState(MessagesState, total=False):
     answer: str
     metadata: Dict[str, Any]
     error: str
+
+
+@dataclass
+class TurnExecutionContext:
+    """Turn Middleware 共享上下文。"""
+
+    user_message: str
+    thread_id: str
+    thread_config: Dict[str, Any]
+    trace_id: str
+    init_state: AgentGraphState
+    main_flow_trace: Dict[str, Any]
 
 
 def _conversation_turn_to_message(turn: ConversationTurn) -> BaseMessage:
@@ -593,6 +605,28 @@ class LangGraphOrchestrator:
         }
         return resolved_thread_id, thread_config, trace_id, init_state, main_flow_trace
 
+    def _turn_setup_middleware(
+        self,
+        user_message: str,
+        thread_id: Optional[str],
+    ) -> TurnExecutionContext:
+        """TurnSetupMiddleware：统一准备本轮执行上下文。"""
+        (
+            resolved_thread_id,
+            thread_config,
+            trace_id,
+            init_state,
+            main_flow_trace,
+        ) = self._prepare_turn(user_message, thread_id)
+        return TurnExecutionContext(
+            user_message=user_message,
+            thread_id=resolved_thread_id,
+            thread_config=thread_config,
+            trace_id=trace_id,
+            init_state=init_state,
+            main_flow_trace=main_flow_trace,
+        )
+
     def _build_root_trace_context(
         self, user_message: str, trace_id: str, thread_id: str
     ):
@@ -623,6 +657,32 @@ class LangGraphOrchestrator:
                 metadata={"trace_id": trace_id},
             )
         return tracing_context(enabled=False)
+
+    @contextmanager
+    def _trace_scope_middleware(
+        self,
+        turn_context: TurnExecutionContext,
+    ):
+        """TraceScopeMiddleware：统一管理 root trace 与自动子 trace 作用域。"""
+        root_ctx = self._build_root_trace_context(
+            turn_context.user_message,
+            turn_context.trace_id,
+            turn_context.thread_id,
+        )
+        with root_ctx as run:
+            auto_trace_ctx = self._build_auto_trace_context(run, turn_context.trace_id)
+            with auto_trace_ctx:
+                yield run
+
+    @contextmanager
+    def _node_audit_middleware(self):
+        """NodeAuditMiddleware：统一挂载节点审计容器。"""
+        node_records: List[Dict[str, Any]] = []
+        node_token = _NODE_RECORDS_CTX.set(node_records)
+        try:
+            yield node_records
+        finally:
+            _NODE_RECORDS_CTX.reset(node_token)
 
     def _finalize_run(
         self,
@@ -691,6 +751,24 @@ class LangGraphOrchestrator:
             )
         return answer, metadata
 
+    def _finalize_middleware(
+        self,
+        *,
+        final_state: Dict[str, Any],
+        turn_context: TurnExecutionContext,
+        node_records: List[Dict[str, Any]],
+        run: Any,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """FinalizeMiddleware：统一收尾 root 输出与 metadata。"""
+        return self._finalize_run(
+            final_state=final_state,
+            trace_id=turn_context.trace_id,
+            thread_id=turn_context.thread_id,
+            node_records=node_records,
+            main_flow_trace=turn_context.main_flow_trace,
+            run=run,
+        )
+
     def respond(
         self, user_message: str, thread_id: Optional[str] = None
     ) -> Tuple[str, Dict[str, Any]]:
@@ -708,29 +786,18 @@ class LangGraphOrchestrator:
             - answer: 最终自然语言回答。
             - metadata: 追踪与可解释字段（来源、冲突、重规划次数等）。
         """
-        resolved_thread_id, thread_config, trace_id, init_state, main_flow_trace = (
-            self._prepare_turn(user_message, thread_id)
-        )
-        root_ctx = self._build_root_trace_context(
-            user_message, trace_id, resolved_thread_id
-        )
-
-        with root_ctx as run:
-            node_records: List[Dict[str, Any]] = []
-            node_token = _NODE_RECORDS_CTX.set(node_records)
-            auto_trace_ctx = self._build_auto_trace_context(run, trace_id)
-            try:
+        turn_context = self._turn_setup_middleware(user_message, thread_id)
+        with self._trace_scope_middleware(turn_context) as run:
+            with self._node_audit_middleware() as node_records:
                 # LangGraph 核心入口：从 init_state 出发执行至 END，得到最终状态快照。
-                with auto_trace_ctx:
-                    final_state = self.graph.invoke(init_state, config=thread_config)
-            finally:
-                _NODE_RECORDS_CTX.reset(node_token)
-            return self._finalize_run(
+                final_state = self.graph.invoke(
+                    turn_context.init_state,
+                    config=turn_context.thread_config,
+                )
+            return self._finalize_middleware(
                 final_state=final_state,
-                trace_id=trace_id,
-                thread_id=resolved_thread_id,
+                turn_context=turn_context,
                 node_records=node_records,
-                main_flow_trace=main_flow_trace,
                 run=run,
             )
 
@@ -750,12 +817,10 @@ class LangGraphOrchestrator:
             - iterable_events: LangGraph 原生流事件，当前包含 `custom` 与 `updates`；
             - metadata: 初始元数据字典，流结束后会原地补齐最终 sources/conflicts 等字段。
         """
-        resolved_thread_id, thread_config, trace_id, init_state, main_flow_trace = (
-            self._prepare_turn(user_message, thread_id)
-        )
+        turn_context = self._turn_setup_middleware(user_message, thread_id)
         metadata: Dict[str, Any] = {
-            "trace_id": trace_id,
-            "thread_id": resolved_thread_id,
+            "trace_id": turn_context.trace_id,
+            "thread_id": turn_context.thread_id,
             "sources": [],
             "conflicts": [],
             "plan_reason": "",
@@ -766,33 +831,22 @@ class LangGraphOrchestrator:
 
         def _iter() -> Iterable[Any]:
             """直接透传 LangGraph `stream()` 产生的事件，并在结束后补齐 root 输出。"""
-            root_ctx = self._build_root_trace_context(
-                user_message, trace_id, resolved_thread_id
-            )
-            with root_ctx as run:
-                node_records: List[Dict[str, Any]] = []
-                node_token = _NODE_RECORDS_CTX.set(node_records)
-                auto_trace_ctx = self._build_auto_trace_context(run, trace_id)
-                try:
-                    with auto_trace_ctx:
-                        for event in self.graph.stream(
-                            init_state,
-                            config=thread_config,
-                            stream_mode=["custom", "updates"],
-                        ):
-                            yield event
-                finally:
-                    _NODE_RECORDS_CTX.reset(node_token)
+            with self._trace_scope_middleware(turn_context) as run:
+                with self._node_audit_middleware() as node_records:
+                    for event in self.graph.stream(
+                        turn_context.init_state,
+                        config=turn_context.thread_config,
+                        stream_mode=["custom", "updates"],
+                    ):
+                        yield event
 
-                state_snapshot = self.graph.get_state(thread_config)
+                state_snapshot = self.graph.get_state(turn_context.thread_config)
                 final_values = getattr(state_snapshot, "values", None)
                 final_state = final_values if isinstance(final_values, dict) else {}
-                _, final_metadata = self._finalize_run(
+                _, final_metadata = self._finalize_middleware(
                     final_state=final_state,
-                    trace_id=trace_id,
-                    thread_id=resolved_thread_id,
+                    turn_context=turn_context,
                     node_records=node_records,
-                    main_flow_trace=main_flow_trace,
                     run=run,
                 )
                 metadata.update(final_metadata)

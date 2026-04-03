@@ -1,3 +1,9 @@
-# ASRank Offricial Scripts
+# CAIDA 脚本说明
 
-本脚本由 ASRank 官方提供，用于处理 CAIDA 数据集。详见: [ASRank](https://api.asrank.caida.org/dev/docs)
+本目录保存 CAIDA/ASRank 相关脚本，其中部分内容来源于官方或历史处理流程。
+
+当前仓库关于数据模型、融合处理和运行方式的权威说明位于：
+- `../../../../README.md`
+- `../../../../docs/03-data/core-schema.md`
+
+本文件仅作局部说明，不作为仓库级命令入口。

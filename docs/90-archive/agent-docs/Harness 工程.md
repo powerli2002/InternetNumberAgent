@@ -170,4 +170,3 @@ _execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent
 ```
 
 Sub-agent 是一个**精简版的 Lead Agent**——同样由 `create_agent()` 创建，但只配备 2 个 Middleware（`ThreadDataMiddleware` + `SandboxMiddleware`），工具集根据类型过滤，没有记忆注入、没有标题生成、没有上下文摘要。
-
