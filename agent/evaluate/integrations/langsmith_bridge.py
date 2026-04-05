@@ -416,8 +416,6 @@ def write_local_scores_to_langsmith_experiment(
                 feedback_id=_stable_feedback_id(
                     str(project.id), run_id, str(feedback.get("key") or "")
                 ),
-                project_id=project.id,
-                session_id=project.id,
                 source_info={
                     "mode": "local_score_writeback",
                     "sample_id": sample.id,

@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.core.config import AgentConfig
-from agent.evaluate.core.grader_prompts import LAST_MESSAGE_SCENARIO, LAST_MESSAGE_TASK_DESCRIPTION
+from agent.evaluate.core.grader_prompts import (
+    LAST_MESSAGE_SCENARIO,
+    LAST_MESSAGE_TASK_DESCRIPTION,
+)
 
 MAX_RUBRIC_QUERY_CHARS = 300
 MAX_RUBRIC_RESPONSE_CHARS = 1600
@@ -58,7 +61,9 @@ def _parse_label_score(value: Any) -> int | None:
     return score if score in {0, 1} else None
 
 
-def _normalize_iterative_dataset(rows: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, int], int]:
+def _normalize_iterative_dataset(
+    rows: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Dict[str, int], int]:
     """把输入样本标准化为 Iterative Rubric 所需字段。"""
     normalized_rows: List[Dict[str, Any]] = []
     label_source_count: Dict[str, int] = {}
@@ -69,11 +74,18 @@ def _normalize_iterative_dataset(rows: List[Dict[str, Any]]) -> tuple[List[Dict[
             raise RuntimeError(f"Iterative Rubric 样本必须是对象，样本索引={idx}")
 
         query = str(row.get("query") or "").strip()
-        response = str(row.get("response") or row.get("answer") or row.get("reference_answer") or "").strip()
+        response = str(
+            row.get("response")
+            or row.get("answer")
+            or row.get("reference_answer")
+            or ""
+        ).strip()
         if not query:
             raise RuntimeError(f"Iterative Rubric 缺少 query，样本索引={idx}")
         if not response:
-            raise RuntimeError(f"Iterative Rubric 缺少 response/answer/reference_answer，样本索引={idx}")
+            raise RuntimeError(
+                f"Iterative Rubric 缺少 response/answer/reference_answer，样本索引={idx}"
+            )
 
         label_score = _parse_label_score(row.get("label_score"))
         if label_score is None:
@@ -106,7 +118,9 @@ def build_openjudge_model(config: AgentConfig, model_name: str = ""):
     from openjudge.models.openai_chat_model import OpenAIChatModel
 
     if not config.dashscope_api_key:
-        raise RuntimeError("未找到 DASHSCOPE_API_KEY / OPENAI_API_KEY，无法构建评分模型")
+        raise RuntimeError(
+            "未找到 DASHSCOPE_API_KEY / OPENAI_API_KEY，无法构建评分模型"
+        )
 
     model = (model_name or config.dashscope_model).strip()
     if not model:
@@ -120,9 +134,14 @@ def build_openjudge_model(config: AgentConfig, model_name: str = ""):
     )
 
 
-def generate_rubrics(out_path: Path, labeled_data_path: Path | None = None, model_name: str = "") -> Dict[str, Any]:
+def generate_rubrics(
+    out_path: Path, labeled_data_path: Path | None = None, model_name: str = ""
+) -> Dict[str, Any]:
     """生成 LastMessage Rubric，并保存到 JSON。"""
-    from openjudge.generator.simple_rubric import SimpleRubricsGenerator, SimpleRubricsGeneratorConfig
+    from openjudge.generator.simple_rubric import (
+        SimpleRubricsGenerator,
+        SimpleRubricsGeneratorConfig,
+    )
     from openjudge.graders.schema import GraderMode
 
     cfg = AgentConfig.load()
@@ -163,7 +182,9 @@ def generate_rubrics(out_path: Path, labeled_data_path: Path | None = None, mode
 
         mode = "iterative"
         dataset_raw = _load_dataset(labeled_data_path)
-        dataset, label_source_count, clipped_count = _normalize_iterative_dataset(dataset_raw)
+        dataset, label_source_count, clipped_count = _normalize_iterative_dataset(
+            dataset_raw
+        )
         sample_count = len(dataset)
         if not dataset:
             raise RuntimeError("Iterative Rubric 模式要求标注数据非空")
@@ -200,7 +221,9 @@ def generate_rubrics(out_path: Path, labeled_data_path: Path | None = None, mode
     }
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return payload
 
 
@@ -219,9 +242,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """脚本入口。"""
+    # 统一在入口阶段加载 conf/.env，避免评测命令依赖手工 source。
+    AgentConfig.load()
     args = build_arg_parser().parse_args()
     out_path = Path(args.out).resolve()
-    labeled_data = Path(args.rubric_labeled_data).resolve() if args.rubric_labeled_data else None
+    labeled_data = (
+        Path(args.rubric_labeled_data).resolve() if args.rubric_labeled_data else None
+    )
 
     payload = generate_rubrics(
         out_path=out_path,

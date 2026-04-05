@@ -602,6 +602,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """脚本入口。"""
+    # 统一在入口阶段加载 conf/.env，避免评测命令依赖手工 source。
+    AgentConfig.load()
     args = build_arg_parser().parse_args()
 
     samples = load_answer_samples(Path(args.in_path).resolve())

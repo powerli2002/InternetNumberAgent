@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from agent.core.config import AgentConfig
 from agent.evaluate.pipelines.build_graders import generate_rubrics
 from agent.evaluate.core.config import (
     EvalRuntimeConfig,
@@ -137,6 +138,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """脚本入口。"""
+    # 统一在入口阶段加载 conf/.env，避免评测命令依赖手工 source。
+    AgentConfig.load()
     args = build_arg_parser().parse_args()
     runtime_cfg = EvalRuntimeConfig(
         workdir=Path(args.workdir).resolve(),

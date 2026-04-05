@@ -72,20 +72,22 @@ python agent/model/start_vllm.py
 ### 评测
 
 ```bash
+# 评测入口会自动读取 conf/.env；若未激活虚拟环境，直接使用 .venv/bin/python
+
 # 一键运行评测并写回 LangSmith
-python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith --langsmith-mode writeback
+.venv/bin/python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith --langsmith-mode writeback
 
 # 分步生成题目
-python -m agent.evaluate.pipelines.generate_queries --count 30 --out agent/evaluate/data/queries.jsonl
+.venv/bin/python -m agent.evaluate.pipelines.generate_queries --count 30 --out agent/evaluate/data/queries.jsonl
 
 # 构建评分 rubric
-python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json
+.venv/bin/python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json
 
 # 生成 answers
-python -m agent.evaluate.pipelines.fill_answers --in agent/evaluate/data/queries.jsonl --out agent/evaluate/data/answers.jsonl
+.venv/bin/python -m agent.evaluate.pipelines.fill_answers --in agent/evaluate/data/queries.jsonl --out agent/evaluate/data/answers.jsonl
 
 # 执行评分
-python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
+.venv/bin/python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
 ```
 
 ## 核心原则
