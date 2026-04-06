@@ -94,8 +94,9 @@ CUDA_VISIBLE_DEVICES=1 TrainModel/VisCoder/.venv-lora-uv/bin/python TrainModel/V
 - 基础模型：`Qwen/Qwen3.5-4B`
 - 量化方式：`4bit nf4 + fp16 compute`
 - LoRA 模块：`q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj`
-- 默认只对 `assistant` 回答部分计算 loss；若 tokenizer 不支持 mask，会自动回退到“仅最后一轮 assistant 监督”
+- 默认只对 `assistant` 回答部分计算 loss；若 tokenizer 不直接返回 mask，会按 chat template 渲染后的文本和 offset mapping 构造所有 assistant 轮次的监督区间
 - 默认通过 `wandb` 记录训练过程；如需关闭，可传 `--report_to none`
+- 训练结束后默认会把 LoRA adapter 合并为完整模型，并输出到 `merged_model/` 子目录；如只想保留 adapter，可传 `--no-export_merged_model`
 
 ### 2.4 多卡训练
 
@@ -156,6 +157,61 @@ TrainModel/VisCoder/.venv-lora-uv/bin/python TrainModel/VisCoder/train/qwen35_lo
 - `--wandb_expected_email`：脚本启动时会校验当前登录邮箱；若不是指定邮箱会直接报错
 - `--wandb_entity`：可选，用于上传到指定团队
 
+### 2.7 极简启动命令（常用参数已内置默认值）
+
+脚本已固定常用默认参数（模型、数据路径、输出目录、LoRA 配置、QLoRA、WandB 项目和期望邮箱）。
+因此常规启动只需要提供必要参数：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 TrainModel/VisCoder/.venv-lora-uv/bin/python \
+  TrainModel/VisCoder/train/qwen35_lora_sft.py \
+  --sample_size 100 \
+  --run_name qwen35-lora-100 \
+  --wandb_api_key YOUR_WANDB_API_KEY
+```
+
+断点续训（其余参数继续使用默认值）：
+
+```bash
+LATEST_CKPT=$(ls -dt TrainModel/VisCoder/train/output/qwen35_lora_run/checkpoint-* | head -n 1)
+CUDA_VISIBLE_DEVICES=1 TrainModel/VisCoder/.venv-lora-uv/bin/python \
+  TrainModel/VisCoder/train/qwen35_lora_sft.py \
+  --resume_from_checkpoint "$LATEST_CKPT" \
+  --run_name qwen35-lora-resume \
+  --wandb_api_key YOUR_WANDB_API_KEY
+```
+
+### 2.8 合并已有 LoRA adapter 为可直接推理的完整模型
+
+如果你已经有历史训练产物，或者想单独把某个 adapter 导出成完整模型，可以直接运行合并脚本：
+
+```bash
+TrainModel/VisCoder/.venv-lora-uv/bin/python \
+  TrainModel/VisCoder/train/merge_qwen35_lora.py \
+  --adapter_dir TrainModel/VisCoder/train/output/qwen35_lora_run \
+  --output_dir TrainModel/VisCoder/train/output/qwen35_lora_run/merged_model
+```
+
+如果需要显式指定基础模型，也可以加上：
+
+```bash
+TrainModel/VisCoder/.venv-lora-uv/bin/python \
+  TrainModel/VisCoder/train/merge_qwen35_lora.py \
+  --base_model_name_or_path Qwen/Qwen3.5-4B \
+  --adapter_dir TrainModel/VisCoder/train/output/qwen35_lora_run \
+  --output_dir TrainModel/VisCoder/train/output/qwen35_lora_run/merged_model
+```
+
+合并后的目录可直接用于推理加载：
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_dir = "TrainModel/VisCoder/train/output/qwen35_lora_run/merged_model"
+tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True)
+```
+
 ## 3. 原始 ms-swift 复现路径
 
 如果你仍然想按论文原始方式复现 `VisCoder-3B / 7B` 的全参训练，可继续使用原始脚本。
@@ -196,4 +252,3 @@ echo "[]" > ms-swift/swift/llm/dataset/data/dataset_info.json
 ```
 
 更多参数说明可参考 [ms-swift CLI documentation](https://swift.readthedocs.io/en/latest/Instruction/Command-line-parameters.html)。
-

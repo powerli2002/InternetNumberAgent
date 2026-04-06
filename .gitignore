@@ -52,3 +52,6 @@ wandb
 TrainModel/VisCoder/eval/PandasPlotBench/.venv-bench/
 TrainModel/VisCoder/.venv-lora/
 TrainModel/VisCoder/train/output/
+
+ref/*
+ref

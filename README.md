@@ -104,6 +104,44 @@ python agent/model/start_vllm.py
 .venv/bin/python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
 ```
 
+### 绘图模型评测
+
+```bash
+cd /home/lzj/fusionprocessing/TrainModel/VisCoder/eval/PandasPlotBench && \
+PLOT_BENCH_CODEBERT_DEVICE=cuda:1 \
+/home/lzj/fusionprocessing/.venv/bin/python run_eval_and_upload_langsmith.py \
+  --full \
+  --cuda=1 \
+  --mode=generate \
+  --dataset-name=qwen3.5-plot-baseline \
+  --experiment-name=qwen3.5-plot-baseline \
+  --config=configs/config_normal_baseline.yaml \
+  --model=openai/QuantTrio/Qwen3.5-4B-AWQ
+```
+
+### 绘图模型 LoRA 训练
+
+```bash
+CUDA_VISIBLE_DEVICES=1 /home/lzj/fusionprocessing/TrainModel/VisCoder/.venv-lora-uv/bin/python \
+  /home/lzj/fusionprocessing/TrainModel/VisCoder/train/qwen35_lora_sft.py \
+  --sample_size 200000 \
+  --run_name qwen35-lora-100 \
+  --wandb_api_key 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
+```
+
+断点续训：
+
+```bash
+LATEST_CKPT=$(ls -dt /home/lzj/fusionprocessing/TrainModel/VisCoder/train/output/qwen35_lora_run/checkpoint-* | head -n 1)
+CUDA_VISIBLE_DEVICES=1 /home/lzj/fusionprocessing/TrainModel/VisCoder/.venv-lora-uv/bin/python \
+  /home/lzj/fusionprocessing/TrainModel/VisCoder/train/qwen35_lora_sft.py \
+  --resume_from_checkpoint "$LATEST_CKPT" \
+  --run_name qwen35-lora-resume \
+  --wandb_api_key YOUR_WANDB_API_KEY
+```
+
+
+
 ## 核心原则
 - PostgreSQL 是事实源，Milvus 与 Neo4j 可从结构化数据重建。
 - 默认只维护 16 张核心实体表，不引入额外审计表或原始镜像表。

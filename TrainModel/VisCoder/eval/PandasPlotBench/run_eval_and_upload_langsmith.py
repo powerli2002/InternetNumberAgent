@@ -4,16 +4,16 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 from uuid import NAMESPACE_DNS, uuid4, uuid5
 
 import pandas as pd
+from dotenv import load_dotenv
 from langsmith import Client
 from omegaconf import OmegaConf
 
-from plotting_benchmark.code_bert_scorer import calc_code_bert_score
 from plotting_benchmark.generation_engines.get_model import get_model_by_name
 from plotting_benchmark.vis_judge import VisJudge
 
@@ -36,6 +36,57 @@ class EvalMetrics:
         if self.total <= 0:
             return 0.0
         return self.plot_ok / self.total
+
+
+def _as_chat_completions_url(base_url: str) -> str:
+    base = str(base_url or "").strip()
+    if not base:
+        return ""
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base.rstrip('/')}/chat/completions"
+
+
+def _load_env_files() -> None:
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parents[3]
+    candidates = [
+        script_dir / ".env",
+        script_dir.parent / ".env",
+        repo_root / "conf" / ".env",
+    ]
+
+    loaded: set[Path] = set()
+    for candidate in candidates:
+        if candidate in loaded or not candidate.exists():
+            continue
+        # 不覆盖已经在 shell 中显式设置的环境变量，保证 CLI/外部导出优先级更高。
+        load_dotenv(candidate, override=False)
+        loaded.add(candidate)
+
+
+def _default_openai_base_url() -> str:
+    return (
+        os.getenv("OPENAI_BASE_URL")
+        or _as_chat_completions_url(os.getenv("LOCAL_LLM_BASE_URL", ""))
+        or "http://127.0.0.1:2222/v1/chat/completions"
+    )
+
+
+def _default_openai_key() -> str:
+    return os.getenv("OPENAI_KEY") or os.getenv("LOCAL_LLM_API_KEY") or "local-dev-key"
+
+
+def _default_judge_base_url() -> str:
+    return (
+        os.getenv("JUDGE_OPENAI_BASE_URL")
+        or _as_chat_completions_url(os.getenv("DASHSCOPE_BASE_URL", ""))
+        or "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    )
+
+
+def _default_judge_key() -> str:
+    return os.getenv("JUDGE_OPENAI_KEY") or os.getenv("DASHSCOPE_API_KEY") or ""
 
 
 def _parse_args() -> argparse.Namespace:
@@ -71,12 +122,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--openai-base-url",
-        default="http://127.0.0.1:2222/v1/chat/completions",
+        default=_default_openai_base_url(),
         help="OpenAI 兼容接口地址（本地 qwen3.5 服务）。",
     )
     parser.add_argument(
         "--openai-key",
-        default="local-dev-key",
+        default=_default_openai_key(),
         help="OpenAI 兼容接口 key（本地服务可用占位值）。",
     )
     parser.add_argument(
@@ -86,12 +137,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-name",
-        default="qwen3.5-plot-baseline",
+        default=os.getenv("PLOT_BENCH_DATASET_NAME", "qwen3.5-plot-baseline"),
         help="LangSmith Dataset 名称。",
     )
     parser.add_argument(
         "--experiment-name",
-        default="qwen3.5-plot",
+        default=os.getenv("PLOT_BENCH_EXPERIMENT_NAME", "qwen3.5-plot"),
         help="LangSmith Experiment 名称（默认 qwen3.5-plot）。",
     )
     parser.add_argument(
@@ -106,9 +157,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        default="all",
+        default="generate",
         choices=["all", "generate", "visual"],
-        help="all=生成+执行+codebert+上传，generate=仅生成执行，visual=仅视觉评测+上传。",
+        help="generate/all=生成+执行+codebert+上传，visual=仅视觉评测+上传。",
     )
     parser.add_argument(
         "--enable-codebert",
@@ -134,12 +185,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--judge-openai-base-url",
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        default=_default_judge_base_url(),
         help="视觉评测 OpenAI 兼容接口地址。",
     )
     parser.add_argument(
         "--judge-openai-key",
-        default="",
+        default=_default_judge_key(),
         help="视觉评测 API Key；为空时回退到环境变量 OPENAI_KEY。",
     )
     parser.add_argument(
@@ -171,13 +222,20 @@ def _run_eval(args: argparse.Namespace) -> None:
 
 
 def _pick_latest_result_file(result_dir: Path) -> Path:
+    def _is_primary_result_file(path: Path) -> bool:
+        name = path.name
+        if not path.is_file() or not name.startswith("results_") or not name.endswith(".json"):
+            return False
+        excluded_markers = (".visual_", ".visual_all", ".codebert", ".stats")
+        return not any(marker in name for marker in excluded_markers)
+
     files = sorted(
-        [item for item in result_dir.glob("results_*.json") if item.is_file()],
+        [item for item in result_dir.iterdir() if _is_primary_result_file(item)],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
     if not files:
-        raise FileNotFoundError(f"未找到结果文件: {result_dir}")
+        raise FileNotFoundError(f"未找到主结果文件: {result_dir}")
     return files[0]
 
 
@@ -243,6 +301,8 @@ def _run_visual_eval(
 
 def _run_codebert_eval(input_result_file: Path, output_result_file: Path) -> Path:
     """基于已有生成结果单独计算 codebert，相当于非视觉质量评测。"""
+    from plotting_benchmark.code_bert_scorer import calc_code_bert_score
+
     dataset_df = pd.read_json(input_result_file)
     scored_df = calc_code_bert_score(dataset_df)
     output_result_file.parent.mkdir(parents=True, exist_ok=True)
@@ -304,14 +364,96 @@ def _calc_metrics(rows: Iterable[Dict[str, Any]]) -> EvalMetrics:
     return EvalMetrics(total=total, exec_ok=exec_ok, plot_ok=plot_ok, both_ok=both_ok)
 
 
-def _ensure_dataset(client: Client, dataset_name: str) -> Any:
+def _stable_example_id(sample_id: str) -> str:
+    return str(uuid5(NAMESPACE_DNS, f"viscoder-example:{sample_id}"))
+
+
+def _stable_run_id(experiment_name: str, sample_id: str) -> str:
+    return str(uuid5(NAMESPACE_DNS, f"viscoder-run:{experiment_name}:{sample_id}"))
+
+
+def _stable_feedback_id(project_id: str, run_id: str, key: str) -> str:
+    return str(uuid5(NAMESPACE_DNS, f"viscoder-feedback:{project_id}:{run_id}:{key}"))
+
+
+def _build_compare_url(project: Any, dataset_id: str) -> str:
+    project_url = str(getattr(project, "url", "") or "").strip()
+    project_id = str(getattr(project, "id", "") or "").strip()
+    if not project_url or not project_id or not dataset_id:
+        return ""
+    base_url = project_url.split("/projects/p/")[0]
+    return f"{base_url}/datasets/{dataset_id}/compare?selectedSessions={project_id}"
+
+
+def _ensure_dataset(client: Client, dataset_name: str, description: str) -> Any:
     try:
         return client.read_dataset(dataset_name=dataset_name)
     except Exception:
         return client.create_dataset(
             dataset_name=dataset_name,
-            description="PandasPlotBench baseline metrics for qwen3.5 plotting.",
+            description=description,
         )
+
+
+def _upsert_examples(client: Client, dataset: Any, rows: Iterable[Dict[str, Any]]) -> None:
+    examples: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        sid = str((row or {}).get("id", "")).strip() or f"row-{idx}"
+        plots_gt = (row or {}).get("plots_gt") or []
+        examples.append(
+            {
+                "id": _stable_example_id(sid),
+                "inputs": {
+                    "id": sid,
+                    "task_plot_description": str(
+                        (row or {}).get("task__plot_description", "") or ""
+                    ),
+                    "task_plot_style": str((row or {}).get("task__plot_style", "") or ""),
+                    "task": str((row or {}).get("task", "") or ""),
+                },
+                "outputs": {
+                    "reference_plot_count": len(plots_gt) if isinstance(plots_gt, list) else 0,
+                    "data_descriptor": str((row or {}).get("data_descriptor", "") or ""),
+                },
+                "metadata": {
+                    "sample_id": sid,
+                    "has_ground_truth_plot": bool(plots_gt),
+                },
+            }
+        )
+
+    if not examples:
+        return
+
+    existing_ids: set[str] = set()
+    for example in examples:
+        try:
+            found_examples = list(
+                client.list_examples(dataset_id=dataset.id, example_ids=[example["id"]])
+            )
+        except Exception:
+            found_examples = []
+        if found_examples:
+            existing_ids.add(str(found_examples[0].id))
+
+    create_payloads = [
+        example for example in examples if example["id"] not in existing_ids
+    ]
+    update_payloads = [
+        {
+            "id": example["id"],
+            "inputs": example["inputs"],
+            "outputs": example["outputs"],
+            "metadata": example["metadata"],
+        }
+        for example in examples
+        if example["id"] in existing_ids
+    ]
+
+    if create_payloads:
+        client.create_examples(dataset_id=dataset.id, examples=create_payloads)
+    if update_payloads:
+        client.update_examples(dataset_id=dataset.id, updates=update_payloads)
 
 
 def _create_project_with_fallback_name(
@@ -345,11 +487,12 @@ def _upload_to_langsmith(
     args: argparse.Namespace, result_file: Path, metrics: EvalMetrics, rows: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
     client = Client()
-    dataset = _ensure_dataset(client, args.dataset_name)
     desc = (
         "Qwen3.5 plotting baseline before LoRA fine-tuning. "
         f"model={args.model}, file={result_file.name}"
     )
+    dataset = _ensure_dataset(client, args.dataset_name, desc)
+    _upsert_examples(client, dataset, rows)
     project, actual_name = _create_project_with_fallback_name(
         client=client,
         experiment_name=args.experiment_name,
@@ -437,7 +580,10 @@ def _upload_to_langsmith(
             comment=f"count={len(task_scores)}",
         )
 
-    # 逐样本上传：每个 case 一个子 run，并写入 case 指标 feedback。
+    project_id = str(getattr(project, "id", "") or "")
+
+    # 逐样本上传：每个 case 一个顶层 run，绑定到 dataset example。
+    # 这样 LangSmith Experiments 页面才能按 case 展示 baseline。
     for idx, row in enumerate(rows):
         sid = str((row or {}).get("id", "")).strip()
         if not sid:
@@ -447,17 +593,26 @@ def _upload_to_langsmith(
         exec_ok = 1.0 if err == "" else 0.0
         plot_ok = 1.0 if has_plot else 0.0
         both_ok = 1.0 if (exec_ok > 0 and plot_ok > 0) else 0.0
-        sample_run_id = str(uuid5(NAMESPACE_DNS, f"viscoder-sample-run:{actual_name}:{sid}"))
+        generated_code = str(
+            (row or {}).get("code", "") or (row or {}).get("code_plot", "") or ""
+        )
+        start_time = now + timedelta(milliseconds=idx + 1)
+        end_time = start_time + timedelta(milliseconds=1)
+        sample_run_id = _stable_run_id(actual_name, sid)
         client.create_run(
             id=sample_run_id,
             project_name=actual_name,
             name=f"case-{sid}",
             run_type="chain",
-            parent_run_id=trace_root_run_id,
+            reference_example_id=_stable_example_id(sid),
             inputs={
+                "id": sid,
                 "sample_id": sid,
-                "task_plot_description": (row or {}).get("task__plot_description", ""),
-                "task_plot_style": (row or {}).get("task__plot_style", ""),
+                "task_plot_description": str(
+                    (row or {}).get("task__plot_description", "") or ""
+                ),
+                "task_plot_style": str((row or {}).get("task__plot_style", "") or ""),
+                "task": str((row or {}).get("task", "") or ""),
             },
             outputs={
                 "error": err,
@@ -465,30 +620,44 @@ def _upload_to_langsmith(
                 "exec_ok": bool(exec_ok),
                 "plot_ok": bool(plot_ok),
                 "both_ok": bool(both_ok),
-                "generated_code": (row or {}).get("code", ""),
+                "generated_code": generated_code,
+                "raw_response": (row or {}).get("raw_response"),
+                "time_used_gen": (row or {}).get("time_used_gen"),
             },
-            start_time=now,
-            end_time=now,
+            start_time=start_time,
+            end_time=end_time,
             error=err or None,
-            extra={"metadata": {"sample_id": sid, "trace_type": "case_run"}},
+            extra={
+                "metadata": {
+                    "sample_id": sid,
+                    "trace_type": "case_run",
+                    "langsmith_mode": "writeback",
+                }
+            },
         )
         client.create_feedback(
             run_id=sample_run_id,
             key="exec_ok",
             score=exec_ok,
             comment=f"error={err}" if err else "execution passed",
+            feedback_id=_stable_feedback_id(project_id, sample_run_id, "exec_ok"),
+            source_info={"sample_id": sid, "mode": "local_score_writeback"},
         )
         client.create_feedback(
             run_id=sample_run_id,
             key="plot_ok",
             score=plot_ok,
             comment=f"has_plot={has_plot}",
+            feedback_id=_stable_feedback_id(project_id, sample_run_id, "plot_ok"),
+            source_info={"sample_id": sid, "mode": "local_score_writeback"},
         )
         client.create_feedback(
             run_id=sample_run_id,
             key="both_ok",
             score=both_ok,
             comment=f"exec_ok={bool(exec_ok)} has_plot={has_plot}",
+            feedback_id=_stable_feedback_id(project_id, sample_run_id, "both_ok"),
+            source_info={"sample_id": sid, "mode": "local_score_writeback"},
         )
         score_codebert = (row or {}).get("score_codebert")
         if isinstance(score_codebert, (int, float)):
@@ -497,6 +666,8 @@ def _upload_to_langsmith(
                 key="score_codebert",
                 score=float(score_codebert),
                 comment="code similarity score",
+                feedback_id=_stable_feedback_id(project_id, sample_run_id, "score_codebert"),
+                source_info={"sample_id": sid, "mode": "local_score_writeback"},
             )
         score_vis = (row or {}).get("score_vis")
         if isinstance(score_vis, (int, float)):
@@ -505,6 +676,8 @@ def _upload_to_langsmith(
                 key="score_vis",
                 score=float(score_vis),
                 comment="visual similarity score",
+                feedback_id=_stable_feedback_id(project_id, sample_run_id, "score_vis"),
+                source_info={"sample_id": sid, "mode": "local_score_writeback"},
             )
         score_task = (row or {}).get("score_task")
         if isinstance(score_task, (int, float)):
@@ -513,12 +686,15 @@ def _upload_to_langsmith(
                 key="score_task",
                 score=float(score_task),
                 comment="task alignment score",
+                feedback_id=_stable_feedback_id(project_id, sample_run_id, "score_task"),
+                source_info={"sample_id": sid, "mode": "local_score_writeback"},
             )
 
     return {
         "dataset_name": dataset.name,
         "dataset_id": str(dataset.id),
         "experiment_name": actual_name,
+        "experiment_url": _build_compare_url(project, str(dataset.id)),
         "project_url": str(getattr(project, "url", "") or ""),
         "trace_root_run_id": trace_root_run_id,
         "case_run_count": len(rows),
@@ -526,12 +702,14 @@ def _upload_to_langsmith(
 
 
 def main() -> int:
+    _load_env_files()
     args = _parse_args()
 
     mode = str(args.mode)
     run_generation = mode in {"all", "generate"} and (not args.skip_eval)
     run_visual = mode == "visual"
-    run_codebert = bool(args.enable_codebert) and mode == "all"
+    # 默认评测应包含代码相似度；只有视觉相似度需要手工指定 visual 模式。
+    run_codebert = bool(args.enable_codebert) and mode in {"all", "generate"}
 
     if run_generation:
         _run_eval(args)

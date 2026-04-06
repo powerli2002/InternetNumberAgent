@@ -9,7 +9,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 import torch
 from datasets import Dataset, load_dataset
@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_dir",
         type=str,
-        default=str(Path(__file__).resolve().parent / "output" / "qwen35_viscode_lora"),
+        default=str(Path(__file__).resolve().parent / "output" / "qwen35_lora_run"),
         help="LoRA 权重输出目录。",
     )
     parser.add_argument("--max_seq_len", type=int, default=1024, help="最大序列长度。")
@@ -99,6 +99,18 @@ def parse_args() -> argparse.Namespace:
         help="断点继续训练的 checkpoint 路径。",
     )
     parser.add_argument(
+        "--export_merged_model",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="训练结束后把 LoRA adapter 合并为完整模型，并导出到 merged 目录。",
+    )
+    parser.add_argument(
+        "--merged_output_dir",
+        type=str,
+        default="",
+        help="合并后的完整模型目录；留空时默认写入 output_dir/merged_model。",
+    )
+    parser.add_argument(
         "--trust_remote_code",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -113,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--run_name",
         type=str,
-        default="qwen35_viscode_lora",
+        default="qwen35-lora",
         help="训练运行名，同时作为 wandb run 名称。",
     )
     parser.add_argument(
@@ -137,7 +149,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--wandb_expected_email",
         type=str,
-        default="",
+        default="845160705@qq.com",
         help="期望登录的 WandB 邮箱；若不匹配则直接报错。",
     )
     return parser.parse_args()
@@ -160,7 +172,86 @@ def normalize_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, str
         normalized.append({"role": role, "content": str(content)})
     if len(normalized) < 2:
         raise ValueError("单条样本有效消息少于 2 条，无法构造监督信号。")
+    if not any(item["role"] == "assistant" for item in normalized):
+        raise ValueError("单条样本缺少 assistant 消息，无法构造监督信号。")
     return normalized
+
+
+def render_chat_text(tokenizer: AutoTokenizer, messages: List[Dict[str, str]]) -> str:
+    """把整段对话按 chat template 渲染为纯文本，供后续精确定位 token 区间。"""
+
+    rendered_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    return str(rendered_text)
+
+
+def collect_assistant_spans(
+    tokenizer: AutoTokenizer,
+    messages: List[Dict[str, str]],
+) -> List[Tuple[int, int]]:
+    """收集每一轮 assistant 消息在渲染文本中的字符区间。
+
+    这里不再依赖 tokenizer 是否显式返回 assistant mask，而是基于 chat template
+    渲染前后文本长度差来构造监督区间。这样可以覆盖多轮对话，并且不会只保留
+    最后一轮 assistant。
+    """
+
+    if not tokenizer.is_fast:
+        raise RuntimeError(
+            "当前 tokenizer 不是 fast 版本，无法通过 offset mapping 安全构造 assistant mask。"
+        )
+
+    assistant_spans: List[Tuple[int, int]] = []
+    for idx, item in enumerate(messages):
+        if item["role"] != "assistant":
+            continue
+
+        prefix_text = render_chat_text(tokenizer, messages[:idx])
+        rendered_text = render_chat_text(tokenizer, messages[: idx + 1])
+        if len(rendered_text) < len(prefix_text):
+            raise RuntimeError("chat template 渲染结果异常，无法构造 assistant mask。")
+        assistant_spans.append((len(prefix_text), len(rendered_text)))
+
+    if not assistant_spans:
+        raise ValueError("样本中没有 assistant 消息，无法构造监督信号。")
+
+    return assistant_spans
+
+
+def tokenize_chat_with_assistant_mask(
+    tokenizer: AutoTokenizer,
+    messages: List[Dict[str, str]],
+    max_seq_len: int,
+) -> Tuple[List[int], List[int], List[int]]:
+    """在 tokenizer 不直接提供 assistant mask 时，基于字符区间构造监督标签。"""
+
+    full_text = render_chat_text(tokenizer, messages)
+    assistant_spans = collect_assistant_spans(tokenizer, messages)
+
+    encoded = tokenizer(
+        full_text,
+        add_special_tokens=False,
+        return_attention_mask=True,
+        return_offsets_mapping=True,
+        truncation=True,
+        max_length=max_seq_len,
+    )
+    input_ids = list(encoded["input_ids"])
+    attention_mask = list(encoded["attention_mask"])
+    offsets = list(encoded["offset_mapping"])
+
+    labels: List[int] = []
+    for token_id, (start, end) in zip(input_ids, offsets):
+        keep = any(start < span_end and end > span_start for span_start, span_end in assistant_spans)
+        labels.append(token_id if keep else -100)
+
+    if len(labels) != len(input_ids):
+        raise RuntimeError("assistant mask 构造失败，labels 与 input_ids 长度不一致。")
+
+    return input_ids, attention_mask, labels
 
 
 def build_tokenize_fn(
@@ -183,7 +274,10 @@ def build_tokenize_fn(
             input_ids = list(rendered["input_ids"])
             attention_mask = list(rendered["attention_mask"])
             assistant_mask = list(rendered.get("assistant_tokens_mask", []))
-        except TypeError:
+        except (TypeError, ValueError):
+            rendered = None
+
+        if rendered is None:
             input_ids = list(
                 tokenizer.apply_chat_template(
                     messages,
@@ -196,43 +290,25 @@ def build_tokenize_fn(
             attention_mask = [1] * len(input_ids)
             assistant_mask = []
 
-        labels = list(input_ids)
-        if assistant_mask and any(assistant_mask):
-            labels = [token if keep else -100 for token, keep in zip(input_ids, assistant_mask)]
-        elif not train_on_prompt:
-            # 某些 tokenizer 尚不支持 assistant token mask。
-            # 为避免把整段 prompt 都当成监督目标，这里仅保留最后一轮 assistant 的内容。
-            last_assistant_idx = max(
-                (idx for idx, item in enumerate(messages) if item["role"] == "assistant"),
-                default=-1,
+        if train_on_prompt:
+            labels = list(input_ids)
+        elif assistant_mask:
+            if len(assistant_mask) != len(input_ids):
+                raise RuntimeError("assistant mask 长度与 input_ids 不一致，无法继续训练。")
+            if any(assistant_mask):
+                labels = [token if keep else -100 for token, keep in zip(input_ids, assistant_mask)]
+            else:
+                input_ids, attention_mask, labels = tokenize_chat_with_assistant_mask(
+                    tokenizer=tokenizer,
+                    messages=messages,
+                    max_seq_len=max_seq_len,
+                )
+        else:
+            input_ids, attention_mask, labels = tokenize_chat_with_assistant_mask(
+                tokenizer=tokenizer,
+                messages=messages,
+                max_seq_len=max_seq_len,
             )
-            rendered_text = tokenizer.apply_chat_template(
-                messages[: last_assistant_idx + 1],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            prefix_text = tokenizer.apply_chat_template(
-                messages[:last_assistant_idx],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            total_ids = tokenizer(
-                rendered_text,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=max_seq_len,
-            )["input_ids"]
-            prefix_ids = tokenizer(
-                prefix_text,
-                add_special_tokens=False,
-                truncation=True,
-                max_length=max_seq_len,
-            )["input_ids"]
-            supervised_from = min(len(prefix_ids), len(total_ids))
-            labels = [-100] * len(input_ids)
-            span = len(input_ids) - max(0, len(total_ids) - supervised_from)
-            for idx in range(max(0, span), len(input_ids)):
-                labels[idx] = input_ids[idx]
 
         return {
             "input_ids": input_ids,
@@ -421,8 +497,11 @@ def main() -> None:
     }
     if is_main_process:
         print(json.dumps(run_summary, indent=2, ensure_ascii=False))
+        safe_args = dict(vars(args))
+        if safe_args.get("wandb_api_key"):
+            safe_args["wandb_api_key"] = "***REDACTED***"
         (output_dir / "run_config.json").write_text(
-            json.dumps({**vars(args), **run_summary}, indent=2, ensure_ascii=False),
+            json.dumps({**safe_args, **run_summary}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -447,6 +526,7 @@ def main() -> None:
         fp16=torch.cuda.is_available(),
         bf16=False,
         report_to=report_to,
+        project=args.wandb_project,
         remove_unused_columns=False,
         dataloader_num_workers=0,
         gradient_checkpointing=True,
@@ -468,6 +548,22 @@ def main() -> None:
     trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
+
+    if is_main_process and args.export_merged_model:
+        merged_output_dir = (
+            Path(args.merged_output_dir).expanduser().resolve()
+            if args.merged_output_dir.strip()
+            else output_dir / "merged_model"
+        )
+        from merge_qwen35_lora import merge_lora_adapter
+
+        merge_lora_adapter(
+            adapter_dir=str(output_dir),
+            output_dir=str(merged_output_dir),
+            base_model_name_or_path=args.model_name_or_path,
+            trust_remote_code=args.trust_remote_code,
+            torch_dtype="auto",
+        )
 
 
 if __name__ == "__main__":

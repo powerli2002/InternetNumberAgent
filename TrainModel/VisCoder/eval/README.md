@@ -60,6 +60,21 @@ Key config files in `configs/`:
 └── launch_self_debug_eval.sh # Self-debug mode batch processing script
 ```
 
+## LangSmith 上传
+
+如果需要把未训练模型的 baseline 上传到 LangSmith，使用
+`PandasPlotBench/run_eval_and_upload_langsmith.py`。
+
+当前脚本会：
+- 启动时自动尝试读取 `PandasPlotBench/.env`、`eval/.env` 和仓库根 `conf/.env`
+- 默认在常规运行中计算 `codebert` 代码相似度
+- 只有 `visual` 模式才会额外计算图像/任务相似度
+- `codebert` 可通过环境变量 `PLOT_BENCH_CODEBERT_DEVICE` 指定设备，例如 `cuda:1`
+- 只自动选择主结果文件，不会误选 `.visual`、`.codebert` 或 `.stats` 衍生文件
+- 先把 bench 样本 upsert 到 LangSmith Dataset examples
+- 再为每个 case 创建绑定 `reference_example_id` 的 experiment run
+- 返回可直接打开的 dataset compare URL，便于在 `Experiments` 中查看 baseline 与具体 case
+
 ## Running Models
 
 - **Single Model**: Configure `config_single_run.yaml` and run:
