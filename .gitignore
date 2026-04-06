@@ -32,7 +32,8 @@ database/db
 neo4j
 milvus/*
 .venv
-ref/Hello-Agents
+# 忽略 ref 下全部内容（参考/第三方代码，不参与版本控制）
+ref/
 agent/knowledge/互联网域间路由安全监测与防御.docx
 mount/
 conf/.env
@@ -46,3 +47,8 @@ backend/store/artifacts
 .pytest_cache
 __pycache__
 .langgraph_api
+wandb
+*.wandb
+TrainModel/VisCoder/eval/PandasPlotBench/.venv-bench/
+TrainModel/VisCoder/.venv-lora/
+TrainModel/VisCoder/train/output/
