@@ -7,6 +7,14 @@
 - 配置通过环境变量切换
 - 缺失配置直接报错，不做静默回退
 
+当前 `conf/` 目录职责如下：
+- `conf/.env`：运行时环境变量入口。
+- `conf/config.base.yaml`：融合处理共享基线配置。
+- `conf/config.yaml`：本机默认 YAML 配置，继承 `config.base.yaml`。
+- `conf/config.docker.yaml`：容器/导入脚本默认 YAML 配置，继承 `config.base.yaml`。
+- `conf/milvus.yaml`：Milvus Standalone 配置。
+- `conf/opensandbox.toml`：OpenSandbox 静态配置。
+
 ## LLM 后端切换
 
 ### 云端模型
@@ -66,10 +74,40 @@ pkill -f "VLLM::EngineCore"
 
 ## 运行与调试相关配置
 - `MCP_SERVER_URL`：MCP 服务地址
+- `SANDBOX_API_URL`：Agent 通过 HTTP 调用产品后端内部沙箱接口的地址
+- `SANDBOX_SERVICE_TOKEN`：Agent 调用产品后端内部沙箱接口的服务令牌
+- `SANDBOX_TIMEOUT_SECONDS`：Python 沙箱 HTTP 调用超时
+- `BACKEND_SECRET_KEY`：产品后端会话密钥
+- `BACKEND_SANDBOX_SERVICE_TOKEN`：产品后端内部沙箱令牌
+- `OPENSANDBOX_DOMAIN`：OpenSandbox Server 地址
+- `OPENSANDBOX_API_KEY`：OpenSandbox API Key
+- `OPENSANDBOX_TEMPLATE`：OpenSandbox 默认模板
+- `OPENSANDBOX_PYTHON_VERSION`：Code Interpreter 内的 Python 版本
 - `REQUEST_TIMEOUT_SECONDS`
 - `AGENT_REQUEST_TIMEOUT_SECONDS`
 - `MCP_TIMEOUT_SECONDS`
 - `LANGSMITH_*`：链路追踪配置
+
+## OpenSandbox 推荐默认值
+
+按官方 Docker 示例与当前仓库默认配置，建议使用：
+
+```bash
+SANDBOX_API_URL=http://127.0.0.1:2026
+SANDBOX_SERVICE_TOKEN=fusion-sandbox-dev-token
+BACKEND_SANDBOX_SERVICE_TOKEN=fusion-sandbox-dev-token
+OPENSANDBOX_DOMAIN=127.0.0.1:8080
+OPENSANDBOX_TEMPLATE=sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
+OPENSANDBOX_TIMEOUT_SECONDS=600
+OPENSANDBOX_PYTHON_VERSION=3.11
+```
+
+说明：
+- `SANDBOX_SERVICE_TOKEN` 与 `BACKEND_SANDBOX_SERVICE_TOKEN` 必须一致，否则 Agent 调用产品后端内部沙箱接口会返回 `401`
+- 当前仓库默认使用阿里云镜像源，避免首次从 Docker Hub 拉取 OpenSandbox 镜像过慢
+- OpenSandbox Server 的静态配置文件固定放在 `conf/opensandbox.toml`
+- OpenSandbox Server 运行实例统一由 `docker/docker-compose.yml` 管理
+- 如果启用了 OpenSandbox Server 的 API Key，需要同时设置 `OPENSANDBOX_API_KEY`
 
 ## 推荐维护方式
 - 新增配置前，先检查是否已有等价变量。

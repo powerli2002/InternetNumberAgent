@@ -13,8 +13,6 @@ for path in (PROJECT_ROOT, SRC_ROOT):
     if str(path) not in sys.path:
         sys.path.append(str(path))
 
-import yaml
-
 from agent_tools.as_territory_tools import (
     build_as_territory_from_csv,
     build_neo4j_datasets,
@@ -22,12 +20,12 @@ from agent_tools.as_territory_tools import (
     load_country_entity,
     load_to_neo4j,
 )
+from fusiondata.src.utils.config_loader import load_yaml_config
 from utils.logging_manager import logger
 
 
 def load_config(config_path: Path) -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+    return load_yaml_config(config_path)
 
 
 def find_latest_date(format_dir: Path, prefix: str) -> Optional[str]:
@@ -52,11 +50,17 @@ def resolve_path(root_dir: Path, path_value: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AS 疆域分析工具（IPv4 前缀 → 国家）")
-    parser.add_argument("--config", default="conf/config.docker.yaml", help="YAML 配置路径")
+    parser.add_argument(
+        "--config", default="conf/config.docker.yaml", help="YAML 配置路径"
+    )
     parser.add_argument("--root", default=".", help="项目根目录")
     parser.add_argument("--date", default=None, help="已弃用，脚本自动使用最新日期")
-    parser.add_argument("--output-dir", default=None, help="输出目录（默认 fusiondata/data/output）")
-    parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 行用于快速测试")
+    parser.add_argument(
+        "--output-dir", default=None, help="输出目录（默认 fusiondata/data/output）"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="仅处理前 N 行用于快速测试"
+    )
     parser.add_argument("--chunk-size", type=int, default=200000, help="分块处理行数")
     parser.add_argument("--neo4j-uri", default=None, help="Neo4j Bolt URI")
     parser.add_argument("--neo4j-user", default=None, help="Neo4j 用户名")

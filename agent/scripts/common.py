@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import psycopg2
-import yaml
+
+from fusiondata.src.utils.config_loader import load_yaml_config
 
 
 def ensure_project_root_on_path() -> Path:
@@ -36,12 +37,6 @@ def ensure_project_root_on_path() -> Path:
 
 # 在导入期执行一次，保证后续模块导入路径稳定。
 PROJECT_ROOT = ensure_project_root_on_path()
-
-
-def load_yaml_config(config_path: Path) -> dict[str, Any]:
-    """读取 YAML 配置文件。"""
-    with open(config_path, "r", encoding="utf-8") as file:
-        return yaml.safe_load(file)
 
 
 def resolve_project_path(root_dir: Path, path_value: str) -> Path:
@@ -66,7 +61,9 @@ def open_pg_connection(cfg: dict[str, Any]) -> psycopg2.extensions.connection:
     return psycopg2.connect(**build_postgres_connect_kwargs(cfg))
 
 
-def wait_for_postgres(cfg: dict[str, Any], timeout_seconds: int, interval_seconds: int = 2) -> None:
+def wait_for_postgres(
+    cfg: dict[str, Any], timeout_seconds: int, interval_seconds: int = 2
+) -> None:
     """
     轮询等待 PostgreSQL 可连接。
 
@@ -86,4 +83,3 @@ def wait_for_postgres(cfg: dict[str, Any], timeout_seconds: int, interval_second
             if time.time() > deadline:
                 raise RuntimeError(f"PostgreSQL wait timeout: {exc}") from exc
             time.sleep(interval_seconds)
-

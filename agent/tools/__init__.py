@@ -14,6 +14,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "build_rag_embedding": ("agent.tools.rag_tool", "build_rag_embedding"),
     "NoteTool": ("agent.tools.note_tool", "NoteTool"),
     "TodoTool": ("agent.tools.todo_tool", "TodoTool"),
+    "PythonSandboxTool": ("agent.tools.python_sandbox_tool", "PythonSandboxTool"),
     "Neo4jQueryTool": ("agent.tools.neo4j_query_tool", "Neo4jQueryTool"),
     "Neo4jLlamaIndexTool": ("agent.tools.neo4j_llamaindex_tool", "Neo4jLlamaIndexTool"),
 }

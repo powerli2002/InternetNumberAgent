@@ -35,3 +35,7 @@ class FusionAgent:
     def get_state_history(self, thread_id: str, limit: Optional[int] = None):
         """读取线程 checkpoint 历史。"""
         return self._orchestrator.get_state_history(thread_id, limit=limit)
+
+    def close(self) -> None:
+        """关闭底层运行时资源。"""
+        self._orchestrator.close()

@@ -1,6 +1,6 @@
 # 互联网号码资源问答系统（fusionprocessing）
 
-本仓库是“互联网号码资源问答系统”的融合处理与智能体实现，负责把 RIR/WHOIS/RDAP、BGP、DNS/网站等多源数据清洗为结构化事实，并通过 `FusionAgent` 提供带证据的问答能力。
+本仓库是“互联网号码资源问答系统”的融合处理、智能体与产品化实现，负责把 RIR/WHOIS/RDAP、BGP、DNS/网站等多源数据清洗为结构化事实，并通过 `FusionAgent` 与产品服务提供带证据的问答能力。
 
 当前实现以 **PostgreSQL 16 张核心表** 为事实源，配套 **Milvus 文档向量索引** 与 **Neo4j 图谱/关系查询**。在线链路采用 **LangGraph + FastMCP**，不再使用历史 A2A/子代理方案。
 
@@ -17,14 +17,26 @@
 ## 目录
 - `fusiondata/`：离线融合处理流水线。
 - `agent/runtime/`：FusionAgent、LangGraph 编排、上下文构建。
-- `agent/services/http/`：HTTP API。
+- `agent/services/http/`：Agent 调试/兼容 HTTP API。
 - `agent/services/mcp/`：FastMCP 服务与客户端。
 - `agent/tools/`：NL2SQL、RAG、Neo4j、Note、Todo 等工具。
+- `backend/`：认证、线程、过程事件、artifact、OpenSandbox 接入。
+- `deploy/`：本地启动脚本入口，统一管理 MCP、后端、前端、LangGraph 调试与评测命令。
+- `webapp/`：正式产品前端。
 - `agent/scripts/`：导入、建索引、评测与排障脚本。
 - `conf/`：配置与 `.env`。
 - `docs/`：当前权威文档与历史归档。
 
 ## 常用命令
+
+执行 `deploy/` 下脚本前，请先满足两个前置条件：
+- 仓库根目录已创建并安装 `.venv/`。
+- 前端相关脚本所在环境已安装 `pnpm`。
+
+当前 `deploy/` 只保留三条启动链路：
+- `./deploy/start_dev_chain.sh`：启动开发链路（MCP + LangGraph 调试）。
+- `./deploy/start_ui_chain.sh`：启动用户界面链路（MCP + Backend + Agent API + WebApp）。
+- `./deploy/start_evaluation.sh`：启动默认评测链路。
 
 ### 数据与服务
 
@@ -32,11 +44,11 @@
 # 导入 16 张核心表
 python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --ensure-core
 
-# 启动 MCP
-uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
+# 启动用户界面链路
+./deploy/start_ui_chain.sh
 
-# 启动 API
-uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
+# 启动 OpenSandbox
+./backend/scripts/start_opensandbox.sh
 
 # 构建文档向量索引
 python agent/knowledge_ingest.py --root . --path agent/knowledge --reset
@@ -51,12 +63,14 @@ python -m agent.scripts.neo4j_graph_loader --batch-size 1000
 # 启动 CLI
 python agent/cli/main.py
 
-# 启动 LangGraph 本地调试入口
-.venv/bin/python -m agent.scripts.langgraph_dev --config langgraph.json --port 8123 --no-reload
+# 启动开发链路
+./deploy/start_dev_chain.sh
 
-# 启动前端
-cd agent-chat-ui && pnpm exec next dev -H 0.0.0.0 -p 2225
+# OpenSandbox 最小联调
+.venv/bin/python backend/scripts/opensandbox_smoke_test.py
 ```
+
+OpenSandbox 由 `docker/docker-compose.yml` 管理，服务端配置固定放在 `conf/opensandbox.toml`。
 
 ### 本地 LLM
 
@@ -75,7 +89,7 @@ python agent/model/start_vllm.py
 # 评测入口会自动读取 conf/.env；若未激活虚拟环境，直接使用 .venv/bin/python
 
 # 一键运行评测并写回 LangSmith
-.venv/bin/python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith --langsmith-mode writeback
+./deploy/start_evaluation.sh
 
 # 分步生成题目
 .venv/bin/python -m agent.evaluate.pipelines.generate_queries --count 30 --out agent/evaluate/data/queries.jsonl

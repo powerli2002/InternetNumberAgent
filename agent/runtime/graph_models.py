@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Literal
 
 # 计划步骤允许的工具集合。
 # 使用 Literal 的目的：在静态类型检查阶段限制合法值，减少“拼写错误型”问题。
-ToolName = Literal["nl2sql", "rag", "graph", "todo", "none"]
+ToolName = Literal["nl2sql", "rag", "graph", "python", "todo", "none"]
 
 
 @dataclass
@@ -88,7 +88,7 @@ class GraphPlanStep:
 
         # 3) tool 统一小写并限定到白名单；非法值降级为 none，避免执行器报错。
         tool = str(data.get("tool") or "none").strip().lower()
-        if tool not in {"nl2sql", "rag", "graph", "todo", "none"}:
+        if tool not in {"nl2sql", "rag", "graph", "python", "todo", "none"}:
             tool = "none"
 
         # 4) 仅接受 dict/list 等预期结构，类型不匹配则回退默认值。

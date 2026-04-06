@@ -9,10 +9,12 @@ from langsmith.middleware import TracingMiddleware
 from langsmith.run_helpers import trace as ls_trace
 
 from agent.core.config import AgentConfig
+from agent.core.llm import LLMClient
 from agent.core.models import TodoItem
 from agent.tools.neo4j_llamaindex_tool import Neo4jLlamaIndexTool
 from agent.tools.nl2sql_tool import NL2SQLTool
 from agent.tools.note_tool import NoteTool
+from agent.tools.python_sandbox_tool import PythonSandboxTool
 from agent.tools.rag_tool import RAGTool, build_rag_embedding
 from agent.tools.todo_tool import TodoTool
 from fusiondata.src.utils.logging_manager import logger
@@ -71,6 +73,29 @@ class _MCPRuntime:
         )
         self.note_tool = NoteTool(self.config.notes_dir)
         self.todo_tool = TodoTool(self.config.project_root / "agent" / "todo.json")
+        self.python_codegen_llm = LLMClient(
+            api_key=(
+                self.config.local_llm_api_key
+                if self.config.llm_backend == "local"
+                else self.config.dashscope_api_key
+            ),
+            base_url=(
+                self.config.local_llm_base_url
+                if self.config.llm_backend == "local"
+                else self.config.dashscope_base_url
+            ),
+            model=(
+                self.config.local_llm_model
+                if self.config.llm_backend == "local"
+                else self.config.dashscope_model
+            ),
+            default_temperature=0.0,
+            tool_temperature=0.0,
+        )
+        self.python_sandbox_tool = PythonSandboxTool(
+            self.config,
+            llm_client=self.python_codegen_llm,
+        )
 
     def warmup_nl2sql_indexes(self) -> None:
         """在 MCP 启动阶段预构建 NL2SQL 表/列索引。"""
@@ -195,6 +220,37 @@ def create_mcp_server(
         ):
             notes = runtime.note_tool.search(query, limit=max(1, int(limit)))
             return {"notes": notes}
+
+    @mcp.tool
+    def python_sandbox_execute(
+        task: str,
+        context: str = "",
+        packages: Optional[List[str]] = None,
+        timeout_seconds: int = 180,
+        thread_id: str = "",
+        run_id: str = "",
+        trace_id: str = "",
+    ) -> Dict[str, Any]:
+        """生成并执行 Python 代码，返回日志与产物摘要。"""
+        with ls_trace(
+            "python_sandbox_execute",
+            run_type="tool",
+            inputs={
+                "task": task,
+                "packages": packages or [],
+                "thread_id": thread_id,
+                "run_id": run_id,
+            },
+        ):
+            return runtime.python_sandbox_tool.execute(
+                task,
+                context=context,
+                packages=packages or [],
+                timeout_seconds=timeout_seconds,
+                trace_id=trace_id,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
 
     @mcp.tool
     def todo_add(items: List[Dict[str, Any]], trace_id: str = "") -> Dict[str, Any]:

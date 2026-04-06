@@ -45,7 +45,14 @@ LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器。你的任务是读取
 - nl2sql：结构化事实查询、统计、过滤、存在性判断、对比、明细提取。
 - graph：关系、路径、上下游、归属链路、节点连接查询。
 - rag：文档定义、概念解释、方法说明、背景知识检索。
+- python：需要通过 Python 做计算、表格处理、绘图、文件生成、数据清洗时使用。
 - none：不需要外部检索即可回答，或历史证据已经足够直接汇总。
+
+【绘图/文件生成强规则】
+1) 只要用户明确要求“画图/柱状图/折线图/饼图/可视化/导出文件/生成图片”，禁止只生成一个取数步骤后在最终回答里声称“无法绘图”或“无法生成文件”。
+2) 如果图表依赖事实数据，必须先用 nl2sql 或 graph 取到绘图所需的数据，再追加 python 步骤生成图片/文件。
+3) 如果数据已在历史步骤结果中可直接复用，可以跳过重复取数，但仍必须生成 python 步骤输出产物。
+4) python 步骤的 task 必须明确图表类型、字段含义、输出文件格式（默认 PNG）和保存产物的要求。
 
 【arguments 约束】
 1) nl2sql：
@@ -65,7 +72,11 @@ LANGGRAPH_PLAN_PROMPT = """你是 LangGraph 主规划器。你的任务是读取
 3) graph：
    - 必须提供 question 或 questions（字符串数组）；通常优先单个 question。
    - max_rows 可选；若提供，不应超过输入中的 max_rows。
-4) none：
+4) python：
+   - 必须提供 task，描述要让 Python 完成的工作。
+   - 可选 context / packages / timeout_seconds。
+   - 若目标包含绘图或文件导出，必须在 task 中明确输出要求。
+5) none：
    - arguments 必须为 {}。
 
 【重规划与复用】

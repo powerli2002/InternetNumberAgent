@@ -29,7 +29,7 @@
 - `evaluation.md`：自动评测与 LangSmith 写回流程。
 - `observability.md`：LangSmith、日志、运行时观测。
 - `troubleshooting.md`：常见故障与防护规则。
-- `agent-chat-ui.md`：Agent Chat UI 接入。
+- `agent-chat-ui.md`：产品前端与兼容 Agent Chat UI 接入。
 
 ### `05-ai/`
 - `repo-guide.md`：AI 如何按任务快速理解仓库。

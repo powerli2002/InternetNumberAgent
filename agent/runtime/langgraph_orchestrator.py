@@ -82,6 +82,7 @@ _NODE_RECORDS_CTX: contextvars.ContextVar[Optional[List[Dict[str, Any]]]] = (
 class AgentGraphState(MessagesState, total=False):
     """LangGraph 状态。"""
 
+    thread_id: str
     trace_id: str
     available_tools: Dict[str, bool]
     plan_steps: List[Dict[str, Any]]
@@ -390,6 +391,31 @@ class LangGraphOrchestrator:
     """LangGraph 主编排器。"""
 
     @staticmethod
+    def _emit_stream_event(
+        event_type: str,
+        *,
+        title: str,
+        summary: str,
+        status: str = "info",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """向 LangGraph custom stream 发出结构化过程事件。"""
+        try:
+            writer = get_stream_writer()
+        except Exception:
+            return
+        writer(
+            {
+                "event": "process",
+                "event_type": event_type,
+                "title": title,
+                "summary": summary,
+                "status": status,
+                "payload": payload or {},
+            }
+        )
+
+    @staticmethod
     def _looks_like_count_and_examples_request(text: str) -> bool:
         """识别“统计数量 + 列出前 N 个示例”的混合 NL2SQL 诉求。"""
         raw = str(text or "").strip().lower()
@@ -546,9 +572,12 @@ class LangGraphOrchestrator:
         return {"configurable": {"thread_id": thread_id}}
 
     @staticmethod
-    def _build_turn_input(user_message: str, trace_id: str) -> AgentGraphState:
+    def _build_turn_input(
+        user_message: str, trace_id: str, thread_id: str
+    ) -> AgentGraphState:
         """构造单轮输入：仅追加当前用户消息，并重置本轮工作流字段。"""
         return {
+            "thread_id": thread_id,
             "messages": [HumanMessage(content=user_message)],
             "trace_id": trace_id,
             "plan_steps": [],
@@ -596,7 +625,7 @@ class LangGraphOrchestrator:
         if isinstance(getattr(previous_state, "values", None), dict):
             previous_history_size = len(_resolve_history(previous_state.values))
         trace_id = str(uuid.uuid4())
-        init_state = self._build_turn_input(user_message, trace_id)
+        init_state = self._build_turn_input(user_message, trace_id, resolved_thread_id)
         main_flow_trace: Dict[str, Any] = {
             "stage": "main_flow_start",
             "init_state_snapshot": _trace_state_snapshot(init_state),
@@ -678,11 +707,11 @@ class LangGraphOrchestrator:
     def _node_audit_middleware(self):
         """NodeAuditMiddleware：统一挂载节点审计容器。"""
         node_records: List[Dict[str, Any]] = []
-        node_token = _NODE_RECORDS_CTX.set(node_records)
+        _NODE_RECORDS_CTX.set(node_records)
         try:
             yield node_records
         finally:
-            _NODE_RECORDS_CTX.reset(node_token)
+            _NODE_RECORDS_CTX.set(None)
 
     def _finalize_run(
         self,
@@ -1177,7 +1206,7 @@ class LangGraphOrchestrator:
             # 仅把“当前可用工具”暴露给规划模型，降低无效计划概率。
             allowed = [
                 tool
-                for tool in ("nl2sql", "rag", "graph", "none")
+                for tool in ("nl2sql", "rag", "graph", "python", "none")
                 if available_tools.get(tool, False)
             ]
             if not allowed:
@@ -1285,6 +1314,15 @@ class LangGraphOrchestrator:
             trace_outputs["prompt_records"] = prompt_records
             trace_outputs["plan_steps_size"] = len(plan.steps)
             trace_outputs["plan_reason"] = plan.reason
+            self._emit_stream_event(
+                "plan_ready",
+                title="已生成执行计划",
+                summary=plan.reason,
+                payload={
+                    "steps": [step.to_dict() for step in plan.steps],
+                    "max_replans": plan.max_replans,
+                },
+            )
             trace_outputs["business_output"] = {
                 "plan_reason": plan.reason,
                 "plan_steps": [step.to_dict() for step in plan.steps],
@@ -1344,10 +1382,10 @@ class LangGraphOrchestrator:
 
                 # 如果工具不可使用，或规划器给出了当前执行层不支持的工具，则统一降级。
                 if (
-                    step.tool in {"nl2sql", "rag", "graph"}
+                    step.tool in {"nl2sql", "rag", "graph", "python"}
                     and not available_tools.get(step.tool, False)
                 ) or (
-                    step.tool not in {"nl2sql", "rag", "graph", "none"}
+                    step.tool not in {"nl2sql", "rag", "graph", "python", "none"}
                     and not available_tools.get(step.tool, False)
                 ):
                     # 工具不可用时优先降级到 rag，再降级为 none
@@ -1379,6 +1417,37 @@ class LangGraphOrchestrator:
                         )
                         continue
                 normalized.append(step)
+
+            chart_keywords = (
+                "画图",
+                "柱状图",
+                "折线图",
+                "饼图",
+                "散点图",
+                "可视化",
+                "plot",
+                "chart",
+                "graph",
+            )
+            retrieval_step_ids = [
+                step.step_id for step in normalized if step.tool in {"nl2sql", "graph"}
+            ]
+            for step in normalized:
+                task_text = " ".join(
+                    [
+                        str(step.objective or ""),
+                        str((step.arguments or {}).get("task") or ""),
+                        str((step.arguments or {}).get("context") or ""),
+                    ]
+                ).lower()
+                if step.tool == "python" and any(
+                    keyword.lower() in task_text for keyword in chart_keywords
+                ):
+                    if retrieval_step_ids:
+                        step.depends_on = list(
+                            dict.fromkeys([*step.depends_on, *retrieval_step_ids])
+                        )
+                        step.can_parallel = False
 
             if not normalized:
                 # 计划全失效时生成 no-op 保底步骤，避免主图崩溃。
@@ -1448,6 +1517,11 @@ class LangGraphOrchestrator:
                 for step in (state.get("plan_steps") or [])
                 if isinstance(step, dict)
             }
+            retrieval_step_ids = {
+                str(step.get("step_id") or "")
+                for step in step_map.values()
+                if str(step.get("tool") or "") in {"nl2sql", "graph"}
+            }
             # ready 存放“这一轮可以马上执行”的步骤。
             ready: List[str] = []
             for step_id in pending:
@@ -1457,6 +1531,44 @@ class LangGraphOrchestrator:
                     continue
                 # depends_on = 当前步骤依赖的前置步骤列表。
                 depends_on = [str(x) for x in (step.get("depends_on") or [])]
+                tool = str(step.get("tool") or "")
+                task_text = " ".join(
+                    [
+                        str(step.get("objective") or ""),
+                        str(
+                            (step.get("arguments") or {}).get("task")
+                            if isinstance(step.get("arguments"), dict)
+                            else ""
+                        ),
+                        str(
+                            (step.get("arguments") or {}).get("context")
+                            if isinstance(step.get("arguments"), dict)
+                            else ""
+                        ),
+                    ]
+                )
+                chart_like_python = tool == "python" and any(
+                    keyword in task_text
+                    for keyword in (
+                        "画图",
+                        "柱状图",
+                        "折线图",
+                        "饼图",
+                        "散点图",
+                        "可视化",
+                        "plot",
+                        "chart",
+                        "graph",
+                    )
+                )
+                if chart_like_python:
+                    missing_retrieval = [
+                        dep_id
+                        for dep_id in retrieval_step_ids
+                        if dep_id and dep_id not in completed and dep_id != step_id
+                    ]
+                    if missing_retrieval:
+                        continue
                 # 只有“所有前置步骤都在 completed 里”，当前步骤才算 ready。
                 if all(dep in completed for dep in depends_on):
                     ready.append(step_id)
@@ -1550,6 +1662,18 @@ class LangGraphOrchestrator:
                             else {},
                         }
                     )
+                    self._emit_stream_event(
+                        "tool_call_started",
+                        title=f"开始执行 {step_id}",
+                        summary=str(step.get("objective") or ""),
+                        payload={
+                            "step_id": step_id,
+                            "tool": str(step.get("tool") or "none"),
+                            "arguments": step.get("arguments", {})
+                            if isinstance(step.get("arguments"), dict)
+                            else {},
+                        },
+                    )
                     # 复制当前上下文到子线程，再提交；完成顺序不定，用 as_completed 按完成顺序消费。
                     step_ctx = contextvars.copy_context()
                     futures[pool.submit(_run_step_in_context, step, step_ctx)] = step_id
@@ -1622,6 +1746,26 @@ class LangGraphOrchestrator:
                             "evidences_size": len(result.get("evidences") or []),
                             "sources_size": len(result.get("sources") or []),
                         }
+                    )
+                    self._emit_stream_event(
+                        "tool_call_completed",
+                        title=f"步骤 {step_id} 已完成",
+                        summary=str(result.get("error") or "")
+                        or str(result.get("status") or "ok"),
+                        status="error"
+                        if str(result.get("status") or "").lower() == "error"
+                        else "completed",
+                        payload={
+                            "step_id": step_id,
+                            "tool": str(
+                                result.get("tool")
+                                or step_map.get(step_id, {}).get("tool")
+                                or "none"
+                            ),
+                            "status": str(result.get("status") or "unknown"),
+                            "result": result.get("result", {}),
+                            "error": str(result.get("error") or ""),
+                        },
                     )
 
                     # 回填单步结果到主状态：step_results 供去重/重规划，evidences/sources 供冲突检查与上下文构建。
@@ -1827,7 +1971,8 @@ class LangGraphOrchestrator:
 
             payload = {
                 "query": _resolve_query(state),
-                "step_results": step_results,
+                "step_results_summary": _trace_json(step_results, limit=6000),
+                "step_results_size": len(step_results),
             }
             trace_outputs["context_payload"] = {"conflict_payload": payload}
             messages = [
@@ -1878,6 +2023,17 @@ class LangGraphOrchestrator:
             trace_outputs["prompt_records"] = prompt_records
             trace_outputs["verdict"] = verdict
             trace_outputs["conflicts_size"] = len(conflicts)
+            self._emit_stream_event(
+                "reasoning_summary",
+                title="冲突检查完成",
+                summary=f"verdict={verdict}; conflicts={len(conflicts)}",
+                status="warning" if verdict == "conflict" else "completed",
+                payload={
+                    "verdict": verdict,
+                    "conflicts": conflicts,
+                    "need_replan": need_replan,
+                },
+            )
             trace_outputs["business_output"] = {
                 "verdict": verdict,
                 "conflicts": conflicts,
@@ -1921,6 +2077,17 @@ class LangGraphOrchestrator:
             context_after = str(trace_payload.get("context_after_compress") or context)
             trace_payload.pop("context_before_compress", None)
             trace_payload.pop("context_after_compress", None)
+            self._emit_stream_event(
+                "reasoning_summary",
+                title="已整理回答上下文",
+                summary="已汇总结构化证据、历史和记忆，准备生成最终答案。",
+                status="completed",
+                payload={
+                    "evidences_size": len(context_evidences),
+                    "history_size": len(history),
+                    "memories_size": len(state.get("memories") or []),
+                },
+            )
             return {
                 "context": context,
                 "_trace_outputs": {
@@ -2003,6 +2170,12 @@ class LangGraphOrchestrator:
                     LLMMessage(role="user", content=context),
                 ]
             writer = get_stream_writer()
+            self._emit_stream_event(
+                "answer_started",
+                title="开始生成回答",
+                summary="正在根据上下文输出最终答案。",
+                payload={"answer_mode": answer_mode},
+            )
             answer_parts: List[str] = []
             chunk_count = 0
             for chunk in self.llm.chat_stream(messages):
@@ -2019,6 +2192,13 @@ class LangGraphOrchestrator:
                     }
                 )
             answer = "".join(answer_parts).strip()
+            self._emit_stream_event(
+                "answer_completed",
+                title="回答生成完成",
+                summary=f"已输出 {chunk_count} 个增量片段。",
+                status="completed",
+                payload={"chunk_count": chunk_count},
+            )
             return {
                 "answer": answer,
                 "messages": [AIMessage(content=answer)],
@@ -2181,6 +2361,15 @@ class LangGraphOrchestrator:
                 result = self._run_rag_step(step_id, objective, arguments, trace_id)
             elif tool == "graph":
                 result = self._run_graph_step(step_id, objective, arguments, trace_id)
+            elif tool == "python":
+                result = self._run_python_step(
+                    step_id,
+                    objective,
+                    arguments,
+                    trace_id,
+                    state,
+                    [str(item) for item in (step.get("depends_on") or []) if str(item)],
+                )
             else:
                 result = {
                     "step_id": step_id,
@@ -2598,6 +2787,41 @@ class LangGraphOrchestrator:
                 metadata={"step_id": step_id, "render_mode": "structured_step_result"},
             )
 
+        if tool == "python" and isinstance(result_payload, dict):
+            lines = [f"步骤: {step_id}", f"目标: {objective}"]
+            if questions:
+                lines.append(f"任务: {questions[0]}")
+            code = str(result_payload.get("code") or "").strip()
+            stdout = str(result_payload.get("stdout") or "").strip()
+            stderr = str(result_payload.get("stderr") or "").strip()
+            artifacts = (
+                result_payload.get("artifacts")
+                if isinstance(result_payload.get("artifacts"), list)
+                else []
+            )
+            if code:
+                lines.append(f"代码:\n{code}")
+            if stdout:
+                lines.append(f"stdout:\n{stdout}")
+            if stderr:
+                lines.append(f"stderr:\n{stderr}")
+            if artifacts:
+                lines.append(
+                    "产物: "
+                    + ", ".join(
+                        str(item.get("title") or item.get("path") or "")
+                        for item in artifacts
+                        if isinstance(item, dict)
+                    )
+                )
+            return EvidenceItem(
+                title="Python 沙箱结果",
+                content="\n".join(line for line in lines if str(line).strip()),
+                source="python",
+                score=0.9,
+                metadata={"step_id": step_id, "render_mode": "structured_step_result"},
+            )
+
         return None
 
     def _build_context_evidences(self, state: AgentGraphState) -> List[EvidenceItem]:
@@ -2877,6 +3101,111 @@ class LangGraphOrchestrator:
             "retried": any_retried,
         }
 
+    def _run_python_step(
+        self,
+        step_id: str,
+        objective: str,
+        arguments: Dict[str, Any],
+        trace_id: str,
+        state: AgentGraphState,
+        depends_on: List[str],
+    ) -> Dict[str, Any]:
+        """执行 Python 沙箱步骤。"""
+        task = str(arguments.get("task") or objective or "").strip()
+        if not task:
+            raise ValueError("python 缺少 task 参数")
+        context_parts: List[str] = []
+        raw_context = str(arguments.get("context") or "").strip()
+        if raw_context:
+            context_parts.append(raw_context)
+        step_results = (
+            state.get("step_results")
+            if isinstance(state.get("step_results"), dict)
+            else {}
+        )
+        for dep_step_id in depends_on:
+            dep_payload = step_results.get(dep_step_id)
+            if not isinstance(dep_payload, dict):
+                continue
+            context_parts.append(
+                "\n".join(
+                    [
+                        f"依赖步骤: {dep_step_id}",
+                        f"工具: {str(dep_payload.get('tool') or '')}",
+                        f"目标: {str(dep_payload.get('objective') or '')}",
+                        f"结果: {self._format_json_for_context(dep_payload.get('result', {}))}",
+                    ]
+                )
+            )
+        context = "\n\n".join(part for part in context_parts if part).strip()
+        packages = [
+            str(item).strip()
+            for item in (arguments.get("packages") or [])
+            if str(item).strip()
+        ]
+        timeout_seconds = int(
+            arguments.get("timeout_seconds") or self.config.sandbox_timeout_seconds
+        )
+        payload = self.mcp_client.call_tool(
+            "python_sandbox_execute",
+            {
+                "task": task,
+                "context": context,
+                "packages": packages,
+                "timeout_seconds": timeout_seconds,
+                "thread_id": str(state.get("thread_id") or ""),
+                "trace_id": trace_id,
+            },
+            trace_id=trace_id,
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("python_sandbox_execute 返回了无效结果")
+
+        stdout = str(payload.get("stdout") or "").strip()
+        stderr = str(payload.get("stderr") or "").strip()
+        artifacts = (
+            payload.get("artifacts")
+            if isinstance(payload.get("artifacts"), list)
+            else []
+        )
+        summary_lines = [f"任务: {task}"]
+        if stdout:
+            summary_lines.append(f"stdout: {_truncate(stdout, 1500)}")
+        if stderr:
+            summary_lines.append(f"stderr: {_truncate(stderr, 1500)}")
+        if artifacts:
+            artifact_titles = [
+                str(item.get("title") or item.get("path") or "")
+                for item in artifacts
+                if isinstance(item, dict)
+            ]
+            summary_lines.append(f"产物: {artifact_titles}")
+        evidence = EvidenceItem(
+            title="Python 沙箱结果",
+            content="\n".join(summary_lines),
+            source="python",
+            score=0.9,
+            metadata={
+                "step_id": step_id,
+                "artifact_count": len(artifacts),
+                "sandbox_run_id": str(payload.get("sandbox_run_id") or ""),
+            },
+        )
+        return {
+            "step_id": step_id,
+            "status": "ok",
+            "result": {
+                "task": task,
+                "stdout": stdout,
+                "stderr": stderr,
+                "artifacts": artifacts,
+                "code": str(payload.get("code") or ""),
+                "sandbox_run_id": str(payload.get("sandbox_run_id") or ""),
+            },
+            "evidences": [evidence],
+            "sources": ["python"],
+        }
+
     @staticmethod
     def _normalize_arguments_for_signature(
         tool: str, arguments: Dict[str, Any]
@@ -2918,6 +3247,18 @@ class LangGraphOrchestrator:
             normalized = {
                 "questions": questions,
                 "max_rows": arguments.get("max_rows"),
+            }
+        elif tool == "python":
+            normalized = {
+                "task": str(arguments.get("task") or "").strip(),
+                "context": str(arguments.get("context") or "").strip(),
+                "packages": sorted(
+                    {
+                        str(item).strip()
+                        for item in (arguments.get("packages") or [])
+                        if str(item).strip()
+                    }
+                ),
             }
         else:
             normalized = {str(k): arguments[k] for k in sorted(arguments.keys())}
@@ -3079,6 +3420,16 @@ class LangGraphOrchestrator:
                     if src:
                         sources.append(src)
                 summary = f"chunk_count={len(chunks)}; sources={sources}"
+            elif tool == "python":
+                artifacts = (
+                    payload.get("artifacts")
+                    if isinstance(payload.get("artifacts"), list)
+                    else []
+                )
+                summary = (
+                    f"artifacts={len(artifacts)}; "
+                    f"stdout={_truncate(str(payload.get('stdout') or ''), 120)}"
+                )
             else:
                 summary = _truncate(_trace_json(payload, limit=600), 260)
         else:
@@ -3183,12 +3534,13 @@ class LangGraphOrchestrator:
             trace_id: 当前会话追踪 ID，用于透传到工具层日志。
 
         Returns:
-            工具可用性字典；包含 nl2sql/rag/graph/none/note。
+            工具可用性字典；包含 nl2sql/rag/graph/python/none/note。
         """
         available = {
             "nl2sql": False,
             "rag": False,
             "graph": False,
+            "python": False,
             "none": True,
             "note": False,
         }
@@ -3204,10 +3556,19 @@ class LangGraphOrchestrator:
             available["rag"] = "rag_search" in names
             # graph 工具要求 LlamaIndex 自主 Text2Cypher 执行能力。
             available["graph"] = "neo4j_llamaindex_query" in names
+            available["python"] = "python_sandbox_execute" in names
             available["note"] = "note_search" in names
         except Exception as exc:
             logger.warning("MCP 工具发现失败，使用默认能力集 error=%s", exc)
-            available.update({"nl2sql": True, "rag": True, "graph": True, "note": True})
+            available.update(
+                {
+                    "nl2sql": True,
+                    "rag": True,
+                    "graph": True,
+                    "python": True,
+                    "note": True,
+                }
+            )
         return available
 
     def _generate_cypher(self, objective: str) -> str:

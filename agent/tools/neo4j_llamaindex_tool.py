@@ -55,7 +55,9 @@ class Neo4jLlamaIndexTool:
             from llama_index.core.indices.property_graph import TextToCypherRetriever  # type: ignore
             from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore  # type: ignore
         except Exception as exc:
-            raise RuntimeError("缺少 llama-index-graph-stores-neo4j 依赖，无法执行图谱自然语言查询。") from exc
+            raise RuntimeError(
+                "缺少 llama-index-graph-stores-neo4j 依赖，无法执行图谱自然语言查询。"
+            ) from exc
 
         self.max_rows = max(1, int(max_rows))
         self.max_cypher_length = max(256, int(max_cypher_length))
@@ -118,7 +120,9 @@ class Neo4jLlamaIndexTool:
             self._llm.set_trace_id(trace_id)
 
         # 按需刷新 schema，确保查询基于当前数据库结构生成 Cypher。
-        schema_snapshot = self._graph_store.get_schema_str(refresh=self.refresh_schema_each_query)
+        schema_snapshot = self._graph_store.get_schema_str(
+            refresh=self.refresh_schema_each_query
+        )
 
         # 用 closure 捕获 LLM 生成的原始 Cypher，便于失败时记录和传递给重试逻辑。
         _captured_cypher: List[str] = []
@@ -128,7 +132,11 @@ class Neo4jLlamaIndexTool:
             cypher_to_validate = strip_think_blocks(str(raw_cypher))
             _captured_cypher.clear()
             _captured_cypher.append(cypher_to_validate)
-            logger.warning("LLM生成Cypher trace_id=%s cypher=%s", trace_id or "-", cypher_to_validate)
+            logger.warning(
+                "LLM生成Cypher trace_id=%s cypher=%s",
+                trace_id or "-",
+                cypher_to_validate,
+            )
             return guard.sanitize(cypher_to_validate).get("cypher", "")
 
         # repair_context 不为空时，使用修复 PromptTemplate：
@@ -144,8 +152,10 @@ class Neo4jLlamaIndexTool:
                 "修复要求:\n"
                 "1. 只能以 MATCH / OPTIONAL MATCH / WITH 开头\n"
                 "2. 不得含有 CALL/CREATE/MERGE/DELETE/SET/DROP 等写操作关键字\n"
-                "3. 末尾必须有 LIMIT 子句\n"
-                "4. 仅输出修正后的 Cypher，不加解释\n\n"
+                "3. WHERE 必须出现在 RETURN 之前；如果需要先投影再过滤，只能使用 WITH ... WHERE ... RETURN ...\n"
+                "4. 最终只保留一个末尾 RETURN；中间传递变量时使用 WITH，禁止出现 RETURN ... WHERE ...\n"
+                "5. 末尾必须有 LIMIT 子句\n"
+                "6. 仅输出修正后的 Cypher，不加解释\n\n"
                 "为以下问题生成修正后的 Cypher:\n{question}"
             )
             retriever = self._retriever_cls(
@@ -198,7 +208,9 @@ class Neo4jLlamaIndexTool:
         elif hasattr(node, "text"):
             node_text = str(getattr(node, "text"))
 
-        metadata = node.metadata if isinstance(getattr(node, "metadata", None), dict) else {}
+        metadata = (
+            node.metadata if isinstance(getattr(node, "metadata", None), dict) else {}
+        )
         cypher = str(metadata.get("query") or "").strip()
         raw_rows = metadata.get("response")
         if raw_rows is None:
