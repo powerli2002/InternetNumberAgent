@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List
@@ -22,13 +23,13 @@ class OpenSandboxProvider:
         self,
         *,
         code: str,
+        input_data: Dict[str, Any],
+        input_files: List[Dict[str, Any]],
         packages: List[str],
         timeout_seconds: int,
     ) -> Dict[str, Any]:
         """在 OpenSandbox 中执行 Python，并收集 stdout/stderr/产物。"""
         try:
-            from code_interpreter.models.code import SupportedLanguage  # type: ignore
-            from code_interpreter.sync.code_interpreter import CodeInterpreterSync  # type: ignore
             from opensandbox.config.connection_sync import ConnectionConfigSync  # type: ignore
             from opensandbox.models.filesystem import SearchEntry, WriteEntry  # type: ignore
             from opensandbox.sync.sandbox import SandboxSync  # type: ignore
@@ -42,6 +43,7 @@ class OpenSandboxProvider:
             api_key=self.config.opensandbox_api_key,
             request_timeout=timedelta(seconds=max(60, timeout_seconds)),
             transport=httpx.HTTPTransport(limits=httpx.Limits(max_connections=20)),
+            use_server_proxy=True,
         )
 
         sandbox = SandboxSync.create(
@@ -53,29 +55,63 @@ class OpenSandboxProvider:
         )
 
         try:
-            sandbox.commands.run("mkdir -p /workspace/artifacts")
-            sandbox.files.write_files(
-                [
-                    WriteEntry(path="/workspace/main.py", data=code, mode=0o644),
-                ]
-            )
-            if packages:
-                install_cmd = "pip install " + " ".join(packages)
-                sandbox.commands.run(f"cd /workspace && {install_cmd}")
+            def _read_execution_logs(execution: Any, stream: str) -> str:
+                """提取命令执行日志，统一收敛 stdout/stderr 文本。"""
+                return "\n".join(
+                    str(getattr(item, "text", "") or "")
+                    for item in getattr(getattr(execution, "logs", None), stream, []) or []
+                ).strip()
 
-            interpreter = CodeInterpreterSync.create(sandbox=sandbox)
-            result = interpreter.codes.run(
-                code,
-                language=SupportedLanguage.PYTHON,
+            input_paths = [
+                str(item.get("path") or "").strip()
+                for item in (input_files or [])
+                if isinstance(item, dict) and str(item.get("path") or "").strip()
+            ]
+            mkdir_targets = {"/workspace/artifacts", "/workspace/input"}
+            for path in input_paths:
+                parent = str(Path(path).parent)
+                if parent:
+                    mkdir_targets.add(parent)
+            sandbox.commands.run(
+                "mkdir -p " + " ".join(sorted(mkdir_targets))
             )
-            stdout = "\n".join(
-                str(getattr(item, "text", "") or "")
-                for item in getattr(getattr(result, "logs", None), "stdout", []) or []
-            ).strip()
-            stderr = "\n".join(
-                str(getattr(item, "text", "") or "")
-                for item in getattr(getattr(result, "logs", None), "stderr", []) or []
-            ).strip()
+            write_entries = [
+                WriteEntry(path="/workspace/main.py", data=code, mode=0o644),
+                WriteEntry(
+                    path="/workspace/input/input.json",
+                    data=json.dumps(input_data or {}, ensure_ascii=False, indent=2),
+                    mode=0o644,
+                ),
+            ]
+            for item in input_files or []:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                if not path:
+                    continue
+                write_entries.append(
+                    WriteEntry(
+                        path=path,
+                        data=str(item.get("content") or ""),
+                        mode=0o644,
+                    )
+                )
+            sandbox.files.write_files(write_entries)
+            install_stdout = ""
+            if packages:
+                install_cmd = "python3 -m pip install " + " ".join(packages)
+                install_result = sandbox.commands.run(f"cd /workspace && {install_cmd}")
+                install_stdout = _read_execution_logs(install_result, "stdout")
+                install_stderr = _read_execution_logs(install_result, "stderr")
+                install_exit_code = getattr(install_result, "exit_code", None)
+                if install_exit_code not in (None, 0):
+                    detail = install_stderr or install_stdout or f"exit_code={install_exit_code}"
+                    raise RuntimeError("Python 依赖安装失败: " + detail)
+
+            result = sandbox.commands.run("cd /workspace && python3 /workspace/main.py")
+            stdout = _read_execution_logs(result, "stdout")
+            stderr = _read_execution_logs(result, "stderr")
+            exit_code = getattr(result, "exit_code", None)
 
             artifacts: List[Dict[str, Any]] = []
             for entry in sandbox.files.search(
@@ -99,8 +135,9 @@ class OpenSandboxProvider:
                 "sandbox_id": sandbox.id,
                 "stdout": stdout,
                 "stderr": stderr,
-                "exit_code": 0 if not stderr else None,
+                "exit_code": int(exit_code) if exit_code is not None else None,
                 "artifacts": artifacts,
+                "install_stdout": install_stdout if packages else "",
             }
         finally:
             try:

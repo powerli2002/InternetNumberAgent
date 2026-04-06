@@ -33,9 +33,12 @@ import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 import contextvars
+import csv
 from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
+import io
 import json
+import re
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -61,6 +64,7 @@ from agent.core.prompts import (
     SEMANTIC_EXTRACT_PROMPT,
     SYSTEM_PROMPT,
 )
+from agent.core.schema import TABLE_CONTEXT_HINTS
 from agent.core.tracing import LangSmithTracer
 from agent.memory import EpisodicMemory, MemoryManager, SemanticMemory, WorkingMemory
 from agent.memory.semantic import SemanticRecord
@@ -256,6 +260,49 @@ def _truncate(text: str, limit: int = 1000) -> str:
     if len(raw) <= limit:
         return raw
     return f"{raw[:limit]}...<truncated {len(raw)} chars>"
+
+
+def _summarize_python_artifacts(artifacts: List[Dict[str, Any]]) -> str:
+    """仅保留对最终回答有价值的产物摘要，避免泄露内部路径。"""
+    titles = [
+        str(item.get("title") or "").strip()
+        for item in artifacts
+        if isinstance(item, dict) and str(item.get("title") or "").strip()
+    ]
+    if not titles:
+        return ""
+    return "产物: " + ", ".join(titles)
+
+
+def _is_image_artifact_dict(artifact: Dict[str, Any]) -> bool:
+    """判断 artifact 是否为图片。"""
+    mime_type = str(artifact.get("mime_type") or "").strip().lower()
+    title = str(artifact.get("title") or "").strip().lower()
+    if mime_type.startswith("image/"):
+        return True
+    return bool(re.search(r"\.(png|jpe?g|gif|webp|bmp|svg)$", title))
+
+
+def _collect_tabular_payloads(node: Any) -> List[Dict[str, Any]]:
+    """递归提取结构化结果中的二维表格载荷。"""
+    tables: List[Dict[str, Any]] = []
+    if isinstance(node, dict):
+        columns = node.get("columns")
+        rows = node.get("rows")
+        if isinstance(columns, list) and isinstance(rows, list):
+            tables.append({"columns": columns, "rows": rows})
+        for value in node.values():
+            tables.extend(_collect_tabular_payloads(value))
+    elif isinstance(node, list):
+        for item in node:
+            tables.extend(_collect_tabular_payloads(item))
+    return tables
+
+
+def _slugify_filename_part(value: str, default: str) -> str:
+    """把任意字符串转成适合文件名的片段。"""
+    text = re.sub(r"[^0-9A-Za-z._-]+", "_", str(value or "").strip()).strip("_")
+    return text or default
 
 
 def _build_postgres_dsn(url: str) -> str:
@@ -469,6 +516,128 @@ class LangGraphOrchestrator:
             budget=dict(step.budget or {}),
         )
         return [count_step, sample_step]
+
+    @staticmethod
+    def _infer_chart_grouping_hint(*texts: str) -> str:
+        """从问题或绘图任务中提取可能的分组维度。"""
+        patterns = (
+            r"按\s*([A-Za-z0-9_\-\u4e00-\u9fa5]+)\s*分组",
+            r"不同\s*([A-Za-z0-9_\-\u4e00-\u9fa5]+)",
+            r"各\s*([A-Za-z0-9_\-\u4e00-\u9fa5]+)",
+        )
+        for text in texts:
+            raw = str(text or "").strip()
+            if not raw:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, raw, flags=re.IGNORECASE)
+                if match:
+                    return str(match.group(1) or "").strip()
+        return ""
+
+    @staticmethod
+    def _build_chart_group_by_step(
+        *,
+        base_step: GraphPlanStep,
+        chart_step: GraphPlanStep,
+        used_ids: set[str],
+    ) -> Optional[GraphPlanStep]:
+        """为绘图步骤补足二维分组数据步骤。"""
+        if base_step.tool != "nl2sql":
+            return None
+        base_question = str(
+            (base_step.arguments or {}).get("question") or base_step.objective or ""
+        ).strip()
+        if not base_question:
+            return None
+        grouping_hint = LangGraphOrchestrator._infer_chart_grouping_hint(
+            str((chart_step.arguments or {}).get("task") or ""),
+            chart_step.objective,
+            base_question,
+        )
+        base_clause = base_question[2:].strip() if base_question.startswith("统计") else base_question
+        if grouping_hint:
+            question = (
+                f"按{grouping_hint}分组统计{base_clause}，保持原统计口径不变，"
+                "只新增分组维度，返回分组字段和对应数值，不要改写为每组记录数 COUNT(*)"
+            )
+        else:
+            question = (
+                f"按合适维度分组统计{base_clause}，保持原统计口径不变，"
+                "返回可直接用于绘图的类别和数值，不要改写为每组记录数 COUNT(*)"
+            )
+
+        new_step_id = f"{base_step.step_id}_chart_data"
+        suffix = 2
+        while new_step_id in used_ids:
+            new_step_id = f"{base_step.step_id}_chart_data_{suffix}"
+            suffix += 1
+        used_ids.add(new_step_id)
+        return GraphPlanStep(
+            step_id=new_step_id,
+            objective=f"{base_step.objective}（分组结果用于绘图）",
+            tool="nl2sql",
+            arguments={
+                "question": question,
+                "tables": list((base_step.arguments or {}).get("tables") or []),
+                "query_mode": "GROUP_BY",
+            },
+            depends_on=list(base_step.depends_on),
+            can_parallel=False,
+            is_complex=False,
+        )
+
+    @staticmethod
+    def _detect_nl2sql_semantic_mismatch(
+        *,
+        question: str,
+        query_mode: str,
+        tables: Optional[List[str]],
+        sql: str,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """识别常见“SQL 可执行但统计口径错误”的情况。"""
+        raw_question = str(question or "")
+        lowered_question = raw_question.lower()
+        normalized_sql = " ".join(str(sql or "").lower().split())
+        table_names = {str(item).strip().lower() for item in (tables or []) if str(item).strip()}
+
+        asks_prefix_scale = any(
+            token in raw_question for token in ("前缀", "宣告")
+        ) or any(token in lowered_question for token in ("prefix", "announcement"))
+        asks_as_scope = "as" in lowered_question or "自治系统" in raw_question
+        counts_rows = bool(re.search(r"\bcount\s*\(\s*\*\s*\)", normalized_sql))
+        select_match = re.search(
+            r"\bselect\b(?P<body>.*?)(?:\bfrom\b|$)",
+            sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        normalized_select = " ".join(
+            str(select_match.group("body") or "").lower().split()
+        )
+        uses_array_metric = "cardinality(" in normalized_select
+
+        if (
+            query_mode in {"COUNT", "GROUP_BY"}
+            and asks_prefix_scale
+            and asks_as_scope
+            and "as_entity" in table_names
+            and counts_rows
+            and not uses_array_metric
+        ):
+            return "当前 SQL 把问题要求的前缀/宣告规模误写成了记录条数 COUNT(*)。请保持原统计口径，只修正 SQL 语义，不要改成记录数。"
+        if query_mode == "GROUP_BY" and isinstance(result, dict):
+            rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+            numeric_values = []
+            for row in rows:
+                if isinstance(row, list) and len(row) >= 2 and isinstance(row[1], (int, float)):
+                    numeric_values.append(float(row[1]))
+            if asks_prefix_scale and asks_as_scope and "as_entity" in table_names:
+                if rows and numeric_values and all(value == 1.0 for value in numeric_values):
+                    return "当前分组结果的数值全部为 1，明显退化成了按记录数计数，没有保持原统计口径。请返回每个分组对应的真实指标值。"
+                if result.get("row_count") == 0:
+                    return "当前分组结果为空，无法用于绘图。请重新检查筛选条件与统计口径，返回可直接绘图的类别和值。"
+        return ""
 
     @staticmethod
     def _should_skip_retrieval_for_none_plan(state: AgentGraphState) -> bool:
@@ -1429,9 +1598,9 @@ class LangGraphOrchestrator:
                 "chart",
                 "graph",
             )
-            retrieval_step_ids = [
-                step.step_id for step in normalized if step.tool in {"nl2sql", "graph"}
-            ]
+            step_index = {step.step_id: step for step in normalized}
+            chart_ready_dep_modes = {"GROUP_BY", "OTHER"}
+            expanded_steps: List[GraphPlanStep] = []
             for step in normalized:
                 task_text = " ".join(
                     [
@@ -1443,11 +1612,54 @@ class LangGraphOrchestrator:
                 if step.tool == "python" and any(
                     keyword.lower() in task_text for keyword in chart_keywords
                 ):
+                    retrieval_steps = [
+                        item for item in expanded_steps if item.tool in {"nl2sql", "graph"}
+                    ]
+                    retrieval_step_ids = [item.step_id for item in retrieval_steps]
                     if retrieval_step_ids:
                         step.depends_on = list(
                             dict.fromkeys([*step.depends_on, *retrieval_step_ids])
                         )
                         step.can_parallel = False
+                    chart_ready_dep_ids = []
+                    for dep_id in step.depends_on:
+                        dep_step = step_index.get(dep_id)
+                        if dep_step is None:
+                            dep_step = next(
+                                (item for item in expanded_steps if item.step_id == dep_id),
+                                None,
+                            )
+                        if dep_step is None:
+                            continue
+                        if dep_step.tool == "graph":
+                            chart_ready_dep_ids.append(dep_id)
+                            continue
+                        if dep_step.tool == "nl2sql":
+                            dep_mode = LangGraphOrchestrator._normalize_query_mode(
+                                (dep_step.arguments or {}).get("query_mode")
+                            )
+                            if dep_mode in chart_ready_dep_modes:
+                                chart_ready_dep_ids.append(dep_id)
+                    if not chart_ready_dep_ids:
+                        base_nl2sql = next(
+                            (item for item in retrieval_steps if item.tool == "nl2sql"),
+                            None,
+                        )
+                        if base_nl2sql is not None:
+                            chart_data_step = LangGraphOrchestrator._build_chart_group_by_step(
+                                base_step=base_nl2sql,
+                                chart_step=step,
+                                used_ids=used_ids,
+                            )
+                            if chart_data_step is not None:
+                                expanded_steps.append(chart_data_step)
+                                step_index[chart_data_step.step_id] = chart_data_step
+                                step.depends_on = list(
+                                    dict.fromkeys([*step.depends_on, chart_data_step.step_id])
+                                )
+                expanded_steps.append(step)
+
+            normalized = expanded_steps
 
             if not normalized:
                 # 计划全失效时生成 no-op 保底步骤，避免主图崩溃。
@@ -2192,6 +2404,10 @@ class LangGraphOrchestrator:
                     }
                 )
             answer = "".join(answer_parts).strip()
+            answer = self._append_image_artifact_references(
+                answer,
+                self._collect_current_turn_image_artifacts(state),
+            )
             self._emit_stream_event(
                 "answer_completed",
                 title="回答生成完成",
@@ -2461,9 +2677,10 @@ class LangGraphOrchestrator:
                     question,
                     first_error,
                     tool_name="nl2sql",
-                    extra_instruction=(
-                        f"query_mode={query_mode}。若上次 SQL 无法执行，请输出语义等价但可执行的 SQL。"
-                    ),
+                    extra_instruction=self._build_nl2sql_retry_instruction(
+                        query_mode, tables if isinstance(tables, list) else []
+                    )
+                    + "\n若上次 SQL 无法执行，请输出语义等价但可执行的 SQL。",
                 )
                 try:
                     payload = self.mcp_client.call_tool(
@@ -2495,6 +2712,37 @@ class LangGraphOrchestrator:
 
             sql = str(payload.get("sql", "")) if isinstance(payload, dict) else ""
             result = payload.get("result", {}) if isinstance(payload, dict) else {}
+            semantic_error = self._detect_nl2sql_semantic_mismatch(
+                question=question,
+                query_mode=query_mode,
+                tables=tables if isinstance(tables, list) else [],
+                sql=sql,
+                result=result if isinstance(result, dict) else {},
+            )
+            if semantic_error:
+                retried = True
+                first_error = semantic_error
+                retry_question = self._build_retry_question(
+                    question,
+                    semantic_error,
+                    tool_name="nl2sql",
+                    extra_instruction=self._build_nl2sql_retry_instruction(
+                        query_mode, tables if isinstance(tables, list) else []
+                    ),
+                )
+                payload = self.mcp_client.call_tool(
+                    "nl2sql_query",
+                    {
+                        "question": retry_question,
+                        "tables": tables,
+                        "enable_column_retrieval": use_columns,
+                        "query_mode": query_mode,
+                        "trace_id": trace_id,
+                    },
+                    trace_id=trace_id,
+                )
+                sql = str(payload.get("sql", "")) if isinstance(payload, dict) else ""
+                result = payload.get("result", {}) if isinstance(payload, dict) else {}
             items.append(
                 {
                     "index": idx,
@@ -2619,12 +2867,96 @@ class LangGraphOrchestrator:
             retry_parts.append(extra)
         return "\n".join(part for part in retry_parts if str(part).strip())
 
+    @staticmethod
+    def _build_nl2sql_retry_instruction(
+        query_mode: str, tables: Optional[List[str]]
+    ) -> str:
+        """为 NL2SQL 重试补充表语义提示。"""
+        parts = [f"query_mode={query_mode}。请保持原统计口径不变，只修正 SQL 的统计语义。"]
+        hints = []
+        for table in tables or []:
+            table_name = str(table).strip()
+            if table_name and table_name in TABLE_CONTEXT_HINTS:
+                hints.append(f"{table_name}: {TABLE_CONTEXT_HINTS[table_name]}")
+        if hints:
+            parts.append("相关表语义提示：")
+            parts.extend(hints[:3])
+        return "\n".join(parts)
+
     def _format_json_for_context(self, value: Any) -> str:
         """用于上下文拼装的 JSON 文本，保留尽量多的结构化细节。"""
         char_limit = max(
             12000, int(getattr(self.config, "max_context_tokens", 4096)) * 12
         )
         return _trace_json(value, limit=char_limit)
+
+    def _format_result_for_context(self, value: Any, *, preview_limit: int) -> str:
+        """将查询结果压缩为适合最终回答模型消费的摘要。"""
+        if isinstance(value, dict):
+            columns = value.get("columns")
+            rows = value.get("rows")
+            if isinstance(columns, list) and isinstance(rows, list):
+                payload = {
+                    "columns": [str(item) for item in columns],
+                    "row_count": len(rows),
+                    "truncated": bool(value.get("truncated", False)),
+                    "preview_rows": self._preview_rows(rows, limit=preview_limit),
+                }
+                for key in (
+                    "limit_applied",
+                    "limit_value",
+                    "limit_clamped",
+                    "metadata",
+                ):
+                    if key in value:
+                        payload[key] = _to_jsonable(value.get(key))
+                return self._format_json_for_context(payload)
+            return self._format_json_for_context(
+                {
+                    str(key): self._summarize_result_for_python(item)
+                    for key, item in value.items()
+                }
+            )
+        return self._format_json_for_context(value)
+
+    def _infer_context_preview_row_limit(
+        self,
+        *,
+        question: str,
+        query_mode: str,
+        state: AgentGraphState,
+    ) -> int:
+        """根据问题意图决定进入最终回答上下文的预览行数。"""
+        if self._plan_has_python_step(state):
+            return 5
+        if query_mode in {"COUNT", "EXISTS"}:
+            return 3
+        lowered_question = str(question or "").lower()
+        detail_keywords = (
+            "列出",
+            "明细",
+            "详情",
+            "top",
+            "排名",
+            "排行",
+            "列表",
+            "样本",
+        )
+        if any(keyword in lowered_question for keyword in detail_keywords) or any(
+            keyword in str(question or "") for keyword in detail_keywords
+        ):
+            return 20
+        return 10
+
+    @staticmethod
+    def _plan_has_python_step(state: AgentGraphState) -> bool:
+        """判断当前计划是否包含 Python 步骤。"""
+        for raw_step in state.get("plan_steps") or []:
+            if not isinstance(raw_step, dict):
+                continue
+            if str(raw_step.get("tool") or "").strip().lower() == "python":
+                return True
+        return False
 
     @staticmethod
     def _get_current_plan_step_ids(state: AgentGraphState) -> List[str]:
@@ -2660,8 +2992,71 @@ class LangGraphOrchestrator:
             ordered_results.append((sid, entry))
         return ordered_results
 
+    def _collect_current_turn_image_artifacts(
+        self, state: AgentGraphState
+    ) -> List[Dict[str, Any]]:
+        """收集本轮 Python 步骤生成的图片 artifact。"""
+        collected: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for _, step_result in self._get_current_turn_step_results(state):
+            if str(step_result.get("tool") or "").strip().lower() != "python":
+                continue
+            if str(step_result.get("status") or "").strip().lower() != "ok":
+                continue
+            result_payload = step_result.get("result")
+            if not isinstance(result_payload, dict):
+                continue
+            artifacts = result_payload.get("artifacts")
+            if not isinstance(artifacts, list):
+                continue
+            for artifact in artifacts:
+                if not isinstance(artifact, dict) or not _is_image_artifact_dict(artifact):
+                    continue
+                artifact_id = str(artifact.get("id") or "").strip()
+                if not artifact_id or artifact_id in seen_ids:
+                    continue
+                seen_ids.add(artifact_id)
+                collected.append(
+                    {
+                        "id": artifact_id,
+                        "title": str(artifact.get("title") or "图表").strip() or "图表",
+                    }
+                )
+        return collected
+
+    @staticmethod
+    def _append_image_artifact_references(
+        answer: str, image_artifacts: List[Dict[str, Any]]
+    ) -> str:
+        """在回答末尾补充图片 artifact 引用，保证前端可直接渲染。"""
+        normalized_answer = re.sub(
+            r"`(!\[[^`]+?\]\(artifact://[A-Za-z0-9-]+\))`",
+            r"\1",
+            str(answer or ""),
+        ).strip()
+        if not image_artifacts:
+            return normalized_answer
+
+        missing_refs: List[str] = []
+        for artifact in image_artifacts:
+            artifact_id = str(artifact.get("id") or "").strip()
+            title = str(artifact.get("title") or "图表").strip() or "图表"
+            if not artifact_id:
+                continue
+            ref = f"![{title}](artifact://{artifact_id})"
+            if ref in normalized_answer or f"artifact://{artifact_id}" in normalized_answer:
+                continue
+            missing_refs.append(ref)
+
+        if not missing_refs:
+            return normalized_answer
+
+        if normalized_answer:
+            return f"{normalized_answer}\n\n### 图表\n" + "\n\n".join(missing_refs)
+        return "\n\n".join(missing_refs)
+
     def _build_step_result_evidence(
-        self, step_id: str, step_result: Dict[str, Any]
+        self, step_id: str, step_result: Dict[str, Any], state: AgentGraphState
     ) -> Optional[EvidenceItem]:
         """把结构化 step_result 转成 build_context 可直接消费的证据。"""
         tool = str(step_result.get("tool") or "").strip().lower()
@@ -2694,6 +3089,11 @@ class LangGraphOrchestrator:
         if tool == "nl2sql":
             lines = [f"步骤: {step_id}", f"目标: {objective}"]
             query_mode = self._normalize_query_mode(arguments.get("query_mode"))
+            preview_limit = self._infer_context_preview_row_limit(
+                question=questions[0] if questions else objective,
+                query_mode=query_mode,
+                state=state,
+            )
             if query_mode:
                 lines.append(f"query_mode: {query_mode}")
             items = (
@@ -2710,17 +3110,34 @@ class LangGraphOrchestrator:
                     lines.append(f"[子问题 {item_index}] {item_question}")
                     if str(item.get("status") or "") == "ok":
                         lines.append(f"SQL: {item.get('sql')}")
+                        metric_hint = self._summarize_sql_metric_semantics(
+                            str(item.get("sql") or "")
+                        )
+                        if metric_hint:
+                            lines.append(f"统计口径: {metric_hint}")
                         lines.append(
-                            f"结果: {self._format_json_for_context(item.get('result', {}))}"
+                            "结果摘要: "
+                            + self._format_result_for_context(
+                                item.get("result", {}),
+                                preview_limit=preview_limit,
+                            )
                         )
                     else:
                         lines.append(f"错误: {item.get('error')}")
             else:
                 if questions:
                     lines.append(f"问题: {questions[0]}")
-                lines.append(f"SQL: {result_payload.get('sql')}")
+                sql_text = str(result_payload.get("sql") or "")
+                lines.append(f"SQL: {sql_text}")
+                metric_hint = self._summarize_sql_metric_semantics(sql_text)
+                if metric_hint:
+                    lines.append(f"统计口径: {metric_hint}")
                 lines.append(
-                    f"结果: {self._format_json_for_context(result_payload.get('result', {}))}"
+                    "结果摘要: "
+                    + self._format_result_for_context(
+                        result_payload.get("result", {}),
+                        preview_limit=preview_limit,
+                    )
                 )
             return EvidenceItem(
                 title="NL2SQL 结构化结果",
@@ -2791,29 +3208,32 @@ class LangGraphOrchestrator:
             lines = [f"步骤: {step_id}", f"目标: {objective}"]
             if questions:
                 lines.append(f"任务: {questions[0]}")
-            code = str(result_payload.get("code") or "").strip()
-            stdout = str(result_payload.get("stdout") or "").strip()
-            stderr = str(result_payload.get("stderr") or "").strip()
             artifacts = (
                 result_payload.get("artifacts")
                 if isinstance(result_payload.get("artifacts"), list)
                 else []
             )
-            if code:
-                lines.append(f"代码:\n{code}")
-            if stdout:
-                lines.append(f"stdout:\n{stdout}")
-            if stderr:
-                lines.append(f"stderr:\n{stderr}")
             if artifacts:
-                lines.append(
-                    "产物: "
-                    + ", ".join(
-                        str(item.get("title") or item.get("path") or "")
-                        for item in artifacts
-                        if isinstance(item, dict)
-                    )
+                artifact_summary = _summarize_python_artifacts(
+                    [item for item in artifacts if isinstance(item, dict)]
                 )
+                if artifact_summary:
+                    lines.append(artifact_summary)
+                lines.append(f"产物数量: {len(artifacts)}")
+                for artifact in artifacts:
+                    if not isinstance(artifact, dict) or not _is_image_artifact_dict(artifact):
+                        continue
+                    artifact_id = str(artifact.get("id") or "").strip()
+                    title = str(artifact.get("title") or "图表").strip() or "图表"
+                    if artifact_id:
+                        lines.append(f"图片引用: ![{title}](artifact://{artifact_id})")
+            else:
+                stdout = str(result_payload.get("stdout") or "").strip()
+                stderr = str(result_payload.get("stderr") or "").strip()
+                if stdout:
+                    lines.append(f"执行输出摘要: {_truncate(stdout, 240)}")
+                if stderr:
+                    lines.append(f"执行错误摘要: {_truncate(stderr, 240)}")
             return EvidenceItem(
                 title="Python 沙箱结果",
                 content="\n".join(line for line in lines if str(line).strip()),
@@ -2829,7 +3249,7 @@ class LangGraphOrchestrator:
         structured_evidences: List[EvidenceItem] = []
         rendered_step_ids: set[str] = set()
         for step_id, step_result in self._get_current_turn_step_results(state):
-            evidence = self._build_step_result_evidence(step_id, step_result)
+            evidence = self._build_step_result_evidence(step_id, step_result, state)
             if evidence is None:
                 continue
             structured_evidences.append(evidence)
@@ -3138,6 +3558,12 @@ class LangGraphOrchestrator:
                 )
             )
         context = "\n\n".join(part for part in context_parts if part).strip()
+        input_data, input_files = self._build_python_input_bundle(
+            task=task,
+            raw_context=raw_context,
+            depends_on=depends_on,
+            step_results=step_results,
+        )
         packages = [
             str(item).strip()
             for item in (arguments.get("packages") or [])
@@ -3151,6 +3577,8 @@ class LangGraphOrchestrator:
             {
                 "task": task,
                 "context": context,
+                "input_data": input_data,
+                "input_files": input_files,
                 "packages": packages,
                 "timeout_seconds": timeout_seconds,
                 "thread_id": str(state.get("thread_id") or ""),
@@ -3169,17 +3597,15 @@ class LangGraphOrchestrator:
             else []
         )
         summary_lines = [f"任务: {task}"]
-        if stdout:
-            summary_lines.append(f"stdout: {_truncate(stdout, 1500)}")
-        if stderr:
-            summary_lines.append(f"stderr: {_truncate(stderr, 1500)}")
         if artifacts:
-            artifact_titles = [
-                str(item.get("title") or item.get("path") or "")
-                for item in artifacts
-                if isinstance(item, dict)
-            ]
-            summary_lines.append(f"产物: {artifact_titles}")
+            artifact_summary = _summarize_python_artifacts(artifacts)
+            if artifact_summary:
+                summary_lines.append(artifact_summary)
+            summary_lines.append(f"产物数量: {len(artifacts)}")
+        elif stdout:
+            summary_lines.append(f"执行输出: {_truncate(stdout, 240)}")
+        elif stderr:
+            summary_lines.append(f"执行错误: {_truncate(stderr, 240)}")
         evidence = EvidenceItem(
             title="Python 沙箱结果",
             content="\n".join(summary_lines),
@@ -3263,6 +3689,164 @@ class LangGraphOrchestrator:
         else:
             normalized = {str(k): arguments[k] for k in sorted(arguments.keys())}
         return normalized
+
+    def _build_python_input_bundle(
+        self,
+        *,
+        task: str,
+        raw_context: str,
+        depends_on: List[str],
+        step_results: Dict[str, Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """将依赖步骤结果整理为 Python 输入元数据与文件列表。"""
+        dependency_items: List[Dict[str, Any]] = []
+        dataset_items: List[Dict[str, Any]] = []
+        input_files: List[Dict[str, Any]] = []
+
+        for dep_step_id in depends_on:
+            dep_payload = step_results.get(dep_step_id)
+            if not isinstance(dep_payload, dict):
+                continue
+            dep_result = (
+                dep_payload.get("result")
+                if isinstance(dep_payload.get("result"), dict)
+                else dep_payload.get("result")
+            )
+            dependency_items.append(
+                {
+                    "step_id": dep_step_id,
+                    "tool": str(dep_payload.get("tool") or ""),
+                    "objective": str(dep_payload.get("objective") or ""),
+                    "result_summary": self._summarize_result_for_python(dep_result),
+                }
+            )
+            source_tool = str(dep_payload.get("tool") or "")
+            source_objective = str(dep_payload.get("objective") or "")
+            for index, table in enumerate(_collect_tabular_payloads(dep_result), start=1):
+                columns = [
+                    str(item).strip()
+                    for item in (table.get("columns") or [])
+                    if str(item).strip()
+                ]
+                rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+                if not columns:
+                    continue
+                dataset_id = f"{dep_step_id}_{index}"
+                file_path = (
+                    f"/workspace/input/datasets/"
+                    f"{_slugify_filename_part(dataset_id, 'dataset')}.csv"
+                )
+                csv_content = self._serialize_table_to_csv(columns, rows)
+                input_files.append(
+                    {
+                        "path": file_path,
+                        "content": csv_content,
+                    }
+                )
+                dataset_items.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "source_step_id": dep_step_id,
+                        "source_tool": source_tool,
+                        "source_objective": source_objective,
+                        "format": "csv",
+                        "file_path": file_path,
+                        "columns": columns,
+                        "row_count": len(rows),
+                        "preview_rows": self._preview_rows(rows, limit=5),
+                        "chart_candidate": self._is_chart_candidate_table(columns, rows),
+                    }
+                )
+
+        return (
+            {
+                "task": task,
+                "context_text": raw_context,
+                "dependencies": dependency_items,
+                "datasets": dataset_items,
+            },
+            input_files,
+        )
+
+    @staticmethod
+    def _preview_rows(rows: List[Any], limit: int = 5) -> List[List[Any]]:
+        """提取用于元数据描述的预览行。"""
+        preview: List[List[Any]] = []
+        for row in rows[: max(0, limit)]:
+            if isinstance(row, (list, tuple)):
+                preview.append([_to_jsonable(item) for item in row])
+        return preview
+
+    @staticmethod
+    def _serialize_table_to_csv(columns: List[str], rows: List[Any]) -> str:
+        """将二维表序列化为 CSV 文本，供沙箱内直接读取。"""
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(columns)
+        for row in rows:
+            if isinstance(row, (list, tuple)):
+                writer.writerow(
+                    [
+                        json.dumps(item, ensure_ascii=False)
+                        if isinstance(item, (dict, list))
+                        else item
+                        for item in row
+                    ]
+                )
+        return buffer.getvalue()
+
+    @staticmethod
+    def _is_chart_candidate_table(columns: List[str], rows: List[Any]) -> bool:
+        """判断表格是否适合作为图表输入数据。"""
+        if len(columns) < 2:
+            return False
+        numeric_count = 0
+        for row in rows[:20]:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            if isinstance(row[1], (int, float)):
+                numeric_count += 1
+        return numeric_count > 0
+
+    @staticmethod
+    def _summarize_result_for_python(value: Any) -> Any:
+        """为 Python 输入保留轻量摘要，避免把整表再次塞进元数据。"""
+        if isinstance(value, dict):
+            columns = value.get("columns")
+            rows = value.get("rows")
+            if isinstance(columns, list) and isinstance(rows, list):
+                return {
+                    "columns": [str(item) for item in columns],
+                    "row_count": len(rows),
+                    "preview_rows": LangGraphOrchestrator._preview_rows(rows, limit=3),
+                }
+            return {
+                str(key): LangGraphOrchestrator._summarize_result_for_python(item)
+                for key, item in value.items()
+                if key != "rows"
+            }
+        if isinstance(value, list):
+            return [
+                LangGraphOrchestrator._summarize_result_for_python(item)
+                for item in value[:5]
+            ]
+        return _to_jsonable(value)
+
+    @staticmethod
+    def _summarize_sql_metric_semantics(sql: str) -> str:
+        """为常见聚合 SQL 生成统计口径说明，帮助最终回答避免口径漂移。"""
+        normalized_sql = " ".join(str(sql or "").lower().split())
+        if not normalized_sql:
+            return ""
+        if re.search(r"\bsum\s*\(\s*cardinality\s*\(\s*.*?v4prefixes", normalized_sql):
+            return "该结果统计的是 IPv4 前缀宣告总量，不是 AS 个数。"
+        if re.search(r"\bsum\s*\(\s*cardinality\s*\(\s*.*?v6prefixes", normalized_sql):
+            return "该结果统计的是 IPv6 前缀宣告总量，不是 AS 个数。"
+        if re.search(r"\bcardinality\s*\(\s*.*?v4prefixes", normalized_sql):
+            return "该结果按每个 AS 的 IPv4 前缀宣告规模统计。"
+        if re.search(r"\bcardinality\s*\(\s*.*?v6prefixes", normalized_sql):
+            return "该结果按每个 AS 的 IPv6 前缀宣告规模统计。"
+        return ""
 
     @staticmethod
     def _build_step_signature(

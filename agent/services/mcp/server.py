@@ -225,6 +225,8 @@ def create_mcp_server(
     def python_sandbox_execute(
         task: str,
         context: str = "",
+        input_data: Optional[Dict[str, Any]] = None,
+        input_files: Optional[List[Dict[str, Any]]] = None,
         packages: Optional[List[str]] = None,
         timeout_seconds: int = 180,
         thread_id: str = "",
@@ -245,6 +247,8 @@ def create_mcp_server(
             return runtime.python_sandbox_tool.execute(
                 task,
                 context=context,
+                input_data=input_data or {},
+                input_files=input_files or [],
                 packages=packages or [],
                 timeout_seconds=timeout_seconds,
                 trace_id=trace_id,

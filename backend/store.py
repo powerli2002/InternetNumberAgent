@@ -388,6 +388,25 @@ class BackendStore:
                 params,
             )
 
+    def delete_thread(self, owner_user_id: str, thread_id: str) -> None:
+        """删除线程及其所有关联数据（消息、事件、产物记录）。"""
+        with self.engine.begin() as conn:
+            # 先验证归属权
+            row = conn.execute(
+                self.text(
+                    "SELECT thread_id FROM agent_threads WHERE thread_id = :thread_id AND owner_user_id = :owner_user_id"
+                ),
+                {"thread_id": thread_id, "owner_user_id": owner_user_id},
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="会话不存在或无权限")
+            # 删除子表数据（无外键约束时需手动清理）
+            conn.execute(self.text("DELETE FROM thread_messages WHERE thread_id = :thread_id"), {"thread_id": thread_id})
+            conn.execute(self.text("DELETE FROM thread_run_events WHERE thread_id = :thread_id"), {"thread_id": thread_id})
+            conn.execute(self.text("DELETE FROM thread_artifacts WHERE thread_id = :thread_id"), {"thread_id": thread_id})
+            conn.execute(self.text("DELETE FROM sandbox_runs WHERE thread_id = :thread_id"), {"thread_id": thread_id})
+            conn.execute(self.text("DELETE FROM agent_threads WHERE thread_id = :thread_id"), {"thread_id": thread_id})
+
     def save_message(
         self,
         *,
@@ -629,6 +648,29 @@ class BackendStore:
                     "size_bytes": size_bytes,
                     "sha256": sha256,
                     "metadata_json": json.dumps(metadata or {}),
+                },
+            )
+        return self.get_artifact(artifact_id)
+
+    def merge_artifact_metadata(self, artifact_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """合并更新 artifact 元数据。"""
+        current = self.get_artifact(artifact_id)
+        merged: Dict[str, Any] = {}
+        if isinstance(current.get("metadata_json"), dict):
+            merged.update(current["metadata_json"])
+        merged.update(metadata or {})
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.text(
+                    """
+                    UPDATE thread_artifacts
+                    SET metadata_json = CAST(:metadata_json AS jsonb)
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "id": artifact_id,
+                    "metadata_json": json.dumps(merged),
                 },
             )
         return self.get_artifact(artifact_id)

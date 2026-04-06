@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -64,6 +65,8 @@ class SandboxExecuteRequest(BaseModel):
 
     task: str = ""
     context: str = ""
+    input_data: Dict[str, Any] = Field(default_factory=dict)
+    input_files: List[Dict[str, Any]] = Field(default_factory=list)
     packages: List[str] = Field(default_factory=list)
     timeout_seconds: int = 180
     code: str
@@ -238,6 +241,13 @@ def get_thread(thread_id: str, user: Dict[str, Any] = Depends(get_current_user))
     return {"thread": store.get_thread(owner_user_id=user["id"], thread_id=thread_id)}
 
 
+@app.delete("/api/threads/{thread_id}")
+def delete_thread(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """删除线程及其所有关联数据。"""
+    store.delete_thread(owner_user_id=user["id"], thread_id=thread_id)
+    return {"status": "ok"}
+
+
 @app.get("/api/threads/{thread_id}/messages")
 def list_thread_messages(thread_id: str, user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     """读取线程消息。"""
@@ -267,7 +277,8 @@ def chat_stream(thread_id: str, payload: ChatRequest, user: Dict[str, Any] = Dep
     message_text = payload.message.strip()
     if not message_text:
         raise HTTPException(status_code=400, detail="消息不能为空")
-    if not str(thread.get("title") or "").strip():
+    _current_title = str(thread.get("title") or "").strip()
+    if not _current_title or _current_title in ("新会话", "新建会话"):
         store.update_thread(user["id"], thread_id, title=message_text[:32])
     user_message = store.save_message(
         thread_id=thread_id,
@@ -312,6 +323,11 @@ def chat_stream(thread_id: str, payload: ChatRequest, user: Dict[str, Any] = Dep
                 )
                 continue
             if event_payload.get("event") == "process":
+                process_payload = (
+                    event_payload.get("payload")
+                    if isinstance(event_payload.get("payload"), dict)
+                    else {}
+                )
                 mapped = store.save_run_event(
                     thread_id=thread_id,
                     run_id=run_id,
@@ -320,11 +336,11 @@ def chat_stream(thread_id: str, payload: ChatRequest, user: Dict[str, Any] = Dep
                     title=str(event_payload.get("title") or ""),
                     summary=str(event_payload.get("summary") or ""),
                     status=str(event_payload.get("status") or "info"),
-                    payload=event_payload.get("payload")
-                    if isinstance(event_payload.get("payload"), dict)
-                    else {},
+                    payload=process_payload,
                     message_id=user_message["id"],
                 )
+                if str(event_payload.get("event_type") or "") == "tool_call_completed":
+                    _bind_run_id_to_event_artifacts(run_id, process_payload)
                 event_index += 1
                 yield _sse("process", mapped)
         answer_text = "".join(answer_parts).strip()
@@ -364,6 +380,7 @@ def _store_artifact_file(
     sandbox_run_id: str,
     thread_id: Optional[str],
     artifact: Dict[str, Any],
+    run_id: str = "",
 ) -> Dict[str, Any]:
     """将 OpenSandbox 产物写到本地磁盘并返回元数据。"""
     decoded = artifact.get("content_bytes") or b""
@@ -382,8 +399,100 @@ def _store_artifact_file(
         "storage_path": str(file_path),
         "size_bytes": len(decoded),
         "sha256": hashlib.sha256(decoded).hexdigest(),
-        "metadata": {"sandbox_path": str(artifact.get("path") or "")},
+        "metadata": {
+            "sandbox_path": str(artifact.get("path") or ""),
+            "run_id": str(run_id or ""),
+        },
     }
+
+
+def _bind_run_id_to_event_artifacts(run_id: str, payload: Dict[str, Any]) -> None:
+    """把过程事件中的 artifact 绑定到当前 run_id。"""
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_id = str(artifact.get("id") or "").strip()
+        if not artifact_id:
+            continue
+        try:
+            store.merge_artifact_metadata(artifact_id, {"run_id": run_id})
+        except HTTPException:
+            continue
+
+
+def _build_semantic_artifact_title(
+    *,
+    task: str,
+    input_data: Dict[str, Any],
+    original_title: str,
+) -> str:
+    """为通用图表产物推断更合适的标题与下载文件名。"""
+    raw_title = str(original_title or "").strip() or "artifact"
+    generic_names = {
+        "chart",
+        "figure",
+        "plot",
+        "output_chart",
+        "output",
+        "image",
+        "artifact",
+    }
+    stem = Path(raw_title).stem.lower()
+    if stem not in generic_names:
+        return raw_title
+
+    datasets = input_data.get("datasets") if isinstance(input_data, dict) else []
+    source_title = ""
+    if isinstance(datasets, list):
+        for dataset in datasets:
+            if not isinstance(dataset, dict):
+                continue
+            if dataset.get("chart_candidate"):
+                source_title = str(dataset.get("source_objective") or "").strip()
+                if source_title:
+                    break
+    if not source_title:
+        source_title = str(task or "").strip()
+
+    for token in (
+        "（分组结果用于绘图）",
+        "生成柱状图展示统计结果",
+        "生成折线图展示统计结果",
+        "生成饼图展示统计结果",
+        "读取上一步的统计结果，",
+        "读取上一步统计结果，",
+        "绘制柱状图展示",
+        "绘制折线图展示",
+        "绘制饼图展示",
+        "保存为 PNG 文件",
+        "保存为 SVG 文件",
+        "保存为图片",
+    ):
+        source_title = source_title.replace(token, "")
+    source_title = source_title.replace("，", ",")
+    source_title = re.sub(
+        r"(,|\s)*(请)?(画|绘制|生成)(一个)?(柱状图|折线图|饼图|散点图|图表|可视化)(展示)?(统计结果)?",
+        "",
+        source_title,
+        flags=re.IGNORECASE,
+    )
+    source_title = re.sub(r"\bas\b", "AS", source_title, flags=re.IGNORECASE)
+    source_title = re.sub(r"\bipv4\b", "IPv4", source_title, flags=re.IGNORECASE)
+    source_title = re.sub(r"\bipv6\b", "IPv6", source_title, flags=re.IGNORECASE)
+    source_title = re.sub(r"\s+", " ", source_title).strip(" ，,。")
+    if not source_title:
+        source_title = "统计图表"
+
+    safe_stem = re.sub(r'[\\/:*?"<>|]+', "_", source_title).strip(" ._")
+    if not safe_stem:
+        safe_stem = "统计图表"
+    # 标题不超过 50 个字符，避免 prompt 全文作为文件名
+    if len(safe_stem) > 50:
+        safe_stem = safe_stem[:50].rstrip(" ._")
+    suffix = Path(raw_title).suffix or ".bin"
+    return f"{safe_stem}{suffix}"
 
 
 @app.post("/api/threads/{thread_id}/sandbox/python")
@@ -434,6 +543,8 @@ def _run_python_execution(
     )
     result = sandbox_provider.execute_python(
         code=payload.code,
+        input_data=payload.input_data,
+        input_files=payload.input_files,
         packages=payload.packages,
         timeout_seconds=payload.timeout_seconds,
     )
@@ -453,13 +564,19 @@ def _run_python_execution(
             sandbox_run_id=sandbox_run_id,
             thread_id=thread_id,
             artifact=artifact,
+            run_id=payload.run_id,
+        )
+        stored_title = _build_semantic_artifact_title(
+            task=payload.task,
+            input_data=payload.input_data,
+            original_title=stored["title"],
         )
         persisted_artifacts.append(
             store.create_artifact(
                 thread_id=thread_id,
                 message_id=message_id,
                 sandbox_run_id=sandbox_run_id,
-                title=stored["title"],
+                title=stored_title,
                 artifact_type=stored["artifact_type"],
                 mime_type=stored["mime_type"],
                 storage_path=stored["storage_path"],
@@ -500,5 +617,5 @@ def artifact_content(artifact_id: str, user: Dict[str, Any] = Depends(get_curren
     return FileResponse(
         path=str(artifact["storage_path"]),
         media_type=str(artifact["mime_type"] or "application/octet-stream"),
-        filename=Path(str(artifact["storage_path"])).name,
+        filename=str(artifact.get("title") or Path(str(artifact["storage_path"])).name),
     )

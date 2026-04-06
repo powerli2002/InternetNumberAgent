@@ -41,6 +41,11 @@ flowchart LR
 - `agent/services/http/server.py`：保留 Agent 调试/兼容 API。
 - `backend/main.py`：正式产品 API。
 
+当前 Python 沙箱的数据进入方式采用“元数据与真实数据分离”：
+- 回答生成只消费结构化摘要与少量预览行，避免大表直接进入最终回答上下文。
+- 若规划包含绘图或文件生成，Agent 会把真实表格结果序列化为 CSV，经后端写入沙箱内部文件系统，再由 Python 代码在沙箱内读取。
+- Python 沙箱的具体数据契约、执行流程、artifact 回收与命名规则见 `python-sandbox.md`。
+
 ## 当前目录职责
 - `agent/core/`：配置、提示词、模型、追踪、Schema。
 - `agent/runtime/`：主编排、状态模型、上下文构建。
@@ -66,5 +71,6 @@ flowchart LR
 
 ## 继续阅读
 - 查询链路：`query-pipelines.md`
+- Python 沙箱：`python-sandbox.md`
 - Text2SQL：`text2sql.md`
 - 数据模型：`../03-data/core-schema.md`

@@ -1,6 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+
+import { MarkdownContent } from "./components/markdown-content";
 
 type User = {
   id: string;
@@ -24,6 +26,7 @@ type MessageItem = {
   role: string;
   content_json: { text?: string };
   metadata_json?: MessageMetadata;
+  created_at?: string;
 };
 
 type RawMessageItem = {
@@ -33,6 +36,7 @@ type RawMessageItem = {
   content?: { text?: string };
   metadata_json?: MessageMetadata;
   metadata?: MessageMetadata;
+  created_at?: string;
 };
 
 type RawRunEvent = {
@@ -69,12 +73,38 @@ type ArtifactItem = {
   title: string;
   mime_type: string;
   artifact_type?: string;
+  message_id?: string | null;
+  sandbox_run_id?: string | null;
+  metadata_json?: Record<string, unknown>;
+  created_at?: string;
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:2026";
+type ArtifactGroup = {
+  runId: string;
+  title: string;
+  artifacts: ArtifactItem[];
+};
+
+type MarkdownArtifact = {
+  id: string;
+  title: string;
+  mime_type: string;
+  contentUrl: string;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getApiBase(): string {
+  const configured = process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (configured && configured.trim()) {
+    return configured.trim().replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:2026`;
+  }
+  return "http://127.0.0.1:2026";
 }
 
 function getErrorMessage(error: unknown): string {
@@ -96,7 +126,8 @@ function normalizeMessage(raw: RawMessageItem): MessageItem {
     content_json: {
       text: typeof contentSource.text === "string" ? contentSource.text : ""
     },
-    metadata_json: metadataSource
+    metadata_json: metadataSource,
+    created_at: typeof raw.created_at === "string" ? raw.created_at : undefined
   };
 }
 
@@ -121,23 +152,54 @@ function getRunKey(threadId: string, runId: string): string {
   return `${threadId}:${runId}`;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  if (Number.isNaN(value)) return min;
+  return Math.min(Math.max(value, min), max);
+}
+
 function isImageArtifact(artifact: ArtifactItem): boolean {
   if (artifact.mime_type.startsWith("image/")) return true;
   return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(artifact.title);
 }
 
-function inferImageMimeType(artifact: ArtifactItem): string {
-  if (artifact.mime_type.startsWith("image/")) {
-    return artifact.mime_type;
+function getArtifactRunId(artifact: ArtifactItem): string {
+  const metadata = isRecord(artifact.metadata_json) ? artifact.metadata_json : {};
+  return typeof metadata.run_id === "string" ? metadata.run_id : "";
+}
+
+function getArtifactContentPath(artifactId: string): string {
+  return `/api/artifacts/${artifactId}/content`;
+}
+
+function buildArtifactReference(artifact: ArtifactItem): string {
+  return `![${artifact.title}](artifact://${artifact.id})`;
+}
+
+function messageHasArtifactReference(content: string, artifacts: ArtifactItem[]): boolean {
+  const text = String(content || "");
+  return artifacts.some((artifact) => text.includes(`artifact://${artifact.id}`));
+}
+
+function buildMessageMarkdown(content: string, imageArtifacts: ArtifactItem[]): string {
+  const normalized = String(content || "").replace(
+    /`(!\[[^`]+?\]\(artifact:\/\/[A-Za-z0-9-]+\))`/g,
+    "$1"
+  );
+  const trimmed = normalized.trim();
+  if (imageArtifacts.length === 0 || messageHasArtifactReference(trimmed, imageArtifacts)) {
+    return trimmed;
   }
-  const title = artifact.title.toLowerCase();
-  if (title.endsWith(".png")) return "image/png";
-  if (title.endsWith(".jpg") || title.endsWith(".jpeg")) return "image/jpeg";
-  if (title.endsWith(".gif")) return "image/gif";
-  if (title.endsWith(".webp")) return "image/webp";
-  if (title.endsWith(".bmp")) return "image/bmp";
-  if (title.endsWith(".svg")) return "image/svg+xml";
-  return "image/png";
+  const artifactLines = imageArtifacts.map(buildArtifactReference).join("\n\n");
+  if (!trimmed) {
+    return artifactLines;
+  }
+  return `${trimmed}\n\n### 图表\n${artifactLines}`;
+}
+
+function getArtifactTitlePreview(message: MessageItem | null): string {
+  const text = message?.content_json?.text?.replace(/\s+/g, " ").trim() || "";
+  if (!text) return "本轮产物";
+  return text.length > 24 ? `${text.slice(0, 24)}...` : text;
 }
 
 function formatRole(role: string): string {
@@ -153,8 +215,21 @@ function formatRunStatus(status: string): string {
   return "已记录";
 }
 
+function shouldRefreshArtifactsFromProcessEvent(raw: Record<string, unknown>): boolean {
+  const eventType = typeof raw.event_type === "string" ? raw.event_type : "";
+  if (eventType !== "tool_call_completed") return false;
+  const payload = isRecord(raw.payload)
+    ? raw.payload
+    : isRecord(raw.payload_json)
+      ? raw.payload_json
+      : {};
+  if (payload.tool !== "python" || payload.status !== "ok") return false;
+  const result = isRecord(payload.result) ? payload.result : {};
+  return Array.isArray(result.artifacts) && result.artifacts.length > 0;
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(`${getApiBase()}${path}`, {
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
@@ -193,6 +268,12 @@ export default function HomePage() {
   const [sendError, setSendError] = useState("");
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(280);
+  const [rightPanelWidth, setRightPanelWidth] = useState(380);
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  const [draggingPane, setDraggingPane] = useState<"left" | "right" | null>(null);
+  const [lightboxArtifactId, setLightboxArtifactId] = useState<string>("");
 
   const selectedThreadIdRef = useRef(selectedThreadId);
   const artifactIdRef = useRef(artifactId);
@@ -200,6 +281,7 @@ export default function HomePage() {
   const messagesRequestIdRef = useRef(0);
   const artifactsRequestIdRef = useRef(0);
   const artifactObjectUrlRef = useRef("");
+  const shellRef = useRef<HTMLElement | null>(null);
 
   const selectedThread = useMemo(
     () => threads.find((item) => item.thread_id === selectedThreadId) || null,
@@ -209,6 +291,67 @@ export default function HomePage() {
   const selectedArtifact = useMemo(
     () => artifacts.find((item) => item.id === artifactId) || null,
     [artifacts, artifactId]
+  );
+
+  const lightboxArtifact = useMemo(
+    () => artifacts.find((item) => item.id === lightboxArtifactId) || null,
+    [artifacts, lightboxArtifactId]
+  );
+
+  const assistantMessagesByRun = useMemo(() => {
+    const mapping: Record<string, MessageItem> = {};
+    for (const message of messages) {
+      const runId = message.metadata_json?.run_id;
+      if (message.role === "assistant" && typeof runId === "string" && runId) {
+        mapping[runId] = message;
+      }
+    }
+    return mapping;
+  }, [messages]);
+
+  const artifactGroups = useMemo(() => {
+    const groups = new Map<string, ArtifactGroup>();
+    for (const artifact of artifacts) {
+      const runId = getArtifactRunId(artifact) || "unassigned";
+      const existing = groups.get(runId);
+      if (existing) {
+        existing.artifacts.push(artifact);
+        continue;
+      }
+      const relatedMessage = runId === "unassigned" ? null : assistantMessagesByRun[runId] || null;
+      groups.set(runId, {
+        runId,
+        title: relatedMessage ? getArtifactTitlePreview(relatedMessage) : "其他产物",
+        artifacts: [artifact]
+      });
+    }
+    return Array.from(groups.values()).sort((left, right) => {
+      const leftTime = left.artifacts[0]?.created_at || "";
+      const rightTime = right.artifacts[0]?.created_at || "";
+      return rightTime.localeCompare(leftTime);
+    });
+  }, [artifacts, assistantMessagesByRun]);
+
+  const markdownArtifactMap = useMemo(() => {
+    const mapping: Record<string, MarkdownArtifact> = {};
+    for (const artifact of artifacts) {
+      mapping[artifact.id] = {
+        id: artifact.id,
+        title: artifact.title,
+        mime_type: artifact.mime_type,
+        contentUrl: getArtifactContentPath(artifact.id)
+      };
+    }
+    return mapping;
+  }, [artifacts]);
+
+  const shellStyle = useMemo(
+    () =>
+      ({
+        "--left-panel-width": `${leftPanelCollapsed ? 72 : leftPanelWidth}px`,
+        "--right-panel-width": `${rightPanelCollapsed ? 80 : rightPanelWidth}px`
+      }) as CSSProperties,
+    [leftPanelCollapsed, leftPanelWidth, rightPanelCollapsed, rightPanelWidth]
   );
 
   useEffect(() => {
@@ -228,6 +371,58 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    if (!draggingPane) return;
+
+    function handlePointerMove(event: MouseEvent) {
+      const shell = shellRef.current;
+      if (!shell) return;
+      const rect = shell.getBoundingClientRect();
+      const contentWidth = rect.width - 32;
+      const minChatWidth = 560;
+      const minSidebarWidth = 220;
+      const minArtifactWidth = 300;
+      if (draggingPane === "left") {
+        const maxWidth =
+          contentWidth - (rightPanelCollapsed ? 80 : rightPanelWidth) - minChatWidth - 24;
+        setLeftPanelWidth(clamp(event.clientX - rect.left - 16, minSidebarWidth, maxWidth));
+        return;
+      }
+      const maxWidth =
+        contentWidth - (leftPanelCollapsed ? 72 : leftPanelWidth) - minChatWidth - 24;
+      setRightPanelWidth(clamp(rect.right - event.clientX - 16, minArtifactWidth, maxWidth));
+    }
+
+    function handlePointerUp() {
+      setDraggingPane(null);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    }
+
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", handlePointerUp);
+    return () => {
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", handlePointerUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [draggingPane, leftPanelCollapsed, leftPanelWidth, rightPanelCollapsed, rightPanelWidth]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setLightboxArtifactId("");
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
     api<{ user: User }>("/api/auth/me")
       .then((payload) => setUser(payload.user))
       .catch(() => undefined);
@@ -242,6 +437,7 @@ export default function HomePage() {
     if (!selectedThreadId || !user) return;
     const keepLiveMessages = activeStreamThreadIdRef.current === selectedThreadId;
     setSendError("");
+    setLightboxArtifactId("");
     clearArtifactPreview();
     setArtifacts([]);
     if (!keepLiveMessages) {
@@ -528,6 +724,21 @@ export default function HomePage() {
     }
   }
 
+  async function handleDeleteThread(threadId: string) {
+    if (!window.confirm("确定要删除这个会话吗？此操作不可恢复。")) return;
+    await api(`/api/threads/${threadId}`, { method: "DELETE" });
+    setThreads((prev) => {
+      const next = prev.filter((t) => t.thread_id !== threadId);
+      if (selectedThreadId === threadId) {
+        setSelectedThreadId(next[0]?.thread_id || "");
+        setMessages([]);
+        setArtifacts([]);
+        clearArtifactPreview();
+      }
+      return next;
+    });
+  }
+
   async function handleNewThread() {
     if (streaming) return null;
     setSendError("");
@@ -574,7 +785,7 @@ export default function HomePage() {
       setStreaming(true);
       setMessages((prev) => [...prev, optimisticUserMessage]);
 
-      const response = await fetch(`${API_BASE}/api/threads/${activeThreadId}/chat/stream`, {
+      const response = await fetch(`${getApiBase()}/api/threads/${activeThreadId}/chat/stream`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -636,14 +847,14 @@ export default function HomePage() {
 
           if (eventType === "process") {
             if (!eventRunId) continue;
-            appendRunEvent(
-              activeThreadId,
-              eventRunId,
-              normalizeRunEvent({
-                ...(data as RawRunEvent),
-                run_id: eventRunId
-              })
-            );
+            const normalizedEvent = normalizeRunEvent({
+              ...(data as RawRunEvent),
+              run_id: eventRunId
+            });
+            appendRunEvent(activeThreadId, eventRunId, normalizedEvent);
+            if (shouldRefreshArtifactsFromProcessEvent(data)) {
+              await refreshArtifacts(activeThreadId);
+            }
             continue;
           }
 
@@ -685,38 +896,71 @@ export default function HomePage() {
     }
   }
 
+  function renderIcon(name: "plus" | "sidebar-left" | "sidebar-right" | "panel-left" | "panel-right" | "trash") {
+    if (name === "trash") {
+      return (
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <polyline points="4,6 16,6" />
+          <path d="M7 6V4h6v2" />
+          <rect x="5" y="7" width="10" height="9" rx="1.5" />
+        </svg>
+      );
+    }
+    if (name === "plus") {
+      return (
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M10 4v12M4 10h12" />
+        </svg>
+      );
+    }
+    if (name === "sidebar-left") {
+      return (
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="3" y="4" width="14" height="12" rx="2" />
+          <path d="M8 4v12M12 7l-3 3 3 3" />
+        </svg>
+      );
+    }
+    if (name === "sidebar-right") {
+      return (
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="3" y="4" width="14" height="12" rx="2" />
+          <path d="M12 4v12M8 7l3 3-3 3" />
+        </svg>
+      );
+    }
+    if (name === "panel-left") {
+      return (
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="3" y="4" width="14" height="12" rx="2" />
+          <path d="M8 4v12M12 7l-3 3 3 3" />
+        </svg>
+      );
+    }
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <rect x="3" y="4" width="14" height="12" rx="2" />
+        <path d="M12 4v12M8 7l3 3-3 3" />
+      </svg>
+    );
+  }
+
   async function openArtifact(id: string, artifactOverride?: ArtifactItem) {
     const artifact = artifactOverride || artifacts.find((item) => item.id === id);
     if (!artifact) {
       clearArtifactPreview();
       return;
     }
+    revokeArtifactObjectUrl();
     setArtifactId(id);
     setArtifactPreviewError("");
-    if (!isImageArtifact(artifact)) {
-      revokeArtifactObjectUrl();
-      setArtifactContentUrl(`${API_BASE}/api/artifacts/${id}/content`);
-      return;
-    }
-    try {
-      const response = await fetch(`${API_BASE}/api/artifacts/${id}/content`, {
-        credentials: "include"
-      });
-      if (!response.ok) {
-        throw new Error((await response.text()) || "产物预览加载失败");
-      }
-      const blob = await response.blob();
-      const previewBlob = blob.type.startsWith("image/")
-        ? blob
-        : new Blob([blob], { type: inferImageMimeType(artifact) });
-      revokeArtifactObjectUrl();
-      const objectUrl = URL.createObjectURL(previewBlob);
-      artifactObjectUrlRef.current = objectUrl;
-      setArtifactContentUrl(objectUrl);
-    } catch (error) {
-      revokeArtifactObjectUrl();
-      setArtifactContentUrl("");
-      setArtifactPreviewError(getErrorMessage(error));
+    setArtifactContentUrl(getArtifactContentPath(id));
+  }
+
+  async function focusArtifact(id: string, artifactOverride?: ArtifactItem, openLightbox = false) {
+    await openArtifact(id, artifactOverride);
+    if (openLightbox) {
+      setLightboxArtifactId(id);
     }
   }
 
@@ -785,254 +1029,461 @@ export default function HomePage() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar panel">
-        <div className="panel-header">
-          <div>
-            <div className="muted">已登录</div>
-            <strong>{user.display_name}</strong>
-          </div>
-          <button
-            className="ghost-button"
-            disabled={streaming}
-            onClick={() => {
-              void handleNewThread().catch((error) => setSendError(getErrorMessage(error)));
-            }}
-          >
-            新建
-          </button>
-        </div>
-        <div className="thread-list spaced-list">
-          {threads.map((thread) => (
-            <button
-              key={thread.thread_id}
-              type="button"
-              disabled={streaming}
-              className={`thread-item ${
-                thread.thread_id === selectedThreadId ? "active" : ""
-              }`}
-              onClick={() => setSelectedThreadId(thread.thread_id)}
-            >
-              <div>{thread.title || "未命名会话"}</div>
-              <div className="thread-time muted">
-                {new Date(thread.updated_at).toLocaleString()}
-              </div>
-            </button>
-          ))}
-        </div>
-      </aside>
-
-      <section className="chat-panel panel">
-        <header className="chat-header">
-          <div>
-            <div className="muted">产品聊天</div>
-            <strong>{selectedThread?.title || "新会话"}</strong>
-          </div>
-          <div className="toolbar">
-            <span className="status-badge">
-              {streaming ? "Agent 正在思考" : messagesLoading ? "正在同步会话" : "准备就绪"}
-            </span>
-          </div>
-        </header>
-
-        <div className="messages">
-          {!selectedThreadId && threads.length === 0 ? (
-            <section className="empty-state">
-              <strong>还没有会话</strong>
-              <p className="muted">发送第一条消息后会自动创建新会话。</p>
-            </section>
-          ) : null}
-
-          {messagesLoading && messages.length === 0 ? (
-            <section className="empty-state">
-              <p className="muted">正在加载消息...</p>
-            </section>
-          ) : null}
-
-          {!messagesLoading && selectedThreadId && messages.length === 0 ? (
-            <section className="empty-state">
-              <strong>开始对话</strong>
-              <p className="muted">提问后，Agent 会把关键过程折叠进对应回答里。</p>
-            </section>
-          ) : null}
-
-          {messages.map((message) => {
-            const runId = message.metadata_json?.run_id || "";
-            const runKey = runId ? getRunKey(selectedThreadId, runId) : "";
-            const bucket = runId ? runEventBuckets[runKey] : undefined;
-            const thinkingOpen = runId
-              ? (expandedThinking[runKey] ?? bucket?.active ?? false)
-              : false;
-            const visibleEvents = bucket?.events || [];
-            const stepCount =
-              visibleEvents.filter(
-                (item) =>
-                  item.event_type !== "run_started" &&
-                  item.event_type !== "message_completed"
-              ).length || visibleEvents.length;
-
-            return (
-              <article
-                key={message.id}
-                className={`message-card ${message.role === "user" ? "user" : "assistant"}`}
+    <>
+      <main className="app-shell" style={shellStyle} ref={shellRef}>
+        <aside
+          className={`sidebar panel side-panel ${leftPanelCollapsed ? "collapsed" : ""}`}
+        >
+          <div className="panel-header side-panel-header">
+            <div className="side-panel-title">
+              <div className="muted">已登录</div>
+              {!leftPanelCollapsed ? <strong>{user.display_name}</strong> : null}
+            </div>
+            <div className="side-panel-actions">
+              {!leftPanelCollapsed ? (
+                <button
+                  type="button"
+                  className="ghost-button icon-button"
+                  disabled={streaming}
+                  aria-label="新建会话"
+                  title="新建会话"
+                  onClick={() => {
+                    void handleNewThread().catch((error) => setSendError(getErrorMessage(error)));
+                  }}
+                >
+                  {renderIcon("plus")}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="ghost-button icon-button"
+                aria-label={leftPanelCollapsed ? "展开左侧栏" : "收起左侧栏"}
+                title={leftPanelCollapsed ? "展开左侧栏" : "收起左侧栏"}
+                onClick={() => setLeftPanelCollapsed((current) => !current)}
               >
-                <div className="message-meta">{formatRole(message.role)}</div>
-
-                {message.role === "assistant" && runId ? (
-                  <details
-                    className={`thinking-block ${bucket?.active ? "active" : ""}`}
-                    open={thinkingOpen}
-                    onToggle={(event) => {
-                      const open = event.currentTarget.open;
-                      setExpandedThinking((prev) => ({ ...prev, [runKey]: open }));
-                      if (open) {
-                        void ensureRunEventsLoaded(selectedThreadId, runId);
-                      }
+                {renderIcon(leftPanelCollapsed ? "sidebar-right" : "sidebar-left")}
+              </button>
+            </div>
+          </div>
+          {!leftPanelCollapsed ? (
+            <div className="thread-list spaced-list">
+              {threads.map((thread) => (
+                <div
+                  key={thread.thread_id}
+                  className={`thread-item-wrap ${
+                    thread.thread_id === selectedThreadId ? "active" : ""
+                  }`}
+                >
+                  <button
+                    type="button"
+                    disabled={streaming}
+                    className="thread-item-body"
+                    onClick={() => setSelectedThreadId(thread.thread_id)}
+                  >
+                    <div>{thread.title || "未命名会话"}</div>
+                    <div className="thread-time muted">
+                      {new Date(thread.updated_at).toLocaleString()}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={streaming}
+                    className="ghost-button icon-button thread-delete-btn"
+                    aria-label="删除会话"
+                    title="删除会话"
+                    onClick={() => {
+                      void handleDeleteThread(thread.thread_id).catch((error) =>
+                        setSendError(getErrorMessage(error))
+                      );
                     }}
                   >
-                    <summary>
-                      <span>思考过程</span>
-                      <span className="thinking-summary">
-                        {bucket?.loading
-                          ? "加载中..."
-                          : bucket?.active
-                            ? "进行中"
-                            : bucket?.error
-                              ? "加载失败"
-                              : stepCount > 0
-                                ? `${stepCount} 条记录`
-                                : "查看详情"}
-                      </span>
-                    </summary>
+                    {renderIcon("trash")}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="collapsed-panel-body">
+              <span className="collapsed-count">{threads.length}</span>
+              <span className="muted collapsed-label">会话</span>
+            </div>
+          )}
+        </aside>
 
-                    <div className="thinking-content">
-                      {bucket?.loading ? (
-                        <div className="muted">正在加载过程事件...</div>
-                      ) : bucket?.error ? (
-                        <div className="thinking-feedback">
-                          <span className="inline-feedback error">{bucket.error}</span>
-                          <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => {
-                              void ensureRunEventsLoaded(selectedThreadId, runId);
-                            }}
-                          >
-                            重试
-                          </button>
-                        </div>
-                      ) : visibleEvents.length > 0 ? (
-                        <div className="thinking-steps">
-                          {visibleEvents.map((runEvent, index) => (
-                            <article
-                              key={runEvent.id || `${runEvent.event_type}-${index}`}
-                              className="thinking-step"
-                            >
-                              <div className="thinking-step-head">
-                                <strong>{runEvent.title || "过程事件"}</strong>
-                                <span className="thinking-status">
-                                  {formatRunStatus(runEvent.status)}
-                                </span>
-                              </div>
-                              <div className="thinking-step-type">{runEvent.event_type}</div>
-                              {runEvent.summary ? <p>{runEvent.summary}</p> : null}
-                            </article>
-                          ))}
-                        </div>
+        {!leftPanelCollapsed ? (
+          <div
+            className="pane-resizer"
+            onMouseDown={() => setDraggingPane("left")}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整左侧栏宽度"
+          />
+        ) : null}
+
+        <section className="chat-panel panel">
+          <header className="chat-header">
+            <div>
+              <div className="muted">产品聊天</div>
+              <strong>{selectedThread?.title || "新会话"}</strong>
+            </div>
+            <div className="toolbar">
+              <span className="status-badge">
+                {streaming ? "Agent 正在思考" : messagesLoading ? "正在同步会话" : "准备就绪"}
+              </span>
+            </div>
+          </header>
+
+          <div className="messages">
+            {!selectedThreadId && threads.length === 0 ? (
+              <section className="empty-state">
+                <strong>还没有会话</strong>
+                <p className="muted">发送第一条消息后会自动创建新会话。</p>
+              </section>
+            ) : null}
+
+            {messagesLoading && messages.length === 0 ? (
+              <section className="empty-state">
+                <p className="muted">正在加载消息...</p>
+              </section>
+            ) : null}
+
+            {!messagesLoading && selectedThreadId && messages.length === 0 ? (
+              <section className="empty-state">
+                <strong>开始对话</strong>
+                <p className="muted">提问后，Agent 会把关键过程折叠进对应回答里。</p>
+              </section>
+            ) : null}
+
+            {messages.map((message) => {
+              const runId = message.metadata_json?.run_id || "";
+              const runKey = runId ? getRunKey(selectedThreadId, runId) : "";
+              const bucket = runId ? runEventBuckets[runKey] : undefined;
+              const runArtifacts = runId
+                ? artifacts.filter((artifact) => getArtifactRunId(artifact) === runId)
+                : [];
+              const imageArtifacts = runArtifacts.filter((artifact) => isImageArtifact(artifact));
+              const fileArtifacts = runArtifacts.filter((artifact) => !isImageArtifact(artifact));
+              const displayMarkdown =
+                message.role === "assistant"
+                  ? buildMessageMarkdown(message.content_json?.text || "", imageArtifacts)
+                  : "";
+              // 只要 markdown 中含有任意 artifact:// 引用，就不再单独渲染 inline-artifact-section
+              const hasEmbeddedArtifacts = /artifact:\/\/[A-Za-z0-9-]+/.test(displayMarkdown);
+              const thinkingOpen = runId
+                ? (expandedThinking[runKey] ?? bucket?.active ?? false)
+                : false;
+              const visibleEvents = bucket?.events || [];
+              const stepCount =
+                visibleEvents.filter(
+                  (item) =>
+                    item.event_type !== "run_started" &&
+                    item.event_type !== "message_completed"
+                ).length || visibleEvents.length;
+
+              return (
+                <article
+                  key={message.id}
+                  className={`message-card ${message.role === "user" ? "user" : "assistant"}`}
+                >
+                  <div className="message-meta">{formatRole(message.role)}</div>
+
+                  {message.role === "assistant" ? (
+                    <div className="assistant-response">
+                      {displayMarkdown ? (
+                        <MarkdownContent
+                          content={displayMarkdown}
+                          artifacts={Object.values(markdownArtifactMap)}
+                          onArtifactClick={(artifactId) => {
+                            const artifact = artifacts.find((item) => item.id === artifactId);
+                            if (!artifact) return;
+                            void focusArtifact(artifactId, artifact, true);
+                          }}
+                        />
                       ) : (
-                        <div className="muted">暂无过程事件。</div>
+                        <div className="message-body plain-text-body assistant-placeholder">
+                          <span className="thinking-dots" aria-label="正在生成回答">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                        </div>
                       )}
+
+                      {imageArtifacts.length > 0 && !hasEmbeddedArtifacts ? (
+                        <section className="inline-artifact-section">
+                          <div className="inline-artifact-title muted">本轮生成图片</div>
+                          <div className="inline-artifact-grid">
+                            {imageArtifacts.map((artifact) => (
+                              <button
+                                key={artifact.id}
+                                type="button"
+                                className="inline-artifact-card"
+                                onClick={() => {
+                                  void focusArtifact(artifact.id, artifact, true);
+                                }}
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={getArtifactContentPath(artifact.id)}
+                                  alt={artifact.title}
+                                  className="inline-artifact-image"
+                                />
+                                <span>{artifact.title}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                      ) : null}
+
+                      {fileArtifacts.length > 0 ? (
+                        <section className="inline-artifact-section">
+                          <div className="inline-artifact-title muted">本轮附件</div>
+                          <div className="inline-file-list">
+                            {fileArtifacts.map((artifact) => (
+                              <a
+                                key={artifact.id}
+                                href={getArtifactContentPath(artifact.id)}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-file-link"
+                              >
+                                {artifact.title}
+                              </a>
+                            ))}
+                          </div>
+                        </section>
+                      ) : null}
+
+                      {runId ? (
+                        <details
+                          className={`thinking-block ${bucket?.active ? "active" : ""}`}
+                          open={thinkingOpen}
+                          onToggle={(event) => {
+                            const open = event.currentTarget.open;
+                            setExpandedThinking((prev) => ({ ...prev, [runKey]: open }));
+                            if (open) {
+                              void ensureRunEventsLoaded(selectedThreadId, runId);
+                            }
+                          }}
+                        >
+                          <summary>
+                            <span>思考过程</span>
+                            <span className="thinking-summary">
+                              {bucket?.loading
+                                ? "加载中..."
+                                : bucket?.active
+                                  ? "进行中"
+                                  : bucket?.error
+                                    ? "加载失败"
+                                    : stepCount > 0
+                                      ? `${stepCount} 条记录`
+                                      : "查看详情"}
+                            </span>
+                          </summary>
+
+                          <div className="thinking-content">
+                            {bucket?.loading ? (
+                              <div className="muted">正在加载过程事件...</div>
+                            ) : bucket?.error ? (
+                              <div className="thinking-feedback">
+                                <span className="inline-feedback error">{bucket.error}</span>
+                                <button
+                                  type="button"
+                                  className="ghost-button"
+                                  onClick={() => {
+                                    void ensureRunEventsLoaded(selectedThreadId, runId);
+                                  }}
+                                >
+                                  重试
+                                </button>
+                              </div>
+                            ) : visibleEvents.length > 0 ? (
+                              <div className="thinking-steps">
+                                {visibleEvents.map((runEvent, index) => (
+                                  <article
+                                    key={runEvent.id || `${runEvent.event_type}-${index}`}
+                                    className="thinking-step"
+                                  >
+                                    <div className="thinking-step-head">
+                                      <strong>{runEvent.title || "过程事件"}</strong>
+                                      <span className="thinking-status">
+                                        {formatRunStatus(runEvent.status)}
+                                      </span>
+                                    </div>
+                                    <div className="thinking-step-type">{runEvent.event_type}</div>
+                                    {runEvent.summary ? <p>{runEvent.summary}</p> : null}
+                                  </article>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="muted">暂无过程事件。</div>
+                            )}
+                          </div>
+                        </details>
+                      ) : null}
                     </div>
-                  </details>
-                ) : null}
-
-                {message.content_json?.text ? (
-                  <div className="message-body">{message.content_json.text}</div>
-                ) : message.role === "assistant" ? (
-                  <div className="message-body assistant-placeholder">正在生成回答...</div>
-                ) : null}
-              </article>
-            );
-          })}
-        </div>
-
-        <footer className="composer">
-          <form onSubmit={handleSendMessage}>
-            {sendError ? <div className="inline-feedback error">{sendError}</div> : null}
-            <textarea
-              rows={4}
-              disabled={streaming}
-              placeholder="输入你的问题，让 Agent 规划步骤、调用工具、必要时编写 Python。"
-              value={input}
-              onChange={(event) => {
-                setInput(event.target.value);
-                if (sendError) setSendError("");
-              }}
-            />
-            <button type="submit" disabled={streaming || !input.trim()}>
-              {streaming ? "处理中..." : "发送"}
-            </button>
-          </form>
-        </footer>
-      </section>
-
-      <aside className="artifact-panel panel">
-        <div className="panel-header">
-          <div>
-            <div className="muted">Artifacts</div>
-            <strong>{selectedArtifact?.title || "暂无预览"}</strong>
+                  ) : message.content_json?.text ? (
+                    <div className="message-body plain-text-body">{message.content_json.text}</div>
+                  ) : null}
+                </article>
+              );
+            })}
           </div>
-        </div>
 
-        <div className="artifact-list spaced-list">
-          {artifactsLoading && artifacts.length === 0 ? (
-            <div className="empty-state compact">
-              <p className="muted">正在加载产物...</p>
-            </div>
-          ) : null}
-
-          {!artifactsLoading && artifacts.length === 0 ? (
-            <div className="empty-state compact">
-              <p className="muted">当前会话还没有可预览的产物。</p>
-            </div>
-          ) : null}
-
-          {artifacts.map((artifact) => (
-            <button
-              key={artifact.id}
-              type="button"
-              className="artifact-card"
-              onClick={() => {
-                void openArtifact(artifact.id);
-              }}
-            >
-              <div>{artifact.title}</div>
-              <div className="thread-time muted">{artifact.mime_type}</div>
-            </button>
-          ))}
-        </div>
-
-        {artifactPreviewError ? (
-          <div className="inline-feedback error artifact-preview">{artifactPreviewError}</div>
-        ) : null}
-
-        {artifactContentUrl && selectedArtifact ? (
-          <div className="artifact-preview">
-            {isImageArtifact(selectedArtifact) ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={artifactContentUrl}
-                alt={selectedArtifact.title}
-                className="artifact-image"
+          <footer className="composer">
+            <form onSubmit={handleSendMessage}>
+              {sendError ? <div className="inline-feedback error">{sendError}</div> : null}
+              <textarea
+                rows={4}
+                disabled={streaming}
+                placeholder="输入你的问题，让 Agent 规划步骤、调用工具、必要时编写 Python。"
+                value={input}
+                onChange={(event) => {
+                  setInput(event.target.value);
+                  if (sendError) setSendError("");
+                }}
               />
-            ) : (
-              <a href={artifactContentUrl} target="_blank" rel="noreferrer">
-                打开文件
-              </a>
-            )}
-          </div>
+              <button type="submit" disabled={streaming || !input.trim()}>
+                {streaming ? "处理中..." : "发送"}
+              </button>
+            </form>
+          </footer>
+        </section>
+
+        {!rightPanelCollapsed ? (
+          <div
+            className="pane-resizer"
+            onMouseDown={() => setDraggingPane("right")}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整右侧栏宽度"
+          />
         ) : null}
-      </aside>
-    </main>
+
+        <aside
+          className={`artifact-panel panel side-panel ${rightPanelCollapsed ? "collapsed" : ""}`}
+        >
+          <div className="panel-header side-panel-header">
+            <div className="side-panel-title">
+              <div className="muted">Artifacts</div>
+              {!rightPanelCollapsed ? (
+                <strong>{selectedArtifact?.title || "暂无预览"}</strong>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="ghost-button icon-button"
+              aria-label={rightPanelCollapsed ? "展开右侧栏" : "收起右侧栏"}
+              title={rightPanelCollapsed ? "展开右侧栏" : "收起右侧栏"}
+              onClick={() => setRightPanelCollapsed((current) => !current)}
+            >
+              {renderIcon(rightPanelCollapsed ? "panel-left" : "panel-right")}
+            </button>
+          </div>
+
+          {rightPanelCollapsed ? (
+            <div className="collapsed-panel-body">
+              <span className="collapsed-count">{artifacts.length}</span>
+              <span className="muted collapsed-label">产物</span>
+            </div>
+          ) : (
+            <>
+              <div className="artifact-group-list spaced-list">
+                {artifactsLoading && artifacts.length === 0 ? (
+                  <div className="empty-state compact">
+                    <p className="muted">正在加载产物...</p>
+                  </div>
+                ) : null}
+
+                {!artifactsLoading && artifacts.length === 0 ? (
+                  <div className="empty-state compact">
+                    <p className="muted">当前会话还没有可预览的产物。</p>
+                  </div>
+                ) : null}
+
+                {artifactGroups.map((group) => (
+                  <section key={group.runId} className="artifact-group">
+                    <div className="artifact-group-header">
+                      <strong>{group.title}</strong>
+                      <span className="thread-time muted">{group.artifacts.length} 个产物</span>
+                    </div>
+                    <div className="artifact-thumb-grid">
+                      {group.artifacts.map((artifact) => (
+                        <button
+                          key={artifact.id}
+                          type="button"
+                          className={`artifact-card artifact-thumb ${
+                            artifact.id === artifactId ? "active" : ""
+                          }`}
+                          onClick={() => {
+                            void focusArtifact(artifact.id, artifact, isImageArtifact(artifact));
+                          }}
+                        >
+                          {isImageArtifact(artifact) ? (
+                            <>
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={getArtifactContentPath(artifact.id)}
+                                alt={artifact.title}
+                                className="artifact-thumb-image"
+                              />
+                              <div className="artifact-thumb-caption">{artifact.title}</div>
+                            </>
+                          ) : (
+                            <>
+                              <div>{artifact.title}</div>
+                              <div className="thread-time muted">{artifact.mime_type}</div>
+                            </>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+
+              {artifactPreviewError ? (
+                <div className="inline-feedback error artifact-preview">{artifactPreviewError}</div>
+              ) : null}
+
+              {artifactContentUrl && selectedArtifact && !isImageArtifact(selectedArtifact) ? (
+                <div className="artifact-preview">
+                  <a href={artifactContentUrl} target="_blank" rel="noreferrer">
+                    打开文件：{selectedArtifact.title}
+                  </a>
+                </div>
+              ) : null}
+            </>
+          )}
+        </aside>
+      </main>
+
+      {lightboxArtifact && isImageArtifact(lightboxArtifact) ? (
+        <div
+          className="lightbox-backdrop"
+          onClick={() => setLightboxArtifactId("")}
+          role="presentation"
+        >
+          <div className="lightbox-card" onClick={(event) => event.stopPropagation()}>
+            <div className="lightbox-header">
+              <strong>{lightboxArtifact.title}</strong>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setLightboxArtifactId("")}
+              >
+                关闭
+              </button>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={getArtifactContentPath(lightboxArtifact.id)}
+              alt={lightboxArtifact.title}
+              className="lightbox-image"
+            />
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

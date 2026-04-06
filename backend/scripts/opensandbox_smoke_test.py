@@ -28,6 +28,7 @@ def main() -> None:
         domain=domain,
         api_key=api_key,
         request_timeout=timedelta(minutes=10),
+        use_server_proxy=True,
     )
     sandbox = SandboxSync.create(
         template,

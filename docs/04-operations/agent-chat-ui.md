@@ -20,6 +20,8 @@ NEXT_PUBLIC_BACKEND_URL=http://localhost:2026
 - 正式前端直接连接 `backend/`，不再直接连接 `agent/services/http/`。
 - `backend/` 负责认证、线程、过程事件、artifact 与 OpenSandbox。
 - `agent/` 只保留智能体运行时与 MCP 工具。
+- 图片 artifact 在前端通过同源代理路由 `/api/artifacts/{artifact_id}/content` 预览，避免跨端口 Cookie 与图片加载问题。
+- 回答正文支持 `artifact://artifact_id` 形式的 Markdown 图片引用；渲染后会直接在消息中显示对应图表，并支持点击放大。
 
 ## 兼容壳
 

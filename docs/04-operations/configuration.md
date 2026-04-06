@@ -98,6 +98,8 @@ SANDBOX_SERVICE_TOKEN=fusion-sandbox-dev-token
 BACKEND_SANDBOX_SERVICE_TOKEN=fusion-sandbox-dev-token
 OPENSANDBOX_DOMAIN=127.0.0.1:8080
 OPENSANDBOX_TEMPLATE=sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2
+
+本地 Docker 部署下，`conf/opensandbox.toml` 中的 `[docker].network_mode` 必须与 OpenSandbox server 所在网络保持一致；当前仓库默认使用 `docker_default`，避免 server proxy 访问 sandbox internal endpoint 时跨网络失败。
 OPENSANDBOX_TIMEOUT_SECONDS=600
 OPENSANDBOX_PYTHON_VERSION=3.11
 ```

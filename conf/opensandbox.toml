@@ -28,7 +28,7 @@ mode = "dns"
 allowed_host_paths = []
 
 [docker]
-network_mode = "bridge"
+network_mode = "docker_default"
 host_ip = "host.docker.internal"
 drop_capabilities = [
   "AUDIT_WRITE",

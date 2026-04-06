@@ -18,6 +18,7 @@
 ### `02-architecture/`
 - `overall-architecture.md`：当前主干架构与代码目录。
 - `query-pipelines.md`：查询路由与证据生成链路。
+- `python-sandbox.md`：Python 沙箱、CSV 数据传递、artifact 回收与命名规则。
 - `text2sql.md`：Text2SQL 专题。
 
 ### `03-data/`

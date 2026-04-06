@@ -58,6 +58,10 @@ class _TracePassthrough:
 
     llm = _LLM()
 
+    @staticmethod
+    def _emit_stream_event(*_args, **_kwargs):
+        return None
+
     def _trace_node(self, _name, _state, fn):
         return fn()
 
@@ -97,6 +101,10 @@ class _BuildContextPassthrough:
     def _build_context_evidences(self, _state):
         return []
 
+    @staticmethod
+    def _emit_stream_event(*_args, **_kwargs):
+        return None
+
     def _trace_node(self, _name, _state, fn):
         return fn()
 
@@ -116,6 +124,10 @@ class _ConversationAnswerPassthrough:
                 yield "回答"
 
         self.llm = _LLM()
+
+    @staticmethod
+    def _emit_stream_event(*_args, **_kwargs):
+        return None
 
     def _trace_node(self, _name, _state, fn):
         return fn()
@@ -226,6 +238,43 @@ def test_generate_answer_node_uses_llm_for_none_plan(monkeypatch) -> None:
     )
 
 
+def test_build_python_input_bundle_uses_csv_files_and_lightweight_manifest() -> None:
+    """Python 输入应把真实表格写成 CSV 文件，元数据中只保留摘要。"""
+    helper = object.__new__(LangGraphOrchestrator)
+    step_results = {
+        "1": {
+            "tool": "nl2sql",
+            "objective": "按 AS 统计 IPv4 宣告数量",
+            "result": {
+                "sql": "SELECT asn, ipv4_count FROM demo",
+                "result": {
+                    "columns": ["asn", "ipv4_count"],
+                    "rows": [[9808, 9867], [4538, 5148]],
+                    "row_count": 2,
+                },
+            },
+        }
+    }
+
+    input_data, input_files = LangGraphOrchestrator._build_python_input_bundle(  # type: ignore[misc]
+        helper,
+        task="绘制柱状图",
+        raw_context="",
+        depends_on=["1"],
+        step_results=step_results,
+    )
+
+    assert input_data["datasets"][0]["format"] == "csv"
+    assert input_data["datasets"][0]["file_path"].endswith(".csv")
+    assert input_data["datasets"][0]["row_count"] == 2
+    assert input_data["datasets"][0]["preview_rows"] == [[9808, 9867], [4538, 5148]]
+    assert input_data["dependencies"][0]["result_summary"]["result"]["row_count"] == 2
+    assert "rows" not in input_data["dependencies"][0]["result_summary"]["result"]
+    assert len(input_files) == 1
+    assert input_files[0]["path"].startswith("/workspace/input/datasets/")
+    assert "9808,9867" in input_files[0]["content"]
+
+
 class _NL2SQLMCPClient:
     """用于测试 NL2SQL 证据组装的最小桩对象。"""
 
@@ -263,6 +312,8 @@ def test_run_nl2sql_step_includes_result_preview_in_multi_query_evidence() -> No
         _normalize_text_list=LangGraphOrchestrator._normalize_text_list,
         _normalize_query_mode=LangGraphOrchestrator._normalize_query_mode,
         _build_retry_question=LangGraphOrchestrator._build_retry_question,
+        _build_nl2sql_retry_instruction=LangGraphOrchestrator._build_nl2sql_retry_instruction,
+        _detect_nl2sql_semantic_mismatch=LangGraphOrchestrator._detect_nl2sql_semantic_mismatch,
     )
 
     result = LangGraphOrchestrator._run_nl2sql_step(  # type: ignore[misc]
@@ -291,6 +342,8 @@ def test_run_nl2sql_step_does_not_append_objective_as_second_question() -> None:
         _normalize_text_list=LangGraphOrchestrator._normalize_text_list,
         _normalize_query_mode=LangGraphOrchestrator._normalize_query_mode,
         _build_retry_question=LangGraphOrchestrator._build_retry_question,
+        _build_nl2sql_retry_instruction=LangGraphOrchestrator._build_nl2sql_retry_instruction,
+        _detect_nl2sql_semantic_mismatch=LangGraphOrchestrator._detect_nl2sql_semantic_mismatch,
     )
 
     result = LangGraphOrchestrator._run_nl2sql_step(  # type: ignore[misc]

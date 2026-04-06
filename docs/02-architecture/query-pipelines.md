@@ -17,8 +17,14 @@
 1. `FusionAgent` 接收用户问题。
 2. LangGraph 主图生成计划并判断需要的工具。
 3. 通过 MCP 调用 `nl2sql_query`、`rag_search`、`neo4j_llamaindex_query` 或辅助工具。
-4. `ContextBuilder` 汇总结构化结果、文档证据和图关系。
-5. 回答节点生成最终答复，并输出证据来源。
+4. 若进入 Python 沙箱，Agent 会先做意图判断：只有在绘图、文件导出或确需 Python 处理时，才整理依赖结果给沙箱。
+5. 进入 Python 沙箱时，依赖步骤结果会拆成两层：
+   - 轻量元数据写入 `/workspace/input/input.json`
+   - 真实表格数据按 CSV 文件写入 `/workspace/input/datasets/*.csv`
+   这样既避免把大表塞进回答上下文，也避免让 Python 代码从自然语言描述里反向猜数据。
+6. `ContextBuilder` 汇总结构化结果、文档证据和图关系；对大表默认只保留摘要和少量预览行，降低回答阶段的上下文体积。
+7. 回答节点生成最终答复，并输出证据来源。
+8. 若本轮存在图片 artifact，回答阶段会把图片以 `![标题](artifact://artifact_id)` 的 Markdown 引用附加到最终消息中；前端负责把该引用解析成当前线程中的真实产物预览。
 
 ## NL2SQL 链路
 - 入口：`agent/tools/nl2sql_tool.py`
@@ -31,6 +37,18 @@
 - 入库：`agent/knowledge_ingest.py`、`agent/tools/rag_ingest_pipeline.py`
 - 作用：从项目文档、知识库、笔记中召回相关片段。
 - 适合：概念说明、流程解释、运维知识、非结构化背景资料。
+
+## Python 沙箱链路
+- 入口：`agent/tools/python_sandbox_tool.py`
+- 执行：`backend/main.py`、`backend/sandbox/opensandbox_provider.py`
+- 作用：基于上游工具的结构化结果做绘图、表格整理、文件生成。
+- 数据传递：
+  - Agent 会把依赖步骤结果整理成轻量 `input_data` 元数据。
+  - 对表格型结果，Agent 会额外序列化为 CSV，通过沙箱文件系统 API 写入 `/workspace/input/datasets/*.csv`。
+  - `/workspace/input/input.json` 中只保留任务说明、依赖摘要、数据集清单、列信息、行数与少量预览，不再内嵌整表数据。
+- 产物约束：所有图片和文件必须写入 `/workspace/artifacts`，由产品后端落盘并挂载到线程 artifact 列表。
+- 回答挂图：Python 步骤返回的图片 artifact 会保留 `id/title/mime_type`，回答阶段只暴露 `artifact://...` 引用，不暴露内部路径。
+- 详细原理、数据契约与命名规则见 `python-sandbox.md`。
 
 ## Neo4j 链路
 - 入口：`agent/tools/neo4j_llamaindex_tool.py`
@@ -51,6 +69,7 @@
 - 不要在没有必要时同时调用三种检索，避免上下文噪声。
 
 ## 继续阅读
+- `python-sandbox.md`
 - `text2sql.md`
 - `../03-data/core-schema.md`
 - `../04-operations/observability.md`

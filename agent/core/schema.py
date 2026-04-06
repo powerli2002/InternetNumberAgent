@@ -169,10 +169,10 @@ TABLE_SCHEMA = {
 
 # NL2SQL 提示补充：字段语义与取值约定（避免国家字段误用）
 TABLE_CONTEXT_HINTS = {
-    "as_entity": "as_country 使用 ISO 3166-1 alpha-2 代码（如 CN），as_country_cn 为中文国家名（如 中国）。",
+    "as_entity": "as_country 使用 ISO 3166-1 alpha-2 代码（如 CN），as_country_cn 为中文国家名（如 中国）。v4prefixes/v6prefixes 是数组，表示该 AS 宣告或关联的前缀列表；统计 AS 的 IPv4/IPv6 宣告规模时，优先按 as_country 过滤并使用 cardinality(v4prefixes/v6prefixes)。",
     "asn_entity": "country 使用 ISO 3166-1 alpha-2 代码（如 CN）。",
     "country_entity": "country 为 ISO 3166-1 alpha-2 代码，country_cn 为中文国家名。",
-    "ip_bgp_entity": "country 使用 ISO 3166-1 alpha-2 代码。",
+    "ip_bgp_entity": "country 使用 ISO 3166-1 alpha-2 代码。route 是注册侧归属 ASN 数组，bgp 是观测侧归属 ASN；涉及 BGP 前缀宣告分布时，可按 bgp 或对 route 做数组展开统计，不要把数组列直接与标量做等值连接。",
     "ipv4_entity": "country 使用 ISO 3166-1 alpha-2 代码。",
     "ipv6_entity": "country 使用 ISO 3166-1 alpha-2 代码。",
     "org_entity": "org_country 使用 ISO 3166-1 alpha-2 代码，org_country_cn 为中文国家名。",
