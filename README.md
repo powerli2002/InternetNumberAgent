@@ -122,6 +122,10 @@ PLOT_BENCH_CODEBERT_DEVICE=cuda:2 \
 cd /home/lzj/fusionprocessing/ref/VisCoder/eval/PandasPlotBench && \
 bash run_latest_checkpoint_eval.sh --full
 
+# 自动选择最新 LoRA checkpoint，先 merge，再调用外部命令导出 AWQ 模型
+AWQ_EXPORT_CMD='python tools/export_awq.py --model "$AWQ_MODEL_DIR" --output "$AWQ_OUTPUT_DIR"' \
+  bash /home/lzj/fusionprocessing/ref/VisCoder/train/export_latest_checkpoint_awq.sh
+
 # 如需覆盖上下文/显存/输出 token，可显式指定；2080 Ti 11GB 单卡默认建议 2048 context + 0.85 utilization + 1024 output tokens
 cd /home/lzj/fusionprocessing/ref/VisCoder/eval/PandasPlotBench && \
 MAX_MODEL_LEN=2048 GPU_MEMORY_UTILIZATION=0.85 PLOT_BENCH_MAX_TOKENS=1024 bash run_latest_checkpoint_eval.sh --full
