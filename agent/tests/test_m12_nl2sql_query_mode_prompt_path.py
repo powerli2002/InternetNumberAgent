@@ -26,3 +26,30 @@ def test_compose_query_mode_guided_question_contains_directive() -> None:
         query_mode="COUNT",
     )
     assert "[QUERY_MODE=COUNT]" in guided
+
+
+def test_repair_array_metric_sql_for_count_uses_sum_cardinality() -> None:
+    """数组指标统计被误写成 COUNT(*) 时，应修正为数组长度求和。"""
+    repaired = NL2SQLTool._repair_array_metric_sql(
+        question="统计中国的 AS 的 IPv4 宣告数量",
+        query_mode="COUNT",
+        sql="SELECT COUNT(*) FROM as_entity WHERE as_country = 'CN' AND cardinality(v4prefixes) > 0 LIMIT 200",
+        table_names=["as_entity"],
+    )
+
+    assert repaired is not None
+    assert "SUM(cardinality(v4prefixes))" in repaired
+    assert "as_country = 'CN'" in repaired
+    assert "v4prefixes IS NOT NULL" in repaired
+
+
+def test_repair_array_metric_sql_skips_when_select_already_uses_array_metric() -> None:
+    """若 SELECT 子句已经按数组指标聚合，不应再次改写。"""
+    repaired = NL2SQLTool._repair_array_metric_sql(
+        question="统计中国的 AS 的 IPv4 宣告数量",
+        query_mode="COUNT",
+        sql="SELECT COALESCE(SUM(cardinality(v4prefixes)), 0) AS ipv4_count FROM as_entity WHERE as_country = 'CN' AND v4prefixes IS NOT NULL",
+        table_names=["as_entity"],
+    )
+
+    assert repaired is None

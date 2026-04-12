@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List
 
 
 def _normalize_tools(tools: Iterable[str]) -> List[str]:
-    valid = {"nl2sql", "rag", "graph", "none"}
+    valid = {"nl2sql", "rag", "graph", "python", "none"}
     normalized = [tool for tool in tools if tool in valid]
     if not normalized:
         return ["none"]

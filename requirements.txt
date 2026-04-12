@@ -34,3 +34,6 @@ fastmcp==3.0.1
 markitdown
 sentence-transformers
 py-openjudge
+opensandbox
+opensandbox-server
+opensandbox-code-interpreter

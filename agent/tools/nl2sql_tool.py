@@ -922,6 +922,14 @@ class NL2SQLTool:
             allow_subquery=self.allow_subquery,
         )
         safe_sql, limit_info = guard.sanitize(sql_query or "")
+        repaired_sql = self._repair_array_metric_sql(
+            question=question,
+            query_mode=resolved_query_mode,
+            sql=safe_sql,
+            table_names=table_names,
+        )
+        if repaired_sql:
+            safe_sql, limit_info = guard.sanitize(repaired_sql)
 
         step_time = time.monotonic()
         # 执行 SQL
@@ -984,6 +992,97 @@ class NL2SQLTool:
             "NL2SQL步骤 SQL生成耗时=%dms", int((time.monotonic() - step_time) * 1000)
         )
         return str(sql_query or "")
+
+    @staticmethod
+    def _repair_array_metric_sql(
+        *,
+        question: str,
+        query_mode: str,
+        sql: str,
+        table_names: List[str],
+    ) -> Optional[str]:
+        """对数组型指标被错误写成 COUNT(*) 的 SQL 做语义修复。"""
+        lowered_question = str(question or "").strip().lower()
+        normalized_sql = " ".join(str(sql or "").lower().split())
+        if "as_entity" not in table_names:
+            return None
+        asks_prefix_scale = any(token in str(question or "") for token in ("前缀", "宣告")) or any(
+            token in lowered_question for token in ("prefix", "announcement")
+        )
+        if not asks_prefix_scale:
+            return None
+        if "ipv4" in lowered_question or "ip v4" in lowered_question:
+            metric_column = "v4prefixes"
+            metric_alias = "ipv4_count"
+        elif "ipv6" in lowered_question or "ip v6" in lowered_question:
+            metric_column = "v6prefixes"
+            metric_alias = "ipv6_count"
+        else:
+            return None
+        if not re.search(r"\bcount\s*\(\s*\*\s*\)", normalized_sql):
+            return None
+
+        alias_match = re.search(
+            r"\bfrom\s+as_entity(?:\s+(?:as\s+)?([a-zA-Z_][a-zA-Z0-9_]*))?",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        alias = str(alias_match.group(1) or "").strip() if alias_match else ""
+        if alias.lower() in {"where", "group", "order", "limit", "join"}:
+            alias = ""
+        ref = f"{alias}.{metric_column}" if alias else metric_column
+        asn_ref = f"{alias}.asn" if alias else "asn"
+        select_match = re.search(
+            r"\bselect\b(?P<body>.*?)(?:\bfrom\b|$)",
+            sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        select_clause = " ".join(
+            str(select_match.group("body") or "").lower().split()
+        )
+        metric_select_patterns = (
+            f"cardinality({ref.lower()})",
+            f"sum(cardinality({ref.lower()}))",
+            f"sum ( cardinality({ref.lower()}) )",
+            f"cardinality({metric_column.lower()})",
+            f"sum(cardinality({metric_column.lower()}))",
+            f"sum ( cardinality({metric_column.lower()}) )",
+        )
+        if any(pattern in select_clause for pattern in metric_select_patterns):
+            return None
+
+        predicates: List[str] = []
+        where_match = re.search(
+            r"\bwhere\b(?P<body>.*?)(?:\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)",
+            sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if where_match:
+            raw_body = str(where_match.group("body") or "").strip()
+            for part in re.split(r"\band\b", raw_body, flags=re.IGNORECASE):
+                predicate = str(part or "").strip().strip("()")
+                normalized_predicate = predicate.lower()
+                if not predicate:
+                    continue
+                if "as_country" in normalized_predicate or "as_country_cn" in normalized_predicate:
+                    predicates.append(predicate)
+        predicates.append(f"{ref} IS NOT NULL")
+        where_sql = ""
+        if predicates:
+            where_sql = " WHERE " + " AND ".join(dict.fromkeys(predicates))
+
+        if query_mode == "COUNT":
+            return (
+                f"SELECT COALESCE(SUM(cardinality({ref})), 0) AS {metric_alias} "
+                f"FROM as_entity{' ' + alias if alias else ''}{where_sql}"
+            )
+        if query_mode == "GROUP_BY":
+            return (
+                f"SELECT {asn_ref}, cardinality({ref}) AS {metric_alias} "
+                f"FROM as_entity{' ' + alias if alias else ''}{where_sql} "
+                f"ORDER BY {metric_alias} DESC"
+            )
+        return None
 
     def _compose_query_mode_guided_question(
         self, question: str, query_mode: str

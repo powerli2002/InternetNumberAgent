@@ -23,9 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-import yaml
-
 from agent.model.llm_endpoint import resolve_llm_endpoint
+from fusiondata.src.utils.config_loader import load_yaml_config
 
 
 @dataclass
@@ -45,7 +44,9 @@ class AgentConfig:
     """
 
     # 路径配置
-    project_root: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2])
+    project_root: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+    )
     """项目根目录路径，自动从当前文件位置推导"""
 
     env_path: Optional[Path] = None
@@ -160,6 +161,15 @@ class AgentConfig:
     mcp_server_url: str = "http://127.0.0.1:2032/mcp"
     """FastMCP 工具服务地址（HTTP Streamable）。"""
 
+    sandbox_api_url: str = "http://127.0.0.1:2026"
+    """产品后端沙箱 API 地址，由 Agent 通过 HTTP 调用。"""
+
+    sandbox_service_token: Optional[str] = None
+    """Agent 调用产品后端内部沙箱接口时使用的服务令牌。"""
+
+    sandbox_timeout_seconds: int = 180
+    """Python 沙箱 HTTP 调用默认超时时间。"""
+
     semantic_memory_enabled: bool = True
     """是否启用语义记忆抽取功能"""
 
@@ -170,14 +180,25 @@ class AgentConfig:
     """语义记忆抽取的最小重要性阈值（0.0-1.0）"""
 
     # 统一存储目录（运行时状态、缓存）
-    store_root: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store")
+    store_root: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store"
+    )
     """统一存储根目录：聚合 memory/index/notes 等运行时数据"""
 
-    memory_store_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store" / "memory")
+    memory_store_dir: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+        / "agent"
+        / "store"
+        / "memory"
+    )
     """情景记忆 SQLite 等本地状态目录"""
 
     nl2sql_index_cache_dir: Path = field(
-        default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store" / "index" / "nl2sql"
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+        / "agent"
+        / "store"
+        / "index"
+        / "nl2sql"
     )
     """NL2SQL 索引 manifest 目录（向量数据持久化在 Milvus）"""
 
@@ -228,7 +249,12 @@ class AgentConfig:
     """图查询时是否每次刷新 Neo4j schema（用于跟踪当前结构变更）"""
 
     # 工具与目录配置
-    notes_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "agent" / "store" / "notes")
+    notes_dir: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parents[2]
+        / "agent"
+        / "store"
+        / "notes"
+    )
     """笔记存储目录"""
 
     notes_index: Path = field(init=False)
@@ -294,7 +320,7 @@ class AgentConfig:
         config_yaml = root / "conf" / "config.yaml"
         if config_yaml.exists():
             cfg.config_yaml = config_yaml
-            data = yaml.safe_load(config_yaml.read_text(encoding="utf-8")) or {}
+            data = load_yaml_config(config_yaml)
             # 使用传统配置生成 PostgreSQL 连接字符串
             if not os.environ.get("POSTGRES_URL"):
                 db = data.get("postgresql_database")
@@ -303,7 +329,9 @@ class AgentConfig:
                 host = data.get("postgresql_host", "127.0.0.1")
                 port = data.get("postgresql_port", "5432")
                 if db and user and pwd:
-                    cfg.postgres_url = f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}"
+                    cfg.postgres_url = (
+                        f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{db}"
+                    )
 
         store_root_value = os.environ.get("AGENT_STORE_DIR")
         if store_root_value:
@@ -321,11 +349,19 @@ class AgentConfig:
         cfg.neo4j_password = os.environ.get("NEO4J_PASSWORD", cfg.neo4j_password)
         cfg.neo4j_database = os.environ.get("NEO4J_DATABASE", cfg.neo4j_database)
         cfg.llm_backend = os.environ.get("LLM_BACKEND", cfg.llm_backend)
-        cfg.dashscope_api_key = os.environ.get("DASHSCOPE_API_KEY", cfg.dashscope_api_key)
-        cfg.dashscope_base_url = os.environ.get("DASHSCOPE_BASE_URL", cfg.dashscope_base_url)
+        cfg.dashscope_api_key = os.environ.get(
+            "DASHSCOPE_API_KEY", cfg.dashscope_api_key
+        )
+        cfg.dashscope_base_url = os.environ.get(
+            "DASHSCOPE_BASE_URL", cfg.dashscope_base_url
+        )
         cfg.dashscope_model = os.environ.get("DASHSCOPE_MODEL", cfg.dashscope_model)
-        cfg.local_llm_api_key = os.environ.get("LOCAL_LLM_API_KEY", cfg.local_llm_api_key)
-        cfg.local_llm_base_url = os.environ.get("LOCAL_LLM_BASE_URL", cfg.local_llm_base_url)
+        cfg.local_llm_api_key = os.environ.get(
+            "LOCAL_LLM_API_KEY", cfg.local_llm_api_key
+        )
+        cfg.local_llm_base_url = os.environ.get(
+            "LOCAL_LLM_BASE_URL", cfg.local_llm_base_url
+        )
         cfg.local_llm_model = os.environ.get("LOCAL_LLM_MODEL", cfg.local_llm_model)
         llm_temperature_value = os.environ.get("LLM_TEMPERATURE")
         if llm_temperature_value:
@@ -336,10 +372,14 @@ class AgentConfig:
         llm_tool_temperature_value = os.environ.get("LLM_TOOL_TEMPERATURE")
         if llm_tool_temperature_value:
             try:
-                cfg.llm_tool_temperature = min(2.0, max(0.0, float(llm_tool_temperature_value)))
+                cfg.llm_tool_temperature = min(
+                    2.0, max(0.0, float(llm_tool_temperature_value))
+                )
             except ValueError:
                 pass
-        llm_context_compress_temperature_value = os.environ.get("LLM_CONTEXT_COMPRESS_TEMPERATURE")
+        llm_context_compress_temperature_value = os.environ.get(
+            "LLM_CONTEXT_COMPRESS_TEMPERATURE"
+        )
         if llm_context_compress_temperature_value:
             try:
                 cfg.llm_context_compress_temperature = min(
@@ -348,7 +388,9 @@ class AgentConfig:
                 )
             except ValueError:
                 pass
-        cfg.dashscope_embedding_model = os.environ.get("DASHSCOPE_EMBEDDING_MODEL", cfg.dashscope_embedding_model)
+        cfg.dashscope_embedding_model = os.environ.get(
+            "DASHSCOPE_EMBEDDING_MODEL", cfg.dashscope_embedding_model
+        )
         endpoint = resolve_llm_endpoint(
             backend=cfg.llm_backend,
             dashscope_api_key=cfg.dashscope_api_key,
@@ -362,18 +404,29 @@ class AgentConfig:
         cfg.dashscope_api_key = endpoint.api_key
         cfg.dashscope_base_url = endpoint.base_url
         cfg.dashscope_model = endpoint.model
-        cfg.rag_embedding_backend = os.environ.get("RAG_EMBEDDING_BACKEND", cfg.rag_embedding_backend)
-        cfg.rag_embedding_model = os.environ.get("RAG_EMBEDDING_MODEL", cfg.rag_embedding_model)
-        cfg.rag_embedding_device = os.environ.get("RAG_EMBEDDING_DEVICE", cfg.rag_embedding_device)
+        cfg.rag_embedding_backend = os.environ.get(
+            "RAG_EMBEDDING_BACKEND", cfg.rag_embedding_backend
+        )
+        cfg.rag_embedding_model = os.environ.get(
+            "RAG_EMBEDDING_MODEL", cfg.rag_embedding_model
+        )
+        cfg.rag_embedding_device = os.environ.get(
+            "RAG_EMBEDDING_DEVICE", cfg.rag_embedding_device
+        )
         rag_embedding_batch_size_value = os.environ.get("RAG_EMBEDDING_BATCH_SIZE")
         if rag_embedding_batch_size_value:
             try:
-                cfg.rag_embedding_batch_size = max(1, int(rag_embedding_batch_size_value))
+                cfg.rag_embedding_batch_size = max(
+                    1, int(rag_embedding_batch_size_value)
+                )
             except ValueError:
                 pass
         rag_embedding_normalize_value = os.environ.get("RAG_EMBEDDING_NORMALIZE")
         if rag_embedding_normalize_value is not None:
-            cfg.rag_embedding_normalize = rag_embedding_normalize_value.strip().lower() in {"1", "true", "yes", "on"}
+            cfg.rag_embedding_normalize = (
+                rag_embedding_normalize_value.strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
 
         working_memory_size_value = os.environ.get("WORKING_MEMORY_SIZE")
         if working_memory_size_value:
@@ -415,27 +468,34 @@ class AgentConfig:
             "NL2SQL_EMBEDDING_DEVICE",
             os.environ.get("RAG_EMBEDDING_DEVICE", cfg.nl2sql_embedding_device),
         )
-        nl2sql_embedding_batch_size_value = os.environ.get("NL2SQL_EMBEDDING_BATCH_SIZE") or os.environ.get(
-            "RAG_EMBEDDING_BATCH_SIZE"
-        )
+        nl2sql_embedding_batch_size_value = os.environ.get(
+            "NL2SQL_EMBEDDING_BATCH_SIZE"
+        ) or os.environ.get("RAG_EMBEDDING_BATCH_SIZE")
         if nl2sql_embedding_batch_size_value:
             try:
-                cfg.nl2sql_embedding_batch_size = max(1, int(nl2sql_embedding_batch_size_value))
+                cfg.nl2sql_embedding_batch_size = max(
+                    1, int(nl2sql_embedding_batch_size_value)
+                )
             except ValueError:
                 pass
         nl2sql_embedding_normalize_value = os.environ.get("NL2SQL_EMBEDDING_NORMALIZE")
         if nl2sql_embedding_normalize_value is None:
             nl2sql_embedding_normalize_value = os.environ.get("RAG_EMBEDDING_NORMALIZE")
         if nl2sql_embedding_normalize_value is not None:
-            cfg.nl2sql_embedding_normalize = nl2sql_embedding_normalize_value.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
+            cfg.nl2sql_embedding_normalize = (
+                nl2sql_embedding_normalize_value.strip().lower()
+                in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            )
 
         # 统一请求超时配置（秒）
-        timeout_value = os.environ.get("REQUEST_TIMEOUT_SECONDS") or os.environ.get("AGENT_REQUEST_TIMEOUT_SECONDS")
+        timeout_value = os.environ.get("REQUEST_TIMEOUT_SECONDS") or os.environ.get(
+            "AGENT_REQUEST_TIMEOUT_SECONDS"
+        )
         if timeout_value:
             try:
                 cfg.request_timeout_seconds = max(1, int(timeout_value))
@@ -460,10 +520,25 @@ class AgentConfig:
                 pass
 
         cfg.mcp_server_url = os.environ.get("MCP_SERVER_URL", cfg.mcp_server_url)
+        cfg.sandbox_api_url = os.environ.get("SANDBOX_API_URL", cfg.sandbox_api_url)
+        cfg.sandbox_service_token = os.environ.get(
+            "SANDBOX_SERVICE_TOKEN", cfg.sandbox_service_token
+        )
+        sandbox_timeout_value = os.environ.get("SANDBOX_TIMEOUT_SECONDS")
+        if sandbox_timeout_value:
+            try:
+                cfg.sandbox_timeout_seconds = max(1, int(sandbox_timeout_value))
+            except ValueError:
+                pass
 
         rag_enable_mqe_value = os.environ.get("RAG_ENABLE_MQE")
         if rag_enable_mqe_value is not None:
-            cfg.rag_enable_mqe = rag_enable_mqe_value.strip().lower() in {"1", "true", "yes", "on"}
+            cfg.rag_enable_mqe = rag_enable_mqe_value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         rag_mqe_max_queries_value = os.environ.get("RAG_MQE_MAX_QUERIES")
         if rag_mqe_max_queries_value:
             try:
@@ -473,7 +548,9 @@ class AgentConfig:
         rag_candidate_multiplier_value = os.environ.get("RAG_CANDIDATE_MULTIPLIER")
         if rag_candidate_multiplier_value:
             try:
-                cfg.rag_candidate_multiplier = max(1, int(rag_candidate_multiplier_value))
+                cfg.rag_candidate_multiplier = max(
+                    1, int(rag_candidate_multiplier_value)
+                )
             except ValueError:
                 pass
         rag_rrf_k_value = os.environ.get("RAG_RRF_K")
@@ -486,7 +563,12 @@ class AgentConfig:
         # 语义记忆配置
         enabled_value = os.environ.get("SEMANTIC_MEMORY_ENABLED")
         if enabled_value is not None:
-            cfg.semantic_memory_enabled = enabled_value.strip().lower() in {"1", "true", "yes", "on"}
+            cfg.semantic_memory_enabled = enabled_value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         max_items_value = os.environ.get("SEMANTIC_MEMORY_MAX_ITEMS")
         if max_items_value:
             try:
@@ -518,10 +600,17 @@ class AgentConfig:
             cfg.vector_collection = vector_collection_value.strip()
         cache_enabled_value = os.environ.get("NL2SQL_INDEX_CACHE_ENABLED")
         if cache_enabled_value is not None:
-            cfg.nl2sql_index_cache_enabled = cache_enabled_value.strip().lower() in {"1", "true", "yes", "on"}
+            cfg.nl2sql_index_cache_enabled = cache_enabled_value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         force_rebuild_value = os.environ.get("NL2SQL_INDEX_CACHE_FORCE_REBUILD")
         if force_rebuild_value is not None:
-            cfg.nl2sql_index_cache_force_rebuild = force_rebuild_value.strip().lower() in {"1", "true", "yes", "on"}
+            cfg.nl2sql_index_cache_force_rebuild = (
+                force_rebuild_value.strip().lower() in {"1", "true", "yes", "on"}
+            )
 
         max_rows_value = os.environ.get("NL2SQL_MAX_ROWS")
         if max_rows_value:
@@ -546,7 +635,12 @@ class AgentConfig:
 
         allow_subquery_value = os.environ.get("NL2SQL_ALLOW_SUBQUERY")
         if allow_subquery_value is not None:
-            cfg.nl2sql_allow_subquery = allow_subquery_value.strip().lower() in {"1", "true", "yes", "on"}
+            cfg.nl2sql_allow_subquery = allow_subquery_value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
 
         graph_max_rows_value = os.environ.get("GRAPH_MAX_ROWS")
         if graph_max_rows_value:
@@ -562,18 +656,23 @@ class AgentConfig:
                 pass
         graph_refresh_schema_value = os.environ.get("GRAPH_REFRESH_SCHEMA_EACH_QUERY")
         if graph_refresh_schema_value is not None:
-            cfg.graph_refresh_schema_each_query = graph_refresh_schema_value.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
+            cfg.graph_refresh_schema_each_query = (
+                graph_refresh_schema_value.strip().lower()
+                in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            )
 
         context_compress_mode_value = os.environ.get("CONTEXT_COMPRESS_MODE")
         if context_compress_mode_value:
             cfg.context_compress_mode = "llm"
 
-        context_compress_target_ratio_value = os.environ.get("CONTEXT_COMPRESS_TARGET_RATIO")
+        context_compress_target_ratio_value = os.environ.get(
+            "CONTEXT_COMPRESS_TARGET_RATIO"
+        )
         if context_compress_target_ratio_value:
             try:
                 ratio = float(context_compress_target_ratio_value)
@@ -609,7 +708,9 @@ class AgentConfig:
         ]
         allowed_tables_value = os.environ.get("ALLOWED_TABLES")
         if allowed_tables_value:
-            parsed_allowed_tables = [item.strip() for item in allowed_tables_value.split(",") if item.strip()]
+            parsed_allowed_tables = [
+                item.strip() for item in allowed_tables_value.split(",") if item.strip()
+            ]
             if parsed_allowed_tables:
                 cfg.allowed_tables = parsed_allowed_tables
 

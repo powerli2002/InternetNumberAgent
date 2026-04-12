@@ -108,6 +108,11 @@ def _parse_args() -> argparse.Namespace:
         help="OpenAI 兼容接口 API Key",
     )
     parser.add_argument(
+        "--served-model-name",
+        default=os.environ.get("LOCAL_VLLM_SERVED_MODEL_NAME", "").strip(),
+        help="对 OpenAI 兼容接口暴露的模型名；留空则沿用 vLLM 默认值",
+    )
+    parser.add_argument(
         "--max-model-len",
         type=int,
         default=_read_int_env("LOCAL_VLLM_MAX_MODEL_LEN", 4096, minimum=256),
@@ -241,6 +246,8 @@ def _build_command(args: argparse.Namespace) -> List[str]:
         "--tensor-parallel-size",
         str(args.tensor_parallel_size),
     ]
+    if args.served_model_name:
+        command.extend(["--served-model-name", args.served_model_name])
     if args.pipeline_parallel_size > 1:
         command.extend(["--pipeline-parallel-size", str(args.pipeline_parallel_size)])
 
