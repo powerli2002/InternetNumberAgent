@@ -25,7 +25,7 @@ NEXT_PUBLIC_BACKEND_URL=http://localhost:2026
 
 ## 兼容壳
 
-仓库中仍保留 `agent-chat-ui/` 作为兼容和调试壳，但不再是当前产品入口。
+仓库中仍保留 `ref/agent-chat-ui/` 作为兼容和调试壳，但不再是当前产品入口。
 
 ## 常见问题
 - 登录失败：检查 `backend.main:app` 是否启动、Cookie 是否被浏览器拦截。

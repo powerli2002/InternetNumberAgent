@@ -37,9 +37,7 @@ ref/
 agent/knowledge/互联网域间路由安全监测与防御.docx
 mount/
 conf/.env
-agent-chat-ui/*
 agent/store/memory/*.sqlite
-agent-chat-ui
 webapp/node_modules
 webapp/.next
 backend/store/artifacts
@@ -49,9 +47,15 @@ __pycache__
 .langgraph_api
 wandb
 *.wandb
+
+# 忽略 VisCoder 训练/评测产生的大文件与环境目录，保留源码脚本可提交
+TrainModel/VisCoder/.venv-lora-uv/
 TrainModel/VisCoder/eval/PandasPlotBench/.venv-bench/
-TrainModel/VisCoder/.venv-lora/
+TrainModel/VisCoder/eval/PandasPlotBench/eval_results/
+TrainModel/VisCoder/eval/PandasPlotBench/debug_results/
+TrainModel/VisCoder/eval/PandasPlotBench/paper_supp_info/
 TrainModel/VisCoder/train/output/
+TrainModel/VisCoder/**/__pycache__/
 
 ref/*
 ref
