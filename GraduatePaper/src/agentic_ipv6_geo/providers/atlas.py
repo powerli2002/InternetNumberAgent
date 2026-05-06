@@ -193,6 +193,10 @@ class RipeAtlasProvider:
             return {"status": "unavailable", "failure_reason": f"Atlas 请求失败: {exc}", "evidence": {}}
 
     def _auth_header(self) -> str | None:
+        if self.service_cfg.get("auth_header"):
+            return str(self.service_cfg["auth_header"])
+        if self.service_cfg.get("api_key"):
+            return f"Key {self.service_cfg['api_key']}"
         auth_header_env = self.service_cfg.get("auth_header_env", "RIPE_ATLAS_AUTH_HEADER")
         api_key_env = self.service_cfg.get("api_key_env", "RIPE_ATLAS_API_KEY")
         if auth_header_env and os.environ.get(str(auth_header_env)):

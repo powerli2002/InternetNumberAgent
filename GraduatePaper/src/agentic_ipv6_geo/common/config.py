@@ -8,6 +8,7 @@ from typing import Any
 
 
 DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
+    "secrets_config_path": "configs/local.secrets.json",
     "external_services": {
         "ripe_atlas": {
             "base_url": "https://atlas.ripe.net/api/v2",
@@ -87,9 +88,30 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 
 def load_runtime_config(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as fh:
+    config_path = Path(path)
+    with config_path.open("r", encoding="utf-8") as fh:
         user_config = json.load(fh)
-    return deep_merge(DEFAULT_RUNTIME_CONFIG, user_config)
+    config = deep_merge(DEFAULT_RUNTIME_CONFIG, user_config)
+    secrets_path = _resolve_secrets_path(config, config_path)
+    if secrets_path and secrets_path.exists():
+        with secrets_path.open("r", encoding="utf-8") as fh:
+            config = deep_merge(config, json.load(fh))
+    return config
+
+
+def _resolve_secrets_path(config: dict[str, Any], config_path: Path) -> Path | None:
+    override = os.environ.get("AGENTIC_IPV6_GEO_SECRETS")
+    raw_path = override or config.get("secrets_config_path")
+    if not raw_path:
+        return None
+    secrets_path = Path(str(raw_path))
+    if secrets_path.is_absolute():
+        return secrets_path
+    # 优先按当前工作目录解析；不存在时再按主配置所在目录解析，便于脚本和测试共用。
+    cwd_path = Path.cwd() / secrets_path
+    if cwd_path.exists():
+        return cwd_path
+    return config_path.parent.parent / secrets_path
 
 
 def env_value(config: dict[str, Any], *keys: str) -> str | None:
@@ -109,7 +131,8 @@ def runtime_warnings(config: dict[str, Any]) -> list[str]:
         atlas_cfg = config.get("external_services", {}).get("ripe_atlas", {})
         has_key = bool(os.environ.get(str(atlas_cfg.get("api_key_env", ""))))
         has_header = bool(os.environ.get(str(atlas_cfg.get("auth_header_env", ""))))
-        if not has_key and not has_header:
+        has_inline = bool(atlas_cfg.get("api_key") or atlas_cfg.get("auth_header"))
+        if not has_key and not has_header and not has_inline:
             warnings.append("已允许真实主动探测，但缺少 RIPE Atlas 认证环境变量")
     if config.get("llm_baseline", {}).get("enabled"):
         qwen_cfg = config.get("external_services", {}).get("qwen", {})

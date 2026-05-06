@@ -47,6 +47,8 @@ export QWEN_BASE_URL="https://..."
 
 API key 不写入 `configs/*.json`。RIPE Atlas 实现规范见 `skills/ripe-atlas/SKILL.md`。
 
+如果必须使用本地配置文件保存凭据，可写入 `configs/local.secrets.json`。该文件会被自动合并到运行配置中，并已被 `.gitignore` 排除，禁止提交。
+
 ## 模块
 
 - `src/agentic_ipv6_geo/data/`：CSV 数据加载与训练/评测切分。

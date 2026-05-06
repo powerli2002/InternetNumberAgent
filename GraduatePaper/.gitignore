@@ -3,3 +3,5 @@
 __pycache__/
 *.py[cod]
 outputs/logs/*.jsonl
+configs/local.secrets.json
+configs/*.secrets.json
