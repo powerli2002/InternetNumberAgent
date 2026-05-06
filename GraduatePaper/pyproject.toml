@@ -1,0 +1,32 @@
+[project]
+name = "agentic-ipv6-geo"
+version = "0.1.0"
+description = "基于 Agent 调度的 IPv6 地理位置推断实验系统"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+active = [
+  "scipy>=1.10.0",
+  "ujson>=5.8.0",
+]
+ui = [
+  "streamlit>=1.36.0",
+]
+
+[project.scripts]
+ipv6geo-run = "agentic_ipv6_geo.cli:run_main"
+ipv6geo-eval = "agentic_ipv6_geo.cli:evaluate_main"
+ipv6geo-prepare-trustgeo = "agentic_ipv6_geo.cli:prepare_trustgeo_main"
+ipv6geo-validate = "agentic_ipv6_geo.cli:validate_main"
+ipv6geo-dashboard = "agentic_ipv6_geo.cli:dashboard_main"
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true

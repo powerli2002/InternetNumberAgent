@@ -1,0 +1,306 @@
+% ModuGeo: IPv6 Geolocation via Conditioned Modulation under Limited Path Visibility in 5G Networks
+% WASA Conference Submission - LLNCS Format
+%
+\documentclass[runningheads]{llncs}
+%
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\graphicspath{{figs/}}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+%
+% If you use the hyperref package, please uncomment the following two lines
+% to display URLs in blue roman font according to Springer's eBook style:
+%\usepackage{color}
+%\renewcommand\UrlFont{\color{blue}\rmfamily}
+%\urlstyle{rm}
+%
+\begin{document}
+%
+\title{ModuGeo: IPv6 Geolocation via Conditioned Modulation under Limited Path Visibility in 5G Networks}
+%
+%\titlerunning{ModuGeo: IPv6 Geolocation in 5G Networks}
+% If the paper title is too long for the running head, you can set
+% an abbreviated paper title here
+%
+\author{Anonymous Authors}
+%
+\authorrunning{Anonymous et al.}
+%
+\institute{Anonymized for Review}
+%
+\maketitle              % typeset the header of the contribution
+%
+\begin{abstract}
+With the widespread deployment of IPv6, precise geolocation of IPv6 addresses is critical for location-aware services and network security. However, IPv6 address allocation exhibits significant heterogeneity across different operators. In cellular networks, factors such as tunnel encapsulation and security policies frequently cause Traceroute to terminate prematurely, leading to limited path visibility and making it difficult to construct connected topologies. Existing methods face dual challenges of accuracy and robustness in such scenarios. This paper proposes ModuGeo, a conditioned modulation framework for IPv6 geolocation under limited path visibility. The core idea is to fuse address allocation priors with path measurement cues: we learn hierarchical allocation features of the target address through multi-scale prefix encoding, and perform residual correction using last-hop and RTT information from each probe as conditional context. We conduct experimental evaluation on a China-wide IPv6 dataset collected from real 5G mobile terminals. Results demonstrate that ModuGeo outperforms existing methods across all key metrics including median error, mean error, and tail error.
+
+\keywords{IPv6 Geolocation \and Mobile/Cellular Networks \and Traceroute \and Multi-Scale Prefix Representation \and Conditioned Modulation \and Multi-View Fusion}
+\end{abstract}
+%
+%
+%
+\section{Introduction}
+
+The widespread deployment of IPv6 alleviates address exhaustion and provides connectivity for massive mobile terminals, IoT devices, and wireless edge nodes. IP geolocation, as a critical capability for cyberspace mapping, is widely applied to location-aware routing, content delivery network (CDN) optimization, and wireless network security~\cite{RFC7066,GTP20}. With the accelerated adoption of 5G and next-generation wireless access networks, achieving high-precision location awareness for mobile IPv6 infrastructure can improve network operation efficiency and risk response capabilities.
+
+However, compared to IPv4 networks with more compact topologies, achieving high-precision IPv6 geolocation in data environments dominated by 5G cellular networks is typically constrained by both address allocation heterogeneity and limited path visibility. On one hand, operators commonly adopt dynamic prefix allocation strategies in mobile networks~\cite{RFC7066}, causing address allocation within the same network domain to vary with time and access conditions. On the other hand, tunnel encapsulation~\cite{GTP20}, carrier-grade NAT (CGNAT), and wireless-side security policies~\cite{RFC4890} that are more prevalent in 5G networks make active measurements more susceptible to mid-path truncation. Observable paths degrade into sparse forms of ``a few near-end hops + unreachable tail'', making it difficult to construct connected topologies suitable for message passing. Meanwhile, IPv6 address planning exhibits clear hierarchical and geographical variations~\cite{CNNIC22,APNIC23,GB45282}, making schemes relying on fixed rules or manual features difficult to generalize stably.
+
+Under such limited path visibility conditions, learning paradigms that rely on relatively complete hop-by-hop path features or dense topology structures face structural bottlenecks. Graph Neural Network (GNN)-based methods typically rely on the ``connected graph'' structural assumption for message passing. When Traceroute is truncated and causes topology fragmentation, forcibly aggregating neighbor information not only fails to obtain effective context but may also introduce noise from irrelevant nodes. Therefore, how to effectively integrate implicit allocation patterns with measurement cues preserved in truncated paths under conditions lacking connected topology remains a key challenge.
+
+To address these challenges, we propose ModuGeo, a conditioned modulation framework for IPv6 geolocation under truncated Traceroute in 5G scenarios. Unlike approaches that treat measurement paths as complete inputs directly usable for geometric inference, ModuGeo views tail-truncated Traceroute observations as conditional signals for modulating static allocation priors, and jointly models ``static'' address allocation structure and ``dynamic'' multi-view measurement cues within a unified representation space. This design is based on a direct motivation: although physical topology may be disconnected, the hierarchical structure of address prefixes still encodes relatively stable geographical allocation patterns that can provide fine-grained allocation priors. Meanwhile, even if paths are incomplete, last hops and their RTT spike patterns can still provide near-end constraints related to geographical distance, which can be used for shrinking and correcting static predictions.
+
+Specifically, ModuGeo achieves the above fusion through two complementary mechanisms. First, to capture inconsistent but learnable allocation logic across different network domains, we use only the upper 64 bits (prefix side) of target addresses and model in parallel at multiple granularities (/32, /40, /48, /56, /64), enabling the model to automatically induce and utilize implicit IPv6 allocation patterns from data. Second, for the phenomenon that Traceroute results in mobile networks are sparse and easily truncated, we compress each viewpoint's measurement into a contextual representation combining last-hop address with an RTT-quality vector, and inject this context into target IP embeddings through a conditioned modulation mechanism. During data cleaning, we retain only observations with resolvable last hops, enabling multi-view information to be aggregated and fused under a unified criterion.
+
+We make three key contributions. First, we propose a multi-scale prefix encoding mechanism that enables the model to automatically learn implicit IPv6 allocation patterns from data, reducing dependence on manual rules and operator-specific priors. Second, we discover that many disconnected paths in mobile IPv6 scenarios still contain exploitable last-hop RTT spike signals, and model last-hop addresses and quality vectors as learnable context to mitigate information loss from high probe failure rates. Third, we present a conditioned modulation framework that jointly utilizes static allocation structure and multi-view last-hop measurement information to achieve end-to-end coordinate prediction without relying on connected topology.
+
+\section{Related Work}
+
+Existing IP geolocation research has primarily undergone two major phases: from early rule-based and geometric measurement methods to recent intelligent methods based on deep learning and graph neural networks.
+
+\subsection{Measurement-based and Rule-based Approaches}
+
+Early geolocation research mainly relied on static rule mining or geometric constraints from active measurements. For rules, researchers utilized WHOIS databases, DNS naming conventions, or web mining information to map IPs to geographical locations~\cite{Padmanabhan01,Dan22,Guo09}. For IPv6, some work utilized associations between MAC addresses and BSSIDs in the EUI-64 protocol for geolocation~\cite{IPvSeeYou23,IPv6Landmarker25}. With the widespread adoption of IPv6 Privacy Extensions and dynamic address allocation mechanisms, the coverage of static rules has further declined. For measurements, methods represented by CBG~\cite{CBG04}, Octant~\cite{Octant07}, and Spotter~\cite{Spotter11} assume linear or probabilistic mapping between network delay and geographical distance, using multilateration to constrain target locations. Although subsequent work~\cite{KatzBassett06,Chen18,Hu12,Zhang20} introduced topology constraints or global optimization to improve accuracy, when network environments are complex, such methods may still encounter failure of the ``delay-distance'' relationship. Meanwhile, network load from large-scale active probing is also a deployment bottleneck.
+
+\subsection{Deep Learning and Graph-based Approaches}
+
+To mine nonlinear features and topological semantics in network measurement data, deep learning-based methods have gradually become mainstream in recent years. Some studies (e.g., XLBoost-Geo~\cite{XLBoost20}) use deep neural networks to fit path features or mine multi-source semantics to break through the linear limitations of traditional geometric methods. SubvectorS\_geo~\cite{SubvectorS23} attempts to utilize residual path features for IPv6 targets. With the development of GNNs, GNN-Geo~\cite{GNNGeo23}, GraphGeo~\cite{GraphGeo22}, and TrustGeo~\cite{TrustGeo23} further model geolocation as graph node regression, capturing topology structure through message passing mechanisms to aggregate neighbor information. For IPv6 data sparsity, HGL-Geo~\cite{HGLGeo23} attempts to introduce hypergraphs or prefix hierarchies to enhance expressiveness. It should be noted that GNN-based methods perform well in wired networks or topology-dense scenarios, but typically carry the implicit assumption that network topology can form connected graphs. In IPv6 scenarios containing substantial mobile/cellular network data, affected by tunnel protocols and security policies, Traceroute often exhibits ``last-mile invisibility'', causing severe topology fragmentation. When there are many isolated nodes or disconnected subgraphs, message passing has difficulty obtaining effective neighborhood context and may even introduce noise by aggregating irrelevant nodes. This constraint motivates us to shift toward last-hop conditioned modeling and residual correction strategies with lower topology dependence, to adapt to limited visibility measurement environments.
+
+\section{Methodology}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{modugeo-architecture}
+\caption{Overall architecture of ModuGeo (multi-scale prefix and semantic encoding, last-hop conditioned modulation, multi-view fusion, and unit sphere regression).}
+\label{fig:overview}
+\end{figure}
+
+This section provides the formal definition of ModuGeo and describes its key components: multi-scale prefix and semantic encoding, last-hop conditioned modulation and multi-view aggregation, and unit sphere regression with optimization objectives. The method targets IPv6 active measurement scenarios dominated by 5G cellular networks, where Traceroute is often truncated at access networks, tunnel encapsulation, or security policies, resulting in limited path visibility and fragmented constructible topologies. Unlike schemes relying on high-quality complete paths or dense connected graphs, ModuGeo decomposes the localization task into joint modeling of ``learnable prefix allocation priors'' and ``last-hop measurement anchor constraints'', forming a coarse-to-fine inference perspective: last hops and their RTT-quality summaries provide coarse-grained range constraints related to geographical distance, helping suppress large-range deviations under limited visibility; the multi-scale prefix and semantic module learns hierarchical allocation patterns under operator heterogeneity on the static address side, providing fine-grained allocation priors that enable predictions to further converge to city-level scales. In implementation, we use target IP embeddings as content representations, perform conditioned modulation on each viewpoint's last-hop context, average-aggregate multi-view outputs and perform fusion regression, and finally predict coordinates on the unit sphere and recover latitude/longitude (Fig.~\ref{fig:overview}).
+
+\subsection{Problem Definition and Notation}
+
+We denote the target IPv6 address as $x$. Considering that IPv6 Privacy Extensions may cause interface identifier randomization, this paper uses only its upper 64 bits (prefix side) as a stable identifier, expanding it into a nibble sequence of length 16: $s(x)=(s_1,\dots,s_{16})$. Semantic attributes associated with $x$ are denoted as $\mathcal{A}_x$, containing five categorical fields: ASN, organization, operator category, prefix length bucket, and landmark indicator. The landmark indicator expresses ``whether this network entity has available geographical landmark information'', enabling the model to explicitly perceive weakly-supervised geographical priors on the semantic side. The above semantic fields can be obtained through offline mappings from prefix to ASN/organization and operator categorization, uniformly encoded as discrete IDs; unknown tokens are used for missing fields to maintain input closure. We use $d_p$ to denote the dimension of IP embeddings and $d_{\text{model}}$ to denote the dimension of backbone representations. Active measurement information comes from a set of probes $\mathcal{P}$. For each probe $p\in\mathcal{P}$, Traceroute observation $\mathcal{T}^{(p)}$ returns a possibly disconnected hop sequence; placeholder `\verb|*|' appearing therein indicates that the hop timed out/is invisible, which we treat as invalid observations.
+
+Let the ground-truth latitude and longitude be $(\phi,\lambda)$ (representing latitude and longitude respectively). To avoid numerical instability when directly regressing angles near poles, we project them onto a three-dimensional vector $v\in\mathbb{R}^3$ on the unit sphere:
+\begin{equation}
+v = \psi(\phi,\lambda) =
+\begin{bmatrix}
+\cos\phi\cos\lambda \\
+\cos\phi\sin\lambda \\
+\sin\phi
+\end{bmatrix},
+\qquad \|v\|_2=1.
+\label{eq:sphere_projection}
+\end{equation}
+
+ModuGeo learns a parameterized mapping $\mathcal{F}_\theta$ that regresses input $(x,\mathcal{A}_x,\{\mathcal{T}^{(p)}\}_{p\in\mathcal{P}})$ to a predicted three-dimensional vector $\hat{v}=\mathcal{F}_\theta(x,\mathcal{A}_x,\{\mathcal{T}^{(p)}\}_{p\in\mathcal{P}})$, where $\hat{v}=[\hat{v}_1,\hat{v}_2,\hat{v}_3]^\top$. Predicted latitude and longitude can be recovered from $\hat{v}$: $\hat{\phi}=\arcsin(\hat{v}_3)$, $\hat{\lambda}=\operatorname{atan2}(\hat{v}_2,\hat{v}_1)$.
+
+\subsection{Multi-Scale Target Representation}
+
+This section constructs static representations of target addresses to provide generalizable fine-grained allocation priors under conditions lacking high-quality complete paths. Since China's IPv6 exhibits clear but inconsistent allocation logic across different network domains that is difficult to explicitly characterize with unified manual rules, the design goal of target representation is to encode ``hierarchical structure of address allocation'' as learnable vectors, which together with semantic attributes constitute static anchors. We adopt a fixed multi-scale hierarchy set $\mathcal{K} = \{8,10,12,14,16\}$ (in nibble count, corresponding to prefix lengths /32, /40, /48, /56, /64~\cite{GB45282}). The Prefix Pyramid Encoder (PPE) first maps $s(x)$ into 16 tokens. Let $e_i=\operatorname{Emb}_{\text{hex}}(s_i)+\operatorname{Emb}_{\text{pos}}(i)\in\mathbb{R}^{d_p}$. For each level $k\in\mathcal{K}$, we compute
+\begin{equation}
+\begin{aligned}
+u_k &= \frac{1}{k}\sum_{i=1}^{k} e_i,\\
+h_k &= u_k + \operatorname{Emb}_{\text{hash}}(b_k) + \operatorname{Emb}_{\text{len}}(k),
+\end{aligned}
+\label{eq:ppe_encoding}
+\end{equation}
+where $b_k=\operatorname{Hash}(s_{1:k})$ is the hash bucket index of the prefix segment, used to distinguish a large number of prefix segments under limited table size $B_{\text{hash}}$ (i.e., $b_k\in\{0,\dots,B_{\text{hash}}-1\}$); this design avoids maintaining uncontrolled-scale independent embedding tables for each prefix segment. Hierarchical weights are scored by a two-layer MLP and obtained via softmax:
+\begin{equation}
+\begin{aligned}
+\text{score}_k &= w^\top \sigma(W h_k),\\
+\pi_k &= \frac{\exp(\text{score}_k)}{\sum_{k'\in\mathcal{K}}\exp(\text{score}_{k'})},\\
+z_{\text{ppe}} &= \sum_{k\in\mathcal{K}}\pi_k h_k.
+\end{aligned}
+\label{eq:ppe_attention}
+\end{equation}
+
+The semantic encoder maps the five categorical semantic fields in $\mathcal{A}_x$ into discrete IDs and obtains vector representations through independent embedding tables; unknown tokens are uniformly used for missing items. After concatenating the five field embedding vectors, we project them to $\mathbb{R}^{d_p}$ via a two-layer MLP to obtain $z_{\text{sem}}$. We then adopt element-wise addition to fuse the static representation $z_{\text{ip}} = z_{\text{ppe}} + z_{\text{sem}}$, enabling the model to explicitly inject discrete priors of network domain and landmark availability while learning prefix hierarchical allocation structure. This semantic encoder is shared between target addresses and last-hop addresses to maintain comparability of both address types in the same semantic space.
+
+\subsection{Last-Hop Conditioned Aggregation}
+
+\begin{table}[t]
+\caption{Two typical Traceroute output examples to the same target address 240e:476:4c02:75c6::1. `\texttt{*}' indicates timeout or invisible hop. $^\dagger$ marks the last visible hop.}
+\label{tab:trace_examples}
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+ & Normal & Incomplete \\
+\midrule
+Hop1 & 240e:363:41e:a600::1 & 2408:8248:1a60:cfc::1 \\
+Hop2 & \verb|*| & 2408:8248:1a60:cf0:d2f7:6eff:fe1a:44b0 \\
+Hop3 & 240e:6:1000:10ca::4 & \verb|*| \\
+Hop4 & \verb|*| & 2408:8000:d211:8:: \\
+Hop5 & 240e::1:63:81:6203 & \verb|*| \\
+Hop6 & \verb|*| & \verb|*| \\
+Hop7 & 240e:d8:8000:115::3 & 2408:8000:2:e28::1 \\
+Hop8 & 240e:476:4c02:75c6::1$^\dagger$ & 2408:8000:2:456::1 \\
+... & & \verb|*| \\
+Hop12 & & 240e:d8:8000:105::3$^\dagger$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This section explains how to compress each probe's Traceroute observation into a last-hop summary and use it as a conditional signal to modulate target static representations. Since Traceroute in mobile networks is often truncated mid-path, timeout/invisible placeholder `\verb|*|' appears in hop sequences. Table~\ref{tab:trace_examples} presents two typical output fragments.
+
+For each probe $p\in\mathcal{P}$, Traceroute observation $\mathcal{T}^{(p)}$ outputs hop sequence $\{h_i^{(p)}\}_{i=1}^{H^{(p)}}$, treating invisible hops (e.g., `\verb|*|') as invalid. During data cleaning, we retain only observations with resolvable last hops, so for each $p$ there exists last-hop index $j^{(p)}=\max\{i:\ h_i^{(p)}\ \text{valid}\}$. The last-hop address is $y^{(p)}=\operatorname{ip}(h_{j^{(p)}}^{(p)})$, its robust RTT estimate is $\tilde{r}^{(p)}=\operatorname{median}(\operatorname{RTT}(h_{j^{(p)}}^{(p)}))$, and the number of visible hops is $n^{(p)}=\big|\{i:\ h_i^{(p)}\ \text{valid}\}\big|$; semantic attributes associated with $y^{(p)}$ are denoted $\mathcal{A}_{y^{(p)}}$, with field definitions consistent with $\mathcal{A}_x$. To characterize the RTT spike features of last hops, we compute baseline delay from near-end hops as $b^{(p)}=\min\{\operatorname{median}(\operatorname{RTT}(h_i^{(p)})): i\le K,\ h_i^{(p)}\ \text{valid}\}$, and define delay increment $\Delta^{(p)}=\max(0,\tilde{r}^{(p)}-b^{(p)})$. To represent structural similarity between last hop and target address, we define longest common prefix length (in bits) $\ell^{(p)}=\operatorname{LCP}(y^{(p)},x)$, normalized as $\ell^{(p)}/128$. Finally, we compress each Traceroute into a fixed-dimension quality vector
+\begin{equation}
+q^{(p)}=\Big[\, \log(1+\tilde{r}^{(p)}),\ \frac{\min(n^{(p)},H_0)}{H_0},\ \log(1+\Delta^{(p)}),\ \frac{\ell^{(p)}}{128}\, \Big]\in\mathbb{R}^{4},
+\label{eq:quality_vector}
+\end{equation}
+where $H_0$ is the truncation upper bound for hop count normalization (fixed at $H_0=5$ in this paper), and $K$ is the truncation upper bound for near-end baseline delay (we set $K=H_0$).
+
+At the representation level, we adopt an encoder consistent with the target to obtain $z^{(p)}_{\text{last}}\in\mathbb{R}^{d_p}$ for the last-hop address. We then combine $z^{(p)}_{\text{last}}$ with quality vector $q^{(p)}$, obtaining context vector $c^{(p)} = g_\eta([z^{(p)}_{\text{last}}; q^{(p)}])$ via mapping function $g_\eta(\cdot)$.
+
+The above construction compresses last-hop delay, near-end delay increment, visible hop count, and LCP similarity between last hop and target address into a fixed-dimension quality vector, enabling subsequent conditioned modulation to utilize comparable measurement cues even when disconnected samples have high proportion. Based on this construction, we use target IP embeddings as content and each probe's last-hop context as condition, integrating measurement cues from truncated observations into target representations through conditioned modulation residual blocks, and achieving multi-probe fusion via average aggregation. We first map target static representation to target representation $t=\phi(z_{\text{ip}})$.
+
+Then, for each probe $p$, we use context vector $c^{(p)}$ to generate modulation parameters. Given input $h$ to a layer, the core computation of the conditioned modulation residual block can be written as
+\begin{equation}
+\begin{aligned}
+\left[\gamma^{(p)};\, \beta^{(p)}\right] &= W_c c^{(p)} + b_c,\\
+\tilde{h} &= \operatorname{LN}(h)\odot \left(1+\gamma^{(p)}\right) + \beta^{(p)},\\
+h^{+} &= h + f(\tilde{h}),
+\end{aligned}
+\label{eq:conditioned_modulation}
+\end{equation}
+where $\operatorname{LN}(\cdot)$ denotes LayerNorm without affine parameters, and $f(\cdot)$ is a two-layer MLP residual branch. We stack this block $L$ times to obtain conditioned representation $t^{(p)}$ for each probe. To improve training stability, we adopt parameter initialization that makes initial modulation close to identity mapping, enabling the model to mainly rely on static representation of $z_{\text{ip}}$ in early training and gradually learn to absorb effective measurement cues from last-hop context.
+
+Finally, we average-aggregate conditioned representations from different probes and fuse the aggregated result with target representation to obtain global representation:
+\begin{equation}
+\bar{t}=\frac{1}{|\mathcal{P}|}\sum_{p\in\mathcal{P}} t^{(p)},
+\qquad
+z=h_\xi\!\big([t;\, \bar{t}]\big)\in\mathbb{R}^{d_{\text{model}}}.
+\label{eq:fusion}
+\end{equation}
+
+The regression head outputs $xyz_{\text{raw}} = W_r z + b_r$ and normalizes to unit sphere to obtain predicted vector $\hat{v} = xyz_{\text{raw}}/\|xyz_{\text{raw}}\|_2$ (where $\epsilon>0$ is a numerical stability term).
+
+\subsection{Optimization Objectives}
+
+The design goal of optimization objectives is to balance geometric error (great-circle distance) with stable unit sphere regression, and use lightweight regularization terms to suppress degenerate spikes in hierarchical weights. The overall loss consists of great-circle distance regression term and unit sphere regression term, with optional normalization penalty and PPE entropy regularization.
+
+Given predicted latitude/longitude $(\hat{\phi},\hat{\lambda})$ and ground truth $(\phi,\lambda)$, geographical error distance $e_{\text{km}}$ is calculated using great-circle distance (Haversine), with Earth radius $R$ taken as 6371~km. The distance regression term uses squared error of $e_{\text{km}}$, and the unit sphere regression term directly minimizes Euclidean distance between predicted and ground-truth vectors. We adopt a training epoch-dependent mixing coefficient $\alpha(\tau)\in[0,1]$ to balance the two, where $\alpha(\tau)=\alpha_0+(\alpha_1-\alpha_0)\min(1,\tau/T_\alpha)$ represents linear transition over the first $T_\alpha$ epochs ($\tau$ is current epoch).
+\begin{equation}
+\begin{aligned}
+L_{\text{geo}} &= \frac{1}{B}\sum_{i=1}^{B}\left(e_{\text{km}}^{(i)}\right)^2,\\
+L_{\text{xyz}} &= \frac{1}{B}\sum_{i=1}^{B}\left\|\hat{v}^{(i)}-v^{(i)}\right\|_2^2,\\
+L_{\text{reg}}(\tau) &= \alpha(\tau)\,L_{\text{geo}} + (1-\alpha(\tau))\,\omega(\tau)\,L_{\text{xyz}} + \lambda_{\text{norm}}L_{\text{norm}},
+\end{aligned}
+\label{eq:loss}
+\end{equation}
+where $\omega(\tau)>0$ is a weight scheduling function for the unit sphere regression term, used to strengthen spherical geometric consistency in early training and gradually shift focus to real great-circle distance in later stages; we adopt linearly annealing $\omega(\tau)$ in experiments. $L_{\text{norm}}=\frac{1}{B}\sum_{i=1}^{B}\big(\|xyz^{(i)}_{\text{raw}}\|_2-1\big)^2$ is optional normalization penalty. PPE entropy regularization applies only to hierarchical weights $\{\pi_k\}_{k\in\mathcal{K}}$ of target IP. We adopt $L_{\text{ppe}}=\sum_{k\in\mathcal{K}} \pi_k\log(\pi_k+\epsilon)$ to suppress excessive weight spikes ($\epsilon>0$ is a numerical stability term). The final total loss is $L = \lambda_{\text{reg}}\cdot L_{\text{reg}}(\tau) + \lambda_{\text{ent}}(\tau)\cdot L_{\text{ppe}}$.
+
+\section{Evaluation}
+
+This section reports localization accuracy performance of ModuGeo on an IPv6 dataset dominated by mobile/cellular networks. We use error distance $e_{\text{km}}$ (unit: km) as the core metric, and quantify comparison using statistics such as median (Median), mean (Mean), and 90th percentile (P90). Considering that comparison methods may produce very large errors on extreme samples, to prevent extreme outliers from dominating statistics, we apply upper-bound truncation to errors when aggregating statistics: let $e'_{\text{km}}=\min(e_{\text{km}},x_{\max})$, where $x_{\max}=500$~km (approximately the maximum distance within a single province in China). For possible prediction absence, we also report coverage (Coverage) to reflect the proportion of available predictions. Below we first present comparison results with representative baselines, then explain contribution sources of key modalities and structural designs through ablation experiments.
+
+\subsection{Dataset}
+
+\begin{table}[t]
+\caption{Provincial sample distribution of dataset (top-10 provinces, others merged as ``Others'').}
+\label{tab:dataset}
+\centering
+\small
+\begin{tabular}{@{}lr@{\hspace{1.5em}}lr@{}}
+\toprule
+Province & Count & Province & Count \\
+\midrule
+Shanxi & 3661 & Shanghai & 500 \\
+Beijing & 2719 & Hunan & 327 \\
+Fujian & 988 & Yunnan & 323 \\
+Hebei & 966 & Shandong & 322 \\
+Sichuan & 789 & Others & 1803 \\
+Henan & 715 & & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+To our knowledge, there is currently no publicly available IPv6 geolocation dataset suitable for systematic evaluation that covers mobile/cellular network-dominated scenarios. Therefore, this paper self-collects and constructs a dataset based on real mobile terminal environments. We collect IPv6 addresses assigned to mobile devices when accessing 5G cellular networks through measurement software, recording corresponding provincial/city-level location labels for each sample. Subsequently, we launch active measurements from multiple probes to obtain Traceroute sequences, including three probes accessing China Unicom, China Mobile, and China Telecom, with Atlas platform probes supplementing observation perspectives. Considering that interface identifiers in mobile IPv6 scenarios may exhibit randomness due to Privacy Extensions, we use only prefix-side information of target addresses during modeling. The dataset contains 13,113 samples covering 20 provincial administrative regions and 311 cities. Due to the collection process being affected by geographical distribution and user behavior, samples exhibit clear long-tail distribution at provincial level. To facilitate evaluation of model generalization ability on unseen prefixes, we adopt prefix-isolated splitting when dividing training and test sets, expecting the model to learn general features under prefixes. For readers to quickly grasp data distribution, as shown in Table~\ref{tab:dataset}, we display only the top-10 provincial administrative regions by sample count, with remaining provinces merged as ``Others''.
+
+\subsection{Comparison with Baselines}
+
+\begin{table}[t]
+\caption{Overall comparison results (error truncated at $x_{\max}=500$~km).}
+\label{tab:comparison}
+\centering
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Method & Coverage & Median (km) & Mean (km) & P90 (km) \\
+\midrule
+SubvectorS\_geo & 0.948 & 338.9 & 281.2 & 500.0+ \\
+MLPGeo & 1.000 & 77.2 & 111.2 & 256.2 \\
+GDD-Geo & 1.000 & 37.2 & 102.3 & 368.4 \\
+TrustGeo & 1.000 & 194.6 & 251.8 & 500.0+ \\
+ModuGeo & 1.000 & 30.2 & 55.0 & 124.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:comparison} summarizes comparison results of ModuGeo with representative baselines on this dataset. We select SubvectorS\_geo as an IPv6 baseline utilizing residual path features, MLPGeo as a regression baseline not explicitly modeling topology, and GDD-Geo and TrustGeo as GNN baselines relying on graph structure aggregation. Coverage in the table indicates the proportion of location sample predictions that the method can output under experimental settings. Median/Mean/P90 are all calculated based on truncated error $e'_{\text{km}}=\min(e_{\text{km}},x_{\max})$, where $x_{\max}=500$~km.
+
+From Table~\ref{tab:comparison}, we observe that ModuGeo outperforms all baselines in Mean and P90, indicating that this method can more effectively compress tail errors. GDD-Geo is slightly superior to ModuGeo in Median, but its P90 is significantly higher; this suggests that on data with topology fragmentation, representations relying on neighborhood aggregation may introduce unstable context on some samples. In contrast, ModuGeo provides static allocation priors through multi-scale prefix representation and performs conditioned residual correction using last-hop context, enabling the model to maintain competitive median error while being more robust on tail samples. MLPGeo can achieve stable usable accuracy on this data, but still lags behind ModuGeo in Mean and P90, indicating that relying solely on regression paradigm has difficulty fully utilizing complementarity of allocation structure and measurement context. SubvectorS\_geo's Coverage is below 1 and errors approach truncation upper bound, reflecting that relying only on residual path features has difficulty stably generalizing in IPv6 scenarios dominated by mobile/cellular networks. TrustGeo's tail errors are relatively heavy, also confirming from the side the impact of topology fragmentation on graph aggregation paradigm.
+
+\subsection{Ablation Study}
+
+\begin{figure*}[t]
+\centering
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{ppe-granularity-cdf}
+\caption{Comparison of single-scale prefix length variants with multi-scale PPE.}
+\label{fig:ppe_granularity}
+\end{minipage}%
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{ablation-cdf}
+\caption{Ablation results of ModuGeo (error CDF).}
+\label{fig:ablation_cdf}
+\end{minipage}
+\end{figure*}
+
+\begin{table}[t]
+\caption{Ablation experiment results (overall; error truncated at $x_{\max}=500$~km).}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Variant & Count & Coverage & Median (km) & Mean (km) & P90 (km) \\
+\midrule
+Full & 929 & 1.000 & 30.2 & 55.0 & 124.5 \\
+No Trace & 929 & 1.000 & 38.2 & 70.6 & 181.3 \\
+No Semantic & 929 & 1.000 & 31.6 & 56.6 & 137.5 \\
+Module A(/32) & 929 & 1.000 & 72.2 & 97.0 & 208.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We first examine the impact of single-scale prefix granularity on localization performance to analyze contribution sources of multi-scale PPE. Specifically, we replace multi-scale PPE with single-scale prefix encoding, fixing prefix length separately at /32, /40, /48, /56, /64. Fig.~\ref{fig:ppe_granularity} presents error CDF under different granularities. We observe that single-scale encoding is overall weaker than multi-scale PPE, with more pronounced degradation when granularity is coarser (e.g., /32); this indicates that in heterogeneous operator IPv6 allocation, single prefix granularity has difficulty simultaneously covering wide-area and local-area allocation structure, while multi-scale aggregation can provide more robust allocation priors. Based on this observation, in subsequent overall ablation we use single-scale encoding fixed at /32 as representative (denoted Module A(/32)) for comparison with multi-scale PPE.
+
+On this basis, we further verify necessity of each modality and key structural design. We construct three ablation variants based on ModuGeo's full model (Full): removing measurement context branch (No Trace), removing semantic branch (No Semantic), and replacing multi-scale PPE with single-scale /32 (Module A(/32)). Fig.~\ref{fig:ablation_cdf} presents error CDF for four settings. We observe that removing measurement context brings systematic degradation, indicating that last-hop measurement fingerprints contribute to error compression. Removing semantic branch causes relatively minor degradation, but semantic priors' supplement to robustness is still visible. Replacing multi-scale PPE with single-scale /32 causes most pronounced degradation, reflecting importance of multi-scale allocation structure modeling for generalization. Table~\ref{tab:ablation} summarizes quantitative differences of this ablation experiment at statistical level, facilitating mutual verification with trends in Fig.~\ref{fig:ablation_cdf}.
+
+From Table~\ref{tab:ablation}, we can see that removing measurement context branch (No Trace) significantly increases Mean and P90, indicating that last-hop measurement context plays a key role in compressing tail errors. Removing semantic branch (No Semantic) brings only slight degradation, suggesting that semantic priors mainly play a robustness-supplementing role. Replacing multi-scale PPE with single-scale /32 (Module A(/32)) causes substantial overall error increase, verifying importance of multi-scale allocation structure modeling for generalization.
+
+\section{Conclusion}
+
+This paper focuses on achieving general geolocation in mobile IPv6 environments with limited path visibility and topology fragmentation, proposing ModuGeo to fuse allocation structure and multi-probe last-hop measurement fingerprints in a unified representation space. Without relying on connected topology, this framework completes end-to-end coordinate regression through multi-scale prefix representation, last-hop conditioned modulation, and multi-probe aggregation, providing a feasible modeling path for IPv6 localization under tail-truncation scenarios.
+
+\begin{credits}
+\subsubsection{\ackname}
+This work was supported by [funding information to be added].
+
+\subsubsection{\discintname}
+The authors have no competing interests to declare that are relevant to the content of this article.
+\end{credits}
+
+%
+% ---- Bibliography ----
+%
+\bibliographystyle{splncs04}
+\bibliography{ref}
+
+\end{document}

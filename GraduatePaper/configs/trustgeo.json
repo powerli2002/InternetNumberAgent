@@ -1,0 +1,117 @@
+{
+  "data_dir": "data/trustgeo_processed",
+  "log_path": "outputs/trustgeo/logs/run.jsonl",
+  "split": {
+    "test_ratio": 0.35,
+    "seed": 42
+  },
+  "modugeo": {
+    "use_external_predictions": true,
+    "default_external_confidence": 0.72,
+    "prefix_lengths": [64, 56, 48, 40, 32],
+    "min_prefix_samples": 1,
+    "semantic_weight": 0.25,
+    "landmark_weight": 0.25
+  },
+  "rdns": {
+    "min_confidence": 0.35,
+    "lexicon_path": "configs/rdns_lexicon.csv",
+    "enable_active_collection": false,
+    "use_system_resolver": true,
+    "cache_path": "outputs/active_probe/rdns.csv"
+  },
+  "active_triangulation": {
+    "algorithm": "cbg",
+    "cbgtool_root": "cbgtool",
+    "min_constraints": 3,
+    "delta": 0.398,
+    "sort_circles": 0
+  },
+  "fusion": {
+    "confidence_threshold": 0.55,
+    "conflict_penalty_km": 500.0,
+    "tool_reliability": {
+      "ModuGeo": 1.0,
+      "rDNS": 0.65,
+      "ActiveTriangulation": 0.8,
+      "WhoisBGP": 0.25,
+      "PassiveIPDB": 0.45
+    }
+  },
+  "scheduler": {
+    "modugeo_low_confidence": 0.62,
+    "final_confidence_threshold": 0.55
+  },
+  "bandit": {
+    "tool_cost_weight": 10.0,
+    "probe_cost_weight": 2.0,
+    "min_samples_per_context": 2
+  },
+  "external_services": {
+    "ripe_atlas": {
+      "base_url": "https://atlas.ripe.net/api/v2",
+      "api_key_env": "RIPE_ATLAS_API_KEY",
+      "auth_header_env": "RIPE_ATLAS_AUTH_HEADER",
+      "timeout_seconds": 30
+    },
+    "qwen": {
+      "api_key_env": "QWEN_API_KEY",
+      "base_url_env": "QWEN_BASE_URL",
+      "model": "qwen3.5",
+      "timeout_seconds": 60
+    }
+  },
+  "scamper": {
+    "scampertrace_root": "scampertrace",
+    "scamper_path": "scamper",
+    "sc_warts2csv_path": "sc_warts2csv",
+    "use_sudo": false,
+    "pps": 10,
+    "timeout_seconds": 180,
+    "output_dir": "outputs/active_probe/scamper"
+  },
+  "active_probe": {
+    "allow_live_measurements": false,
+    "provider_order": ["existing_trace", "scamper", "ripe_atlas"],
+    "cache_dir": "outputs/active_probe/cache",
+    "max_targets_per_run": 10,
+    "max_probes_per_target": 5,
+    "min_probe_constraints": 3
+  },
+  "ripe_atlas": {
+    "probe_selection": [
+      {"requested": 3, "type": "countries", "value": "CN"}
+    ],
+    "tags_include": ["system-ipv6-works"],
+    "measurement_description": "agentic-ipv6-geo traceroute",
+    "protocol": "ICMP",
+    "poll_interval_seconds": 15,
+    "max_poll_attempts": 20
+  },
+  "passive_ipdb": {
+    "enabled": false,
+    "backend": "csv",
+    "path": "",
+    "default_confidence": 0.35
+  },
+  "llm_baseline": {
+    "enabled": false,
+    "provider": "qwen",
+    "model": "qwen3.5",
+    "max_steps": 4,
+    "trajectory_path": "outputs/rl/trajectories/qwen_baseline.jsonl"
+  },
+  "rl": {
+    "trajectory_dir": "outputs/rl/trajectories",
+    "reward_summary_path": "outputs/rl/reward_summary.json",
+    "policy_path": "outputs/rl/policy.json",
+    "max_steps": 4,
+    "reward": {
+      "tool_cost_weight": 10.0,
+      "probe_cost_weight": 2.0,
+      "conflict_weight": 0.05,
+      "coverage_reward": 50.0,
+      "invalid_action_penalty": 1000.0
+    }
+  }
+}

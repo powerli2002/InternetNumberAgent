@@ -1,0 +1,9 @@
+ip,hostname,resolved_at
+240e:100:1000:1::1,bj-core-1.example.net,2026-01-01
+240e:100:1000:2::2,beijing-edge-2.example.net,2026-01-01
+240e:200:2000:1::1,sh-bng-1.example.net,2026-01-01
+240e:200:2000:2::2,shanghai-access.example.net,2026-01-01
+240e:300:3000:1::1,gz-mobile-gw.example.net,2026-01-01
+240e:300:3000:2::2,sz-mobile-gw.example.net,2026-01-01
+240e:400:4000:1::1,hz-telecom-edge.example.net,2026-01-01
+240e:500:5000:1::1,ctu-cdn-edge.example.net,2026-01-01

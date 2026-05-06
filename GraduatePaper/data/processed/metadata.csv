@@ -1,0 +1,6 @@
+prefix,bgp_prefix,asn,org,operator,registered_region,registered_city
+240e:100::/32,240e:100::/32,AS4808,China Unicom Beijing,ChinaUnicom,北京市,北京
+240e:200::/32,240e:200::/32,AS4812,China Telecom Shanghai,ChinaTelecom,上海市,上海
+240e:300::/32,240e:300::/32,AS9808,China Mobile Guangdong,ChinaMobile,广东省,广州
+240e:400::/32,240e:400::/32,AS4134,China Telecom Zhejiang,ChinaTelecom,浙江省,杭州
+240e:500::/32,240e:500::/32,AS4134,China Telecom Sichuan,ChinaTelecom,四川省,成都

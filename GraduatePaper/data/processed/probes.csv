@@ -1,0 +1,5 @@
+probe_id,lat,lon,region,city,operator,network_type
+probe_bj,39.9042,116.4074,北京市,北京,ChinaUnicom,5g
+probe_sh,31.2304,121.4737,上海市,上海,ChinaTelecom,5g
+probe_gz,23.1291,113.2644,广东省,广州,ChinaMobile,5g
+probe_cd,30.5728,104.0668,四川省,成都,ChinaTelecom,5g
