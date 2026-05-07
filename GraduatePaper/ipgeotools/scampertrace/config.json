@@ -1,0 +1,62 @@
+{
+  "scamper_commands": {
+    "icmp": {
+      "command": "trace -P icmp-paris -g 100 -m 120",
+      "description": "通用ICMP Paris追踪，连续无响应阈值100，最大TTL 120"
+    },
+    "tcp_80": {
+      "command": "trace -P tcp -d 80 -g 100 -m 120",
+      "description": "通用TCP追踪，目标端口80，连续无响应阈值100，最大TTL 120"
+    },
+    "tcp_443": {
+      "command": "trace -P tcp -d 443 -g 100 -m 120",
+      "description": "通用TCP追踪，目标端口443，连续无响应阈值100，最大TTL 120"
+    }
+  },
+  "probe_settings": {
+    "global_pps": 10, 
+    "description_global_pps": "全局探测速率(pps)",
+    "rate_limit": 100,
+    "description_rate": "探测频率限制 (每小时IP地址数)",
+    "max_ttl": 30,
+    "description_ttl": "最大跳数限制",
+    "gap_limit": 30,
+    "description_gap": "连续无响应跳数限制",
+    "timeout_per_ip": 180,
+    "description_timeout_per_ip": "每个IP的基础超时时间(秒)，批量探测时乘以IP数量",
+    "batch_size": 100,
+    "description_batch": "批量探测时每批处理的IP数量",
+    "output_format": "warts",
+    "description_output_format": "输出格式，使用warts格式"
+  },
+  "directories": {
+    "input_dir": "data/input",
+    "output_dir": "data/output",
+    "logs_dir": "logs",
+    "description": "各类文件存储目录配置"
+  },
+  "prefix_handling": {
+    "ipv4_split_threshold": 24,
+    "description_ipv4": "IPv4前缀分割阈值，/24及以下选择最小地址，大于/24的拆分到/24",
+    "ipv6_split_threshold": 48,
+    "description_ipv6": "IPv6前缀分割阈值，/48及以下选择最小地址，大于/48的拆分到/48",
+    "log_strategy_once": true,
+    "description_log": "是否只在首次读取前缀时记录IP生成策略"
+  },
+  "resume_settings": {
+    "enable_resume": true,
+    "description_resume": "是否启用断点续传功能",
+    "check_existing_results": true,
+    "description_check": "是否检查已有结果文件",
+    "result_file_patterns": [
+      "*.csv",
+      "*.warts"
+    ],
+    "description_patterns": "结果文件匹配模式列表"
+  },
+  "system_settings": {
+    "use_sudo": true,
+    "scamper_path": "scamper",
+    "description": "是否sudo执行，设置scamper路径，全局探测速率(pps)"
+  }
+}

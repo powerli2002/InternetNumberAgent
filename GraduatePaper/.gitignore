@@ -2,6 +2,13 @@
 .uv-cache/
 __pycache__/
 *.py[cod]
+outputs/
 outputs/logs/*.jsonl
 configs/local.secrets.json
 configs/*.secrets.json
+outputs/active_probe/cache/
+outputs/active_probe/*.json
+ipgeotools/IPDB/ip-database/src/libs/*.dat
+ipgeotools/IPDB/ip-database/src/libs/*.db
+ipgeotools/IPDB/GeoCN/*.mmdb
+ipgeotools/cbgtool/analysis/web/config.json

@@ -20,7 +20,7 @@
   },
   "active_triangulation": {
     "algorithm": "cbg",
-    "cbgtool_root": "cbgtool",
+    "cbgtool_root": "ipgeotools/cbgtool",
     "min_constraints": 3,
     "delta": 0.398,
     "sort_circles": 0
@@ -60,20 +60,21 @@
     }
   },
   "scamper": {
-    "scampertrace_root": "scampertrace",
+    "scampertrace_root": "ipgeotools/scampertrace",
     "scamper_path": "scamper",
     "sc_warts2csv_path": "sc_warts2csv",
     "use_sudo": false,
     "pps": 10,
     "timeout_seconds": 180,
-    "output_dir": "outputs/active_probe/scamper"
+    "output_dir": "outputs/active_probe/scamper",
+    "source_filename": "agentic_ipv6_targets.csv"
   },
   "active_probe": {
-    "allow_live_measurements": false,
+    "allow_live_measurements": true,
     "provider_order": ["existing_trace", "scamper", "ripe_atlas"],
     "cache_dir": "outputs/active_probe/cache",
-    "max_targets_per_run": 10,
-    "max_probes_per_target": 5,
+    "max_targets_per_run": 20,
+    "max_probes_per_target": 3,
     "min_probe_constraints": 3
   },
   "ripe_atlas": {
@@ -84,13 +85,36 @@
     "measurement_description": "agentic-ipv6-geo traceroute",
     "protocol": "ICMP",
     "poll_interval_seconds": 15,
-    "max_poll_attempts": 20
+    "max_poll_attempts": 20,
+    "max_retries": 2
   },
   "passive_ipdb": {
-    "enabled": false,
-    "backend": "csv",
+    "enabled": true,
+    "backend": "multi",
     "path": "",
-    "default_confidence": 0.35
+    "default_confidence": 0.35,
+    "sources": [
+      {
+        "name": "GeoCN",
+        "backend": "geocn_mmdb",
+        "path": "ipgeotools/IPDB/GeoCN/GeoCN.mmdb",
+        "default_confidence": 0.4
+      },
+      {
+        "name": "ip-database",
+        "backend": "ip_database_php",
+        "root": "ipgeotools/IPDB/ip-database",
+        "ipv4_path": "ipgeotools/IPDB/ip-database/src/libs/qqwry.dat",
+        "ipv6_path": "ipgeotools/IPDB/ip-database/src/libs/ipv6wry.db",
+        "default_confidence": 0.38
+      },
+      {
+        "name": "AiwenIPv4",
+        "backend": "aiwen_tsv",
+        "path": "../database/db/aiwen.txt",
+        "default_confidence": 0.35
+      }
+    ]
   },
   "llm_baseline": {
     "enabled": false,
@@ -100,10 +124,18 @@
     "trajectory_path": "outputs/rl/trajectories/qwen_baseline.jsonl"
   },
   "rl": {
+    "training_order": ["tool_selection_sft", "offline_reward_comparison", "grpo_ppo"],
     "trajectory_dir": "outputs/rl/trajectories",
+    "sft_dataset_path": "outputs/rl/sft/tool_selection_sft.jsonl",
     "reward_summary_path": "outputs/rl/reward_summary.json",
+    "offline_reward_comparison_path": "outputs/rl/offline_reward_comparison.json",
     "policy_path": "outputs/rl/policy.json",
     "max_steps": 4,
+    "grpo_ppo": {
+      "enabled": false,
+      "requires_sft_checkpoint": true,
+      "requires_reward_model": true
+    },
     "reward": {
       "tool_cost_weight": 10.0,
       "probe_cost_weight": 2.0,

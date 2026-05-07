@@ -1,0 +1,15 @@
+# CBG定位工具依赖项
+pandas>=1.0.0
+numpy>=1.18.0
+requests>=2.25.0
+ipinfo>=4.2.0
+matplotlib>=3.3.0
+scikit-learn>=0.24.0
+pathlib>=1.0.1 
+ipinfo
+ujson
+shapely>=1.8.0
+# 优化相关依赖
+scipy>=1.7.0
+wandb>=0.12.0
+seaborn>=0.11.0

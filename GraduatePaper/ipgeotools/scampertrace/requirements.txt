@@ -1,0 +1,25 @@
+# ScamperTrace项目依赖包
+# 
+# 核心数据处理库
+pandas>=1.5.0
+ipaddress; python_version<"3.3"
+
+# 系统和网络工具（如果需要Python实现）
+# pytricia>=1.0.2  # IP前缀处理（可选，项目使用内置ipaddress模块）
+
+# 开发和测试依赖
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# 日志和配置管理（使用内置模块，无额外依赖）
+# 项目主要使用Python标准库：
+# - os, sys, subprocess
+# - logging, datetime, time
+# - argparse, json, glob
+# - typing (Python 3.5+)
+
+# 注意：本项目设计为最小依赖，主要依赖Python标准库
+# 外部依赖：
+# 1. pandas - 用于CSV文件处理和数据操作
+# 2. scamper - 系统级网络测量工具（需单独安装）
+# 3. sc_warts2csv - scamper的结果解析工具（随scamper安装）

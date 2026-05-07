@@ -33,9 +33,20 @@ UV_CACHE_DIR=.uv-cache uv run ipv6geo-dashboard --config configs/trustgeo.json -
 
 界面支持 TrustGeo 数据适配、数据校验、单 IP 自动定位、规则调度/Bandit 调度选择、各工具输出对比、置信度与误差展示、评测运行、成本-精度前沿和实验报告查看。自动定位页会用类似 LangSmith trace 的节点流展示工具选择情况、调用/跳过原因、节点状态和最终融合结果。
 
+## MCP 工具服务
+
+Agent 可通过独立 MCP server 调用本实验工具。启动前需要安装 MCP 可选依赖：
+
+```bash
+UV_CACHE_DIR=.uv-cache uv sync --extra mcp
+UV_CACHE_DIR=.uv-cache uv run ipv6geo-mcp --config configs/default.json
+```
+
+MCP 暴露 `health`、`list_geo_tools`、`run_geo_tool`、`geolocate_ip`、`debug_geo_tools`、`collect_scamper_constraints`。其中 `run_geo_tool` 支持 `modugeo`、`rdns`、`active_triangulation`、`passive_ipdb`、`whois`、`fusion`、`scheduler_rule`；`collect_scamper_constraints` 默认只读缓存，显式传入 `allow_live=true` 才会调用 `scampertrace`。
+
 ## 主动探测与密钥
 
-默认配置保持离线复现，不会自动发起 RIPE Atlas、scamper 或 Qwen 请求。若要启用真实主动探测，需要在配置中设置 `active_probe.allow_live_measurements=true`，并通过环境变量提供凭据：
+当前配置允许真实主动探测，但 `ActiveTriangulationTool` 会先复用已有 trace；只有有效约束不足时才按 `active_probe.provider_order` 请求 scamper 或 RIPE Atlas。RIPE Atlas 默认策略为每个目标选择中国范围探针、最多 3 个探针、最多 2 次 HTTP 重试、每批最多 20 个唯一目标，并在 `outputs/active_probe/cache/` 记录本批预算状态。凭据通过环境变量或本地 secrets 文件提供：
 
 ```bash
 export RIPE_ATLAS_API_KEY="..."
@@ -45,7 +56,7 @@ export QWEN_API_KEY="..."
 export QWEN_BASE_URL="https://..."
 ```
 
-API key 不写入 `configs/*.json`。RIPE Atlas 实现规范见 `skills/ripe-atlas/SKILL.md`。
+API key 不写入可提交的 `configs/*.json`。RIPE Atlas 实现规范见 `skills/ripe-atlas/SKILL.md`。
 
 如果必须使用本地配置文件保存凭据，可写入 `configs/local.secrets.json`。该文件会被自动合并到运行配置中，并已被 `.gitignore` 排除，禁止提交。
 
@@ -58,10 +69,13 @@ API key 不写入 `configs/*.json`。RIPE Atlas 实现规范见 `skills/ripe-atl
 - `src/agentic_ipv6_geo/fusion/`：置信度加权融合与冲突惩罚。
 - `src/agentic_ipv6_geo/scheduler/`：规则式调度、Contextual Bandit、Qwen3.5 baseline、离线奖励 policy。
 - `src/agentic_ipv6_geo/evaluation/`：单工具、融合方案、调度策略评测与 RL trajectory 输出。
+- `src/agentic_ipv6_geo/mcp_server.py`：FastMCP 工具服务入口，供 Agent 按 MCP 协议调用定位工具。
+- `ipgeotools/`：外部工具与论文原型快照，包括 `Modugeo`、`cbgtool`、`scampertrace`、`IPDB/GeoCN` 和 `IPDB/ip-database`。
+- `worklog.md`：研究笔记、临时分析和非默认方案记录，不作为运行入口。
 - `configs/default.json`：默认实验配置。
 - `data/processed/*.csv`：可复跑样例数据，也可替换为真实处理后数据。
 
-`ActiveTriangulationTool` 默认复用 `GraduatePaper/cbgtool` 中已经实现的 CBG 约束圆交集方法；NCRGeo 与 NCR-CBG 混合方法保留为配置级备选。默认流程不强制安装 NCR 所需的 SciPy/ujson；如要单独实验 NCR/NCR-CBG，可运行 `UV_CACHE_DIR=.uv-cache uv sync --extra active` 后将 `active_triangulation.algorithm` 改为 `ncr` 或 `ncr-cbg`。
+`ActiveTriangulationTool` 默认复用 `GraduatePaper/ipgeotools/cbgtool` 中已经实现的 CBG 约束圆交集方法；NCRGeo 与 NCR-CBG 混合方法保留为配置级备选。`ScamperTraceProvider` 默认从 `GraduatePaper/ipgeotools/scampertrace` 接入主动探测。默认流程不强制安装 NCR 所需的 SciPy/ujson；如要单独实验 NCR/NCR-CBG，可运行 `UV_CACHE_DIR=.uv-cache uv sync --extra active` 后将 `active_triangulation.algorithm` 改为 `ncr` 或 `ncr-cbg`。
 
 ## 数据表
 
@@ -76,4 +90,4 @@ API key 不写入 `configs/*.json`。RIPE Atlas 实现规范见 `skills/ripe-atl
 
 缺失数据不会被伪造；对应工具会返回 `unavailable` 并写入失败原因。
 
-被动 IPDB 可使用独立 CSV，推荐字段为 `ip,prefix,lat,lon,region,city,granularity,confidence,database,version`。如果同时存在 `ip` 和 `prefix`，工具优先匹配单 IP，其次做最长前缀匹配。
+被动 IPDB 支持多源 backend：独立 CSV、`GeoCN.mmdb`、`ip-database` PHP 解析器，以及 `database/scripts` 对应的 Aiwen IPv4 TSV。当前 `database/db/aiwen.txt` 按脚本口径是 IPv4 整数区间库，不作为 IPv6 证据；`GeoCN` 与 `ip-database` 具备中国 IPv6 能力，但本地还缺少 `GeoCN.mmdb` 或可用 PHP/IPv6 离线库时会返回明确失败原因。

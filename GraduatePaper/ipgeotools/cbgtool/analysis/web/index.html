@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>CBG工具定位可视化</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <link rel="stylesheet" href="styles.css?v=20250521" />
+    <style>
+        .legend span {
+            margin-right: 15px;
+            font-size: 12px;
+        }
+
+        /* 优化后的顶栏布局 */
+        header {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            gap: 15px !important;
+            padding: 8px 15px !important;
+            background: white !important;
+            border-bottom: 2px solid #e0e0e0 !important;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+            min-height: 50px !important;
+            flex-wrap: nowrap !important;
+            margin-bottom: 0 !important;
+        }
+
+        header h1 {
+            margin: 0 !important;
+            font-size: 18px !important;
+            color: #333 !important;
+            white-space: nowrap !important;
+            flex-shrink: 0 !important;
+        }
+
+        /* 容器调整 */
+        .container {
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            background: white;
+        }
+
+        /* 视图切换样式 */
+        .view-toggle-panel {
+            display: flex !important;
+            gap: 6px !important;
+            flex-shrink: 0 !important;
+        }
+
+        .view-toggle-btn {
+            padding: 6px 12px !important;
+            border: 2px solid #333 !important;
+            background: white !important;
+            color: #333 !important;
+            cursor: pointer !important;
+            border-radius: 4px !important;
+            font-weight: bold !important;
+            font-size: 12px !important;
+            transition: all 0.3s ease !important;
+            white-space: nowrap !important;
+        }
+
+        .view-toggle-btn:hover {
+            background: #f0f0f0 !important;
+        }
+
+        .view-toggle-btn.active {
+            background: #333 !important;
+            color: white !important;
+        }
+
+        /* 搜索面板 */
+        .search-panel {
+            display: flex !important;
+            gap: 6px !important;
+            align-items: center !important;
+            flex-shrink: 1 !important;
+            min-width: 0 !important;
+        }
+
+        .search-panel input {
+            padding: 6px 8px !important;
+            border: 1px solid #ddd !important;
+            border-radius: 3px !important;
+            font-size: 12px !important;
+            width: 150px !important;
+            min-width: 100px !important;
+        }
+
+        .search-panel button {
+            padding: 6px 10px !important;
+            background: #333 !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            font-size: 12px !important;
+            white-space: nowrap !important;
+        }
+
+        /* 数据集面板 */
+        .dataset-panel {
+            display: flex !important;
+            gap: 6px !important;
+            align-items: center !important;
+            flex-shrink: 1 !important;
+            min-width: 0 !important;
+        }
+
+        .dataset-panel label {
+            font-size: 12px !important;
+            color: #333 !important;
+            white-space: nowrap !important;
+        }
+
+        .dataset-panel select {
+            padding: 5px 8px !important;
+            border: 1px solid #ddd !important;
+            border-radius: 3px !important;
+            font-size: 12px !important;
+            background: white !important;
+            max-width: 180px !important;
+            min-width: 120px !important;
+        }
+
+        .dataset-panel button {
+            padding: 5px 8px !important;
+            background: #f0f0f0 !important;
+            border: 1px solid #ddd !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            font-size: 12px !important;
+        }
+
+        /* 右侧区域 */
+        .header-right {
+            display: flex !important;
+            gap: 10px !important;
+            align-items: center !important;
+            flex-shrink: 0 !important;
+        }
+
+        .stats-panel {
+            font-size: 11px !important;
+            color: #666 !important;
+            white-space: nowrap !important;
+            background: #f8f9fa !important;
+            border-radius: 4px !important;
+            padding: 6px 10px !important;
+            box-shadow: none !important;
+        }
+
+        .logout-btn {
+            padding: 6px 12px !important;
+            background: #dc3545 !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 3px !important;
+            cursor: pointer !important;
+            font-size: 12px !important;
+            white-space: nowrap !important;
+        }
+
+        .logout-btn:hover {
+            background: #c82333 !important;
+        }
+
+        /* 主视图容器 */
+        .main-view {
+            width: 100%;
+            height: calc(100vh - 60px); /* 减去优化后的头部高度 */
+            overflow: auto; /* 允许滚动 */
+        }
+
+        /* 地图视图特定样式 */
+        #map-view {
+            overflow-y: auto;
+            padding-bottom: 20px; /* 底部留白 */
+        }
+
+        #map {
+            width: 100%;
+            height: 70vh;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+            position: relative;
+            margin-bottom: 15px;
+        }
+
+        /* 控制面板样式优化 */
+        .controls {
+            width: 100%;
+            display: flex;
+            gap: 20px;
+            background: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+
+        /* 信息面板样式优化 */
+        #info-panel {
+            width: 100%;
+            background: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            margin-bottom: 15px;
+            min-height: 120px; /* 确保有足够高度 */
+        }
+
+        /* 图例容器 */
+        .legend-container {
+            margin-bottom: 20px;
+        }
+
+        /* 性能分析全屏样式 */
+        .performance-fullscreen {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            background: #f8f9fa;
+        }
+
+        .performance-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background: white;
+            border-bottom: 2px solid #e0e0e0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .performance-header h2 {
+            margin: 0;
+            color: #333;
+            font-size: 20px;
+        }
+
+        .performance-controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        .control-btn {
+            padding: 6px 12px;
+            border: 1px solid #ddd;
+            background: white;
+            color: #333;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 12px;
+            transition: all 0.2s ease;
+        }
+
+        .control-btn:hover {
+            background: #f0f0f0;
+            border-color: #bbb;
+        }
+
+        .performance-main-content {
+            flex: 1;
+            display: flex;
+            gap: 0; /* 移除gap，因为我们要添加分隔条 */
+            padding: 20px;
+            height: calc(100% - 80px); /* 减去头部高度 */
+            min-height: 0; /* 重要：允许flex子元素缩小 */
+        }
+
+        .chart-section {
+            flex: 0 0 60%; /* 初始占60%宽度 */
+            min-width: 300px; /* 最小宽度限制 */
+            display: flex;
+            flex-direction: column;
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-right: 10px;
+        }
+
+        .chart-container-fullscreen {
+            flex: 1;
+            position: relative;
+            min-height: 0;
+        }
+
+        .chart-container-fullscreen canvas {
+            width: 100% !important;
+            height: 100% !important;
+            cursor: crosshair;
+        }
+
+        /* 可拖拽的分隔条 */
+        .resizer {
+            width: 6px;
+            background: linear-gradient(90deg, #e0e0e0 0%, #bdbdbd 50%, #e0e0e0 100%);
+            cursor: col-resize;
+            flex-shrink: 0;
+            position: relative;
+            border-radius: 3px;
+            transition: background 0.2s ease;
+        }
+
+        .resizer:hover {
+            background: linear-gradient(90deg, #2196F3 0%, #1976D2 50%, #2196F3 100%);
+        }
+
+        .resizer:active {
+            background: #1976D2;
+        }
+
+        /* 分隔条中间的拖拽指示器 */
+        .resizer::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 3px;
+            height: 30px;
+            background: radial-gradient(circle, #999 1px, transparent 1px);
+            background-size: 3px 6px;
+            background-repeat: repeat-y;
+            opacity: 0.7;
+        }
+
+        .metrics-section {
+            flex: 1;
+            min-width: 250px; /* 最小宽度限制 */
+            display: flex;
+            flex-direction: column;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+            margin-left: 10px;
+        }
+
+        /* CDF图表控制面板 */
+        .chart-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .chart-controls h3 {
+            margin: 0;
+            color: #333;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .axis-controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .axis-control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .axis-control-group label {
+            font-size: 11px;
+            color: #666;
+            margin: 0;
+        }
+
+        .axis-control-group input {
+            width: 70px;
+            padding: 4px 6px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            font-size: 11px;
+        }
+
+        .axis-control-group button {
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .axis-control-group button:hover {
+            background: #f0f0f0;
+            border-color: #bbb;
+        }
+
+        .metrics-content {
+            padding: 20px;
+            height: 100%;
+            overflow-y: auto;
+        }
+
+        .metrics-section h3 {
+            margin: 0 0 15px 0;
+            color: #333;
+            font-size: 16px;
+            text-align: center;
+            border-bottom: 2px solid #f0f0f0;
+            padding-bottom: 10px;
+        }
+
+        .metrics-table {
+            margin-bottom: 25px;
+        }
+
+        .metrics-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            background: white;
+            border-radius: 4px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .metrics-table th, .metrics-table td {
+            padding: 8px 6px;
+            text-align: center;
+            border-bottom: 1px solid #eee;
+        }
+
+        .metrics-table th {
+            background: #333;
+            color: white;
+            font-weight: bold;
+            font-size: 10px;
+        }
+
+        .metrics-table tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+
+        .metrics-table tr:hover {
+            background: #f0f0f0;
+        }
+
+        .method-controls {
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .method-controls h4 {
+            margin: 0 0 12px 0;
+            color: #333;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .method-checkboxes {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .method-checkboxes label {
+            display: flex;
+            align-items: center;
+            font-size: 12px;
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 3px;
+            transition: background-color 0.2s ease;
+        }
+
+        .method-checkboxes label:hover {
+            background-color: rgba(0,0,0,0.05);
+        }
+
+        .method-checkboxes input[type="checkbox"] {
+            margin-right: 8px;
+            cursor: pointer;
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 1400px) {
+            header h1 {
+                font-size: 16px;
+            }
+            
+            .search-panel input {
+                width: 120px;
+            }
+            
+            .dataset-panel select {
+                max-width: 150px;
+            }
+            
+            .stats-panel {
+                font-size: 10px;
+            }
+        }
+
+        @media (max-width: 1200px) {
+            .performance-main-content {
+                flex-direction: column;
+                gap: 15px;
+            }
+            
+            .metrics-section {
+                flex: 0 0 250px;
+            }
+            
+            header {
+                gap: 10px;
+                padding: 6px 10px;
+            }
+            
+            .search-panel input {
+                width: 100px;
+            }
+        }
+
+        @media (max-width: 900px) {
+            header {
+                flex-wrap: wrap;
+                min-height: auto;
+            }
+            
+            .view-toggle-panel {
+                order: 1;
+                width: 100%;
+                justify-content: center;
+                margin-top: 8px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .performance-header {
+                flex-direction: column;
+                gap: 10px;
+                align-items: stretch;
+            }
+            
+            .performance-controls {
+                justify-content: center;
+            }
+            
+            .performance-main-content {
+                padding: 10px;
+            }
+            
+            .metrics-section {
+                flex: 0 0 200px;
+            }
+        }
+
+        /* 隐藏旧的性能分析底部样式 */
+        .performance-section {
+            display: none !important;
+        }
+
+        /* 自定义tooltip样式 */
+        #chartjs-tooltip {
+            transition: opacity 0.2s ease;
+        }
+
+        /* 优化图表容器的鼠标交互 */
+        .chart-container-fullscreen:hover canvas {
+            background-color: rgba(248, 249, 250, 0.3);
+            transition: background-color 0.2s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>CBG工具定位可视化</h1>
+            
+            <!-- 视图切换按钮 -->
+            <div class="view-toggle-panel">
+                <button id="view-map" class="view-toggle-btn active">地图可视化</button>
+                <button id="view-performance" class="view-toggle-btn">性能分析</button>
+            </div>
+            
+            <div class="search-panel">
+                <input type="text" id="ip-search" placeholder="输入IP地址搜索..." />
+                <button id="search-button">搜索</button>
+            </div>
+            <div class="dataset-panel">
+                <label for="dataset-select">方法:</label>
+                <select id="dataset-select">
+                    <option value="">加载中...</option>
+                </select>
+            </div>
+            <div class="header-right">
+            <div class="stats-panel">
+                <div id="stats"></div>
+                </div>
+                <button id="logout-button" class="logout-btn">登出</button>
+            </div>
+        </header>
+        
+        <!-- 地图可视化区域 -->
+        <main id="map-view" class="main-view">
+            <div id="map"></div>
+            <div class="custom-zoom-controls">
+                <button id="zoom-in-btn">+</button>
+                <input type="range" id="zoom-slider" min="2" max="16" value="4" step="0.5">
+                <button id="zoom-out-btn">-</button>
+            </div>
+            <div class="controls">
+                <div class="control-group">
+                    <label>
+                        <input type="checkbox" id="show-probes" checked> 显示探针
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-predictions" checked> 显示预测位置
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-actuals" checked> 显示真实位置
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-lines" checked> 显示连线
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-circles"> 显示交圆
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-intersection"> 显示交集区域
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-selected-only"> 只展示被选中的IP
+                    </label>
+                </div>
+                <div class="circle-scale-control">
+                    <label for="circle-scale">交圆缩放: <span id="circle-scale-value">1.0</span></label>
+                    <input type="range" id="circle-scale" min="0.1" max="2.0" step="0.1" value="1.0">
+                </div>
+                <button id="clear-cache" style="margin-left: auto; padding: 5px 10px;">清除缓存并刷新</button>
+            </div>
+            <div id="info-panel">
+                <h3>详细信息</h3>
+                <div id="hover-info">鼠标悬停在元素上查看详情</div>
+            </div>
+            <div class="legend-container">
+                <div id="legend" class="legend"></div>
+            </div>
+        </main>
+
+        <!-- 性能分析区域 -->
+        <main id="performance-view" class="main-view" style="display: none;">
+            <div class="performance-fullscreen">
+                <div class="performance-header">
+                    <h2>定位方法性能分析对比</h2>
+                    <div class="performance-controls">
+                        <button id="refresh-performance" class="control-btn">刷新数据</button>
+                        <button id="select-all-methods" class="control-btn">全选</button>
+                        <button id="deselect-all-methods" class="control-btn">全不选</button>
+                    </div>
+                </div>
+                
+                <div class="performance-main-content">
+                    <!-- 左侧：累积分布曲线（大面积） -->
+                    <div class="chart-section">
+                        <!-- CDF图表控制面板 -->
+                        <div class="chart-controls">
+                            <h3>累积分布函数 (CDF) - 定位误差对比</h3>
+                            <div class="axis-controls">
+                                <div class="axis-control-group">
+                                    <label>X轴最大值(km)</label>
+                                    <input type="number" id="x-axis-max" value="auto" placeholder="自动">
+                                </div>
+                                <div class="axis-control-group">
+                                    <label>X轴最小值(km)</label>
+                                    <input type="number" id="x-axis-min" value="0" placeholder="0">
+                                </div>
+                                <div class="axis-control-group">
+                                    <button id="reset-axis">重置坐标轴</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="chart-container-fullscreen">
+                            <canvas id="cdf-chart"></canvas>
+                        </div>
+                    </div>
+                    
+                    <!-- 可拖拽的分隔条 -->
+                    <div class="resizer" id="chart-resizer"></div>
+                    
+                    <!-- 右侧：统计指标和方法选择（小面积） -->
+                    <div class="metrics-section">
+                        <div class="metrics-content">
+                            <h3>性能指标对比</h3>
+                            <div id="metrics-table" class="metrics-table">
+                                <!-- 动态生成的指标表格 -->
+                            </div>
+                            
+                            <!-- 方法选择 -->
+                            <div class="method-controls">
+                                <h4>显示方法:</h4>
+                                <div id="method-checkboxes" class="method-checkboxes">
+                                    <!-- 动态生成的复选框 -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="script.js?v=20250521"></script>
+    <script>
+        document.getElementById('clear-cache').addEventListener('click', function() {
+            window.location.reload(true);
+        });
+
+        // 登出功能
+        document.getElementById('logout-button').addEventListener('click', async function() {
+            try {
+                const response = await fetch('/api/logout', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                if (response.ok) {
+                    window.location.href = '/login.html';
+                } else {
+                    alert('登出失败，请稍后重试');
+                }
+            } catch (error) {
+                alert('网络错误，请稍后重试');
+            }
+        });
+    </script>
+</body>
+</html> 

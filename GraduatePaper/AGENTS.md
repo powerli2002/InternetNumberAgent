@@ -8,7 +8,7 @@
 ## 先读哪些文件
 1. `GraduatePaper/Agentic_IPv6_Geolocation_Plan.md`
    这是当前毕设实验的目标、MVP 范围、工具边界和评测要求。
-2. `GraduatePaper/Modugeo/samplepaper.tex`
+2. `GraduatePaper/ipgeotools/Modugeo/samplepaper.tex`
    这是 ModuGeo 论文材料，用于理解核心模型假设、特征设计和系统输入输出。
 3. `GraduatePaper/ref/`
    这里存放 rDNS、CBG 等参考论文，仅作为实现依据，不作为运行时代码来源。
@@ -19,7 +19,7 @@
 - 复现并封装 `ModuGeo` 能力，使其能作为统一工具被调度。
 - 实现与 `ModuGeo` 证据独立的辅助定位工具，优先包括：
   - `RDnsGeoTool`
-  - `ActiveTriangulationTool`（默认复用 `GraduatePaper/cbgtool` 的 CBG，NCR/NCR-CBG 作为备选）
+  - `ActiveTriangulationTool`（默认复用 `GraduatePaper/ipgeotools/cbgtool` 的 CBG，NCR/NCR-CBG 作为备选）
   - `WhoisBgpContextTool`
 - 实现规则式调度器、融合模块和批量评测模块。
 - 对单工具、融合方案、调度策略进行可重复实验，并输出结构化结果。
@@ -31,7 +31,7 @@
 - 主仓库“16 张核心表事实源”的约束主要适用于问答系统主链路；本目录内的实验数据可独立组织，但不要反向污染主系统 schema。
 
 ## 外部参考与代码来源
-- `GraduatePaper/Modugeo/samplepaper.tex` 是 ModuGeo 的论文级参考。
+- `GraduatePaper/ipgeotools/Modugeo/samplepaper.tex` 是 ModuGeo 的论文级参考。
 - `/home/lzj/TrustGeo/src/prefixgeo/v11` 可作为现有实现参考，但默认视为“外部参考目录”，不是本目录产物。
 - `GraduatePaper/ref/` 中的论文可用于复现 `rDNS` 和 `CBG` 思路。
 - 任何从外部实现借鉴的逻辑，都必须在本目录内重新整理为可运行、可解释、可评测的代码；不要做无法追踪的复制拼接。
@@ -52,7 +52,10 @@
 GraduatePaper/
   AGENTS.md
   Agentic_IPv6_Geolocation_Plan.md
-  Modugeo/
+  ipgeotools/
+    Modugeo/
+    cbgtool/
+    scampertrace/
   ref/
   data/
     raw/
@@ -73,8 +76,10 @@ GraduatePaper/
     predictions/
     figures/
     logs/
-  notes/
+  worklog.md
 ```
+
+`ipgeotools/` 用于收纳外部工具、论文原型和主动探测工具快照；稳定实验入口仍应放在 `src/agentic_ipv6_geo/`、`scripts/` 与 `configs/` 中。`worklog.md` 用于研究笔记、阶段性分析和废弃方案说明，不作为默认运行入口。
 
 ## 模块设计要求
 
@@ -145,6 +150,7 @@ GraduatePaper/
 - 评测入口：`UV_CACHE_DIR=.uv-cache uv run ipv6geo-eval --config configs/default.json --output-dir outputs`
 - 测试入口：`UV_CACHE_DIR=.uv-cache uv run python -m unittest discover -s tests -v`
 - 环境创建：`UV_CACHE_DIR=.uv-cache uv sync`
+- MCP 工具服务：`UV_CACHE_DIR=.uv-cache uv sync --extra mcp` 后运行 `UV_CACHE_DIR=.uv-cache uv run ipv6geo-mcp --config configs/default.json`
 - TrustGeo 数据适配：`UV_CACHE_DIR=.uv-cache uv run ipv6geo-prepare-trustgeo --trustgeo-root /home/lzj/TrustGeo --output-dir data/trustgeo_processed`
 - TrustGeo 评测：`UV_CACHE_DIR=.uv-cache uv run ipv6geo-eval --config configs/trustgeo.json --output-dir outputs/trustgeo`
 - 可视化界面：`UV_CACHE_DIR=.uv-cache uv sync --extra ui` 后运行 `UV_CACHE_DIR=.uv-cache uv run ipv6geo-dashboard --config configs/trustgeo.json --server-port 8501 --server-address 127.0.0.1`

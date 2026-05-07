@@ -28,7 +28,7 @@ class ActiveTriangulationTool(BaseGeoTool):
         self.min_constraints = int(self.config.get("min_constraints", 3))
         self.delta = float(self.config.get("delta", 0.398))
         self.sort_circles = int(self.config.get("sort_circles", 0))
-        self.cbgtool_root = Path(self.config.get("cbgtool_root", "cbgtool"))
+        self.cbgtool_root = Path(self.config.get("cbgtool_root", "ipgeotools/cbgtool"))
         self.active_probe_config = self.config.get("active_probe", {})
         self._constraint_evidence_by_probe: dict[str, dict[str, Any]] = {}
 
@@ -125,7 +125,7 @@ class ActiveTriangulationTool(BaseGeoTool):
             cost=Cost(probe_count=len(constraints)),
             evidence={
                 "algorithm": algorithm,
-                "source": helpers.get("source", "GraduatePaper/cbgtool/scripts/utils/helpers.py"),
+                "source": helpers.get("source", "GraduatePaper/ipgeotools/cbgtool/scripts/utils/helpers.py"),
                 "constraints": evidence_constraints,
                 "circle_count": len(circles),
                 "delta": ncr_delta or self.delta,
@@ -191,7 +191,7 @@ class ActiveTriangulationTool(BaseGeoTool):
                 "failure_reason": f"无法导入 cbgtool 的 NCRGeo 计算函数；如需使用 NCR/NCR-CBG，请安装 active 依赖：{import_error}",
                 "evidence": {
                     "algorithm": self.algorithm,
-                    "source": "GraduatePaper/cbgtool/scripts/analysis/analysis.py",
+                    "source": "GraduatePaper/ipgeotools/cbgtool/scripts/analysis/analysis.py",
                     "import_error": str(import_error),
                 },
             }
@@ -223,7 +223,7 @@ class ActiveTriangulationTool(BaseGeoTool):
             "iter_times": int(iter_times),
             "evidence": {
                 "algorithm": "ncr" if self.algorithm in self.NCR_ALIASES else "ncr-cbg",
-                "source": "GraduatePaper/cbgtool/scripts/analysis/analysis.py",
+                "source": "GraduatePaper/ipgeotools/cbgtool/scripts/analysis/analysis.py",
                 "constraints": self._constraint_evidence(constraints, self.delta),
                 "ncr_delta": float(delta),
                 "ncr_iter_times": int(iter_times),
@@ -326,7 +326,7 @@ class ActiveTriangulationTool(BaseGeoTool):
             from scripts.utils.helpers import select_best_guess_centroid
         except Exception:
             return {"select_best_guess_centroid": self._select_best_guess_centroid_fallback, "source": "internal_cbg_fallback"}
-        helpers = {"select_best_guess_centroid": select_best_guess_centroid, "source": "GraduatePaper/cbgtool/scripts/utils/helpers.py"}
+        helpers = {"select_best_guess_centroid": select_best_guess_centroid, "source": "GraduatePaper/ipgeotools/cbgtool/scripts/utils/helpers.py"}
         try:
             from scripts.analysis.analysis import compute_by_NCRGeo
             ncr_import_error = None

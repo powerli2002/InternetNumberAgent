@@ -77,7 +77,7 @@ MVP 只实现必要闭环，先不做复杂 RL。
 
 `RDnsGeoTool` 负责从 rDNS hostname 中提取地理语义。实现时需要维护城市名、拼音缩写、机场码、运营商机房缩写等词典。该工具优先输出区域级候选，不应在证据不足时强行输出坐标。
 
-`ActiveTriangulationTool` 实现基于时延约束的主动定位。默认复用 `GraduatePaper/cbgtool` 的 CBG 约束圆交集方法；NCRGeo 与 NCR-CBG 混合方法作为配置级备选。输入为多个已知位置探针或地标到目标的 RTT。有效约束少于 3 个时直接返回 `unavailable`，不能硬凑坐标。
+`ActiveTriangulationTool` 实现基于时延约束的主动定位。默认复用 `GraduatePaper/ipgeotools/cbgtool` 的 CBG 约束圆交集方法；NCRGeo 与 NCR-CBG 混合方法作为配置级备选。输入为多个已知位置探针或地标到目标的 RTT。有效约束少于 3 个时直接返回 `unavailable`，不能硬凑坐标。
 
 `WhoisBgpContextTool` 只提供上下文，不作为强定位器。它输出 ASN、组织、BGP 前缀、运营商和可能的注册地。除非注册信息明确到城市且经过验证，否则不能直接作为最终位置。
 

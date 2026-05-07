@@ -24,20 +24,21 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
         },
     },
     "scamper": {
-        "scampertrace_root": "scampertrace",
+        "scampertrace_root": "ipgeotools/scampertrace",
         "scamper_path": "scamper",
         "sc_warts2csv_path": "sc_warts2csv",
         "use_sudo": False,
         "pps": 10,
         "timeout_seconds": 180,
         "output_dir": "outputs/active_probe/scamper",
+        "source_filename": "agentic_ipv6_targets.csv",
     },
     "active_probe": {
-        "allow_live_measurements": False,
+        "allow_live_measurements": True,
         "provider_order": ["existing_trace", "scamper", "ripe_atlas"],
         "cache_dir": "outputs/active_probe/cache",
-        "max_targets_per_run": 10,
-        "max_probes_per_target": 5,
+        "max_targets_per_run": 20,
+        "max_probes_per_target": 3,
         "min_probe_constraints": 3,
     },
     "ripe_atlas": {
@@ -47,12 +48,35 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
         "protocol": "ICMP",
         "poll_interval_seconds": 15,
         "max_poll_attempts": 20,
+        "max_retries": 2,
     },
     "passive_ipdb": {
-        "enabled": False,
-        "backend": "csv",
+        "enabled": True,
+        "backend": "multi",
         "path": "",
         "default_confidence": 0.35,
+        "sources": [
+            {
+                "name": "GeoCN",
+                "backend": "geocn_mmdb",
+                "path": "ipgeotools/IPDB/GeoCN/GeoCN.mmdb",
+                "default_confidence": 0.4,
+            },
+            {
+                "name": "ip-database",
+                "backend": "ip_database_php",
+                "root": "ipgeotools/IPDB/ip-database",
+                "ipv4_path": "ipgeotools/IPDB/ip-database/src/libs/qqwry.dat",
+                "ipv6_path": "ipgeotools/IPDB/ip-database/src/libs/ipv6wry.db",
+                "default_confidence": 0.38,
+            },
+            {
+                "name": "AiwenIPv4",
+                "backend": "aiwen_tsv",
+                "path": "../database/db/aiwen.txt",
+                "default_confidence": 0.35,
+            },
+        ],
     },
     "llm_baseline": {
         "enabled": False,
@@ -62,10 +86,18 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
         "trajectory_path": "outputs/rl/trajectories/qwen_baseline.jsonl",
     },
     "rl": {
+        "training_order": ["tool_selection_sft", "offline_reward_comparison", "grpo_ppo"],
         "trajectory_dir": "outputs/rl/trajectories",
+        "sft_dataset_path": "outputs/rl/sft/tool_selection_sft.jsonl",
         "reward_summary_path": "outputs/rl/reward_summary.json",
+        "offline_reward_comparison_path": "outputs/rl/offline_reward_comparison.json",
         "policy_path": "outputs/rl/policy.json",
         "max_steps": 4,
+        "grpo_ppo": {
+            "enabled": False,
+            "requires_sft_checkpoint": True,
+            "requires_reward_model": True,
+        },
         "reward": {
             "tool_cost_weight": 10.0,
             "probe_cost_weight": 2.0,
@@ -138,6 +170,7 @@ def runtime_warnings(config: dict[str, Any]) -> list[str]:
         qwen_cfg = config.get("external_services", {}).get("qwen", {})
         if not os.environ.get(str(qwen_cfg.get("api_key_env", ""))):
             warnings.append("已启用 Qwen baseline，但缺少 Qwen API key 环境变量")
-    if config.get("passive_ipdb", {}).get("enabled") and not config.get("passive_ipdb", {}).get("path"):
-        warnings.append("已启用被动 IPDB，但未配置数据库路径")
+    passive_cfg = config.get("passive_ipdb", {})
+    if passive_cfg.get("enabled") and not (passive_cfg.get("path") or passive_cfg.get("sources")):
+        warnings.append("已启用被动 IPDB，但未配置数据库路径或 sources")
     return warnings

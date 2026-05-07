@@ -221,6 +221,7 @@ class Evaluator:
             json.dump(group_metrics, fh, ensure_ascii=False, indent=2)
 
         self._write_rl_artifacts(rows_by_experiment)
+        self._write_tool_selection_sft(rows_by_experiment)
 
         report_path = self.output_dir / "实验报告.md"
         with report_path.open("w", encoding="utf-8") as fh:
@@ -281,6 +282,57 @@ class Evaluator:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         with summary_path.open("w", encoding="utf-8") as fh:
             json.dump(reward_summary, fh, ensure_ascii=False, indent=2)
+        comparison_path = Path(rl_cfg.get("offline_reward_comparison_path", self.output_dir / "rl" / "offline_reward_comparison.json"))
+        comparison_path.parent.mkdir(parents=True, exist_ok=True)
+        with comparison_path.open("w", encoding="utf-8") as fh:
+            json.dump(reward_summary, fh, ensure_ascii=False, indent=2)
+
+    def _write_tool_selection_sft(self, rows_by_experiment: dict[str, list[dict]]) -> None:
+        action_by_experiment = {
+            "single_modugeo": "stop",
+            "single_rdns": "rdns",
+            "single_active_triangulation": "active",
+            "single_passive_ipdb": "passive",
+            "fusion_all": "all",
+        }
+        grouped: dict[str, list[tuple[str, dict, float]]] = {}
+        for experiment, rows in rows_by_experiment.items():
+            action = action_by_experiment.get(experiment)
+            if not action:
+                continue
+            for row in rows:
+                grouped.setdefault(row["target_ip"], []).append((action, row, self._trajectory_reward(row)))
+
+        rl_cfg = self.config.get("rl", {})
+        sft_path = Path(rl_cfg.get("sft_dataset_path", self.output_dir / "rl" / "sft" / "tool_selection_sft.jsonl"))
+        sft_path.parent.mkdir(parents=True, exist_ok=True)
+        with sft_path.open("w", encoding="utf-8") as fh:
+            for target_ip, candidates in sorted(grouped.items()):
+                action, row, reward = max(candidates, key=lambda item: item[2])
+                sample = {
+                    "messages": [
+                        {"role": "system", "content": "你只能从 stop, rdns, active, passive, all 中选择一个 IPv6 定位工具动作，并返回 JSON。"},
+                        {"role": "user", "content": json.dumps(self._sft_state(row, candidates), ensure_ascii=False)},
+                        {"role": "assistant", "content": json.dumps({"action": action}, ensure_ascii=False)},
+                    ],
+                    "target_ip": target_ip,
+                    "chosen_action": action,
+                    "chosen_reward": reward,
+                    "candidate_rewards": {candidate_action: candidate_reward for candidate_action, _candidate_row, candidate_reward in candidates},
+                }
+                fh.write(json.dumps(sample, ensure_ascii=False, default=str) + "\n")
+
+    def _sft_state(self, row: dict, candidates: list[tuple[str, dict, float]]) -> dict:
+        result = row["result"]
+        return {
+            "target_ip": row["target_ip"],
+            "truth_region": row["truth"].region,
+            "truth_city": row["truth"].city,
+            "available_actions": ["stop", "rdns", "active", "passive", "all"],
+            "candidate_status": {action: candidate_row["result"]["status"] for action, candidate_row, _reward in candidates},
+            "candidate_cost": {action: candidate_row["result"].get("cost", {}) for action, candidate_row, _reward in candidates},
+            "current_result_confidence": result.get("confidence"),
+        }
 
     def _trajectory_row(self, row: dict, reward: float) -> dict:
         result = row["result"]

@@ -10,11 +10,15 @@ dependencies = [
 
 [project.optional-dependencies]
 active = [
+  "pandas>=2.0.0",
   "scipy>=1.10.0",
   "ujson>=5.8.0",
 ]
 ui = [
   "streamlit>=1.36.0",
+]
+mcp = [
+  "fastmcp>=3.0.1",
 ]
 
 [project.scripts]
@@ -23,6 +27,7 @@ ipv6geo-eval = "agentic_ipv6_geo.cli:evaluate_main"
 ipv6geo-prepare-trustgeo = "agentic_ipv6_geo.cli:prepare_trustgeo_main"
 ipv6geo-validate = "agentic_ipv6_geo.cli:validate_main"
 ipv6geo-dashboard = "agentic_ipv6_geo.cli:dashboard_main"
+ipv6geo-mcp = "agentic_ipv6_geo.mcp_server:main"
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]

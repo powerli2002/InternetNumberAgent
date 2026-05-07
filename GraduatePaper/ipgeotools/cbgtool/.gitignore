@@ -1,0 +1,50 @@
+.csv
+.json
+.pkl
+.txt
+.log
+.pyc
+.pyo
+.pyd
+.tar
+.png
+
+
+__pycache__
+data/format/*
+!data/format/.gitkeep
+data/generated/*
+!data/generated/.gitkeep
+data/raw/*
+!data/raw/.gitkeep
+data/lod_data/*
+
+analysis/results/*
+!analysis/results/.gitkeep
+
+data/output/*
+!data/output/.gitkeep
+data/old_data
+
+logs/*
+
+data.tar
+analysis/web/node_modules/*
+
+# Node.js
+node_modules/
+
+# npm
+package-lock.json
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+wandb
+logs
