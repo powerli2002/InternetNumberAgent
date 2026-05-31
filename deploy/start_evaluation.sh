@@ -10,8 +10,11 @@ if [ ! -x "$ROOT_DIR/.venv/bin/python" ]; then
   exit 1
 fi
 
+# services/ 下的 agent、fusiondata 以顶层包名导入，需将其加入模块搜索路径
+export PYTHONPATH="$ROOT_DIR/services${PYTHONPATH:+:$PYTHONPATH}"
+
 if [ "$#" -eq 0 ]; then
-  exec .venv/bin/python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith --langsmith-mode writeback
+  exec .venv/bin/python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir services/agent/evaluate/data --push-langsmith --langsmith-mode writeback
 fi
 
 exec .venv/bin/python -m agent.evaluate.pipelines.run_pipeline "$@"

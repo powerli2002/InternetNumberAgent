@@ -18,6 +18,9 @@ fi
 mkdir -p "$LOG_DIR"
 cd "$ROOT_DIR"
 
+# services/ 下的 agent、backend、fusiondata 以顶层包名导入，需将其加入模块搜索路径
+export PYTHONPATH="$ROOT_DIR/services${PYTHONPATH:+:$PYTHONPATH}"
+
 start_python_process() {
   local name="$1"
   local pattern="$2"
@@ -49,4 +52,4 @@ start_shell_process() {
 start_python_process mcp 'agent.services.mcp.server:app' -m uvicorn agent.services.mcp.server:app --host 0.0.0.0 --port 2032
 start_python_process backend 'backend.main:app' -m uvicorn backend.main:app --host 0.0.0.0 --port 2026
 start_python_process agent_api 'agent.services.http.server:app' -m uvicorn agent.services.http.server:app --host 0.0.0.0 --port 2025
-start_shell_process webapp 'next dev -p 3012' "cd '$ROOT_DIR/webapp' && pnpm install --frozen-lockfile && exec pnpm dev"
+start_shell_process webapp 'next dev -p 3012' "cd '$ROOT_DIR/services/webapp' && pnpm install --frozen-lockfile && exec pnpm dev"
