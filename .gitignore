@@ -62,3 +62,4 @@ ref
 
 # IDE / 会话产物
 .cursor/
+nohup.out
