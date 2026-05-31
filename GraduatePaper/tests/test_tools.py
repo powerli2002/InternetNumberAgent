@@ -1,8 +1,11 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from agentic_ipv6_geo.data.repository import DataRepository
 from agentic_ipv6_geo.fusion import FusionTool
 from agentic_ipv6_geo.mcp_server import IPv6GeoMcpRuntime
+from agentic_ipv6_geo.providers import ZDnsBulkRDnsCollector
 from agentic_ipv6_geo.tools import ActiveTriangulationTool, CBGGeoTool, ModuGeoTool, RDnsGeoTool
 from agentic_ipv6_geo.tools.registry import METHOD_SPECS, build_methods
 
@@ -78,6 +81,50 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(active["result"]["status"], "ok")
         self.assertIn(scheduled["result"]["status"], {"ok", "unavailable"})
         self.assertIn(scamper["status"], {"ok", "unavailable"})
+
+    def test_zdns_bulk_collector_normalizes_status_and_writes_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_zdns = root / "fake_zdns.py"
+            fake_zdns.write_text(
+                """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+input_file = Path(sys.argv[sys.argv.index("--input-file") + 1])
+for ip in input_file.read_text().splitlines():
+    if ip.endswith("1"):
+        payload = {
+            "name": ip,
+            "results": {"PTR": {"status": "NOERROR", "duration": 0.01, "data": {"resolver": "fake:53", "protocol": "udp", "answers": [{"type": "PTR", "answer": "bj.example."}]}}},
+        }
+    elif ip.endswith("2"):
+        payload = {"name": ip, "results": {"PTR": {"status": "NXDOMAIN", "duration": 0.02, "data": {}, "error": "not found"}}}
+    else:
+        payload = {"name": ip, "results": {"PTR": {"status": "NOERROR", "duration": 0.03, "data": {"answers": []}}}}
+    print(json.dumps(payload))
+""",
+                encoding="utf-8",
+            )
+            fake_zdns.chmod(0o755)
+
+            collector = ZDnsBulkRDnsCollector(zdns_bin=str(fake_zdns))
+            summary = collector.collect(
+                ["240e::1", "240e::2", "240e::3"],
+                root / "full.jsonl",
+                root / "rdns.csv",
+                root / "summary.json",
+                show_progress=False,
+            )
+            parse_error = collector.parse_json_line("{bad json")
+
+            self.assertEqual(summary["total_queried"], 3)
+            self.assertEqual(summary["ok_count"], 1)
+            self.assertEqual(summary["status_counts"]["nxdomain"], 1)
+            self.assertEqual(summary["status_counts"]["no_answer"], 1)
+            self.assertEqual(parse_error.status, "parse_error")
+            self.assertIn("bj.example", (root / "rdns.csv").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

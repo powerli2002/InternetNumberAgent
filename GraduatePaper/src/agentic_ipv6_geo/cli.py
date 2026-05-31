@@ -13,6 +13,7 @@ from agentic_ipv6_geo.data.repository import DataRepository, write_jsonl
 from agentic_ipv6_geo.data.trustgeo_adapter import TrustGeoAdapter
 from agentic_ipv6_geo.data.validator import DataValidator, write_validation_report
 from agentic_ipv6_geo.evaluation import Evaluator
+from agentic_ipv6_geo.providers import ZDnsBulkRDnsCollector
 from agentic_ipv6_geo.scheduler import RuleAgentScheduler
 from agentic_ipv6_geo.tools.registry import build_methods
 
@@ -90,6 +91,44 @@ def validate_main() -> None:
     report = DataValidator(DataRepository(config.get("data_dir", "data/processed"))).validate()
     write_validation_report(args.output, report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def collect_rdns_main() -> None:
+    parser = argparse.ArgumentParser(description="使用 zdns 批量采集 IPv6 PTR/rDNS 结果")
+    parser.add_argument("--input", default="/home/lzj/TrustGeo/data/ipgeo_collected_data_20260114.csv", help="输入 CSV 或纯 IP 列表")
+    parser.add_argument("--ip-version", type=int, choices=[4, 6], default=6)
+    parser.add_argument("--limit", type=int, default=None, help="仅查询前 N 个去重后的公开 IP")
+    parser.add_argument("--zdns-bin", default="outputs/rdns_test/zdns", help="zdns 可执行文件路径或 PATH 中的命令名")
+    parser.add_argument("--resolver", default="1.1.1.1", help="递归解析器，iterative 模式会忽略")
+    parser.add_argument("--mode", choices=["recursive", "iterative"], default="recursive")
+    parser.add_argument("--network-timeout", type=int, default=2)
+    parser.add_argument("--iteration-timeout", type=int, default=4)
+    parser.add_argument("--output-jsonl", default="outputs/rdns/zdns_ptr_results.jsonl")
+    parser.add_argument("--output-rdns-csv", default="data/trustgeo_processed/rdns.csv")
+    parser.add_argument("--summary", default="outputs/rdns/zdns_ptr_summary.json")
+    parser.add_argument("--append", action="store_true", help="追加写入输出文件")
+    parser.add_argument("--resume", action="store_true", help="跳过 output-jsonl 中已经存在的 IP")
+    parser.add_argument("--no-progress", action="store_true", help="关闭进度条")
+    args = parser.parse_args()
+
+    ips = ZDnsBulkRDnsCollector.extract_ips_from_file(args.input, ip_version=args.ip_version, limit=args.limit)
+    collector = ZDnsBulkRDnsCollector(
+        zdns_bin=args.zdns_bin,
+        resolver=args.resolver,
+        mode=args.mode,
+        network_timeout=args.network_timeout,
+        iteration_timeout=args.iteration_timeout,
+    )
+    summary = collector.collect(
+        ips,
+        args.output_jsonl,
+        args.output_rdns_csv,
+        args.summary,
+        show_progress=not args.no_progress,
+        append=args.append,
+        resume=args.resume,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def dashboard_main() -> None:

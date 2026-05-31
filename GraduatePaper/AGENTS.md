@@ -154,6 +154,7 @@ GraduatePaper/
 - TrustGeo 数据适配：`UV_CACHE_DIR=.uv-cache uv run ipv6geo-prepare-trustgeo --trustgeo-root /home/lzj/TrustGeo --output-dir data/trustgeo_processed`
 - TrustGeo 评测：`UV_CACHE_DIR=.uv-cache uv run ipv6geo-eval --config configs/trustgeo.json --output-dir outputs/trustgeo`
 - 可视化界面：`UV_CACHE_DIR=.uv-cache uv sync --extra ui` 后运行 `UV_CACHE_DIR=.uv-cache uv run ipv6geo-dashboard --config configs/trustgeo.json --server-port 8501 --server-address 127.0.0.1`
+- 批量 rDNS/PTR 采集：`UV_CACHE_DIR=.uv-cache uv run ipv6geo-collect-rdns --input /home/lzj/TrustGeo/data/ipgeo_collected_data_20260114.csv --ip-version 6 --zdns-bin outputs/rdns_test/zdns --resolver 1.1.1.1 --output-jsonl outputs/rdns/zdns_ptr_results.jsonl --output-rdns-csv data/trustgeo_processed/rdns.csv --summary outputs/rdns/zdns_ptr_summary.json`
 
 ## 交付标准
 - 能批量输入 IPv6 目标并输出位置、置信度、证据链和成本信息。

@@ -44,6 +44,23 @@ UV_CACHE_DIR=.uv-cache uv run ipv6geo-mcp --config configs/default.json
 
 MCP 暴露 `health`、`list_geo_tools`、`run_geo_tool`、`geolocate_ip`、`debug_geo_tools`、`collect_scamper_constraints`。其中 `run_geo_tool` 支持 `modugeo`、`rdns`、`active_triangulation`、`passive_ipdb`、`whois`、`fusion`、`scheduler_rule`；`collect_scamper_constraints` 默认只读缓存，显式传入 `allow_live=true` 才会调用 `scampertrace`。
 
+## 批量 rDNS/PTR 采集
+
+`ipv6geo-collect-rdns` 使用 `zdns PTR` 对 CSV 或纯文本 IP 列表做全量反向解析，自动去重、显示进度条，并把 `NOERROR`、`NXDOMAIN`、`SERVFAIL`、`TIMEOUT`、坏 JSON 等结果标准化。成功 PTR 会写入兼容 `DataRepository` 的 `rdns.csv`，完整状态写入 JSONL 便于复盘。
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run ipv6geo-collect-rdns \
+  --input /home/lzj/TrustGeo/data/ipgeo_collected_data_20260114.csv \
+  --ip-version 6 \
+  --zdns-bin outputs/rdns_test/zdns \
+  --resolver 1.1.1.1 \
+  --output-jsonl outputs/rdns/zdns_ptr_results.jsonl \
+  --output-rdns-csv data/trustgeo_processed/rdns.csv \
+  --summary outputs/rdns/zdns_ptr_summary.json
+```
+
+如果上次任务中断，可加 `--resume` 跳过 `output-jsonl` 里已经完成的 IP。`--mode iterative` 可用于对比 DNS 授权链路，但当前 IPv6 PTR 测试中速度慢且超时多，不作为默认全量采集方式。
+
 ## 主动探测与密钥
 
 当前配置允许真实主动探测，但 `ActiveTriangulationTool` 会先复用已有 trace；只有有效约束不足时才按 `active_probe.provider_order` 请求 scamper 或 RIPE Atlas。RIPE Atlas 默认策略为每个目标选择中国范围探针、最多 3 个探针、最多 2 次 HTTP 重试、每批最多 20 个唯一目标，并在 `outputs/active_probe/cache/` 记录本批预算状态。凭据通过环境变量或本地 secrets 文件提供：
@@ -64,7 +81,7 @@ API key 不写入可提交的 `configs/*.json`。RIPE Atlas 实现规范见 `ski
 
 - `src/agentic_ipv6_geo/data/`：CSV 数据加载与训练/评测切分。
 - `src/agentic_ipv6_geo/tools/`：`ModuGeoTool`、`RDnsGeoTool`、`ActiveTriangulationTool`、`PassiveIpDbGeoTool`、`WhoisBgpContextTool`。
-- `src/agentic_ipv6_geo/providers/`：scamper、rDNS、RIPE Atlas 主动探测 provider。
+- `src/agentic_ipv6_geo/providers/`：scamper、rDNS、RIPE Atlas 主动探测 provider，以及 `zdns` 批量 PTR 采集器。
 - `src/agentic_ipv6_geo/tools/registry.py`：统一方法注册表，前端、调度器和评测器通过同一入口构造方法，后续新增方法时优先扩展这里。
 - `src/agentic_ipv6_geo/fusion/`：置信度加权融合与冲突惩罚。
 - `src/agentic_ipv6_geo/scheduler/`：规则式调度、Contextual Bandit、Qwen3.5 baseline、离线奖励 policy。
