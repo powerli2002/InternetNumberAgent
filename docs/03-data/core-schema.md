@@ -56,8 +56,8 @@
 - LangGraph checkpoint 相关表
 
 ## 当前权威来源
-- 结构化表与导入脚本：`agent/scripts/load_all_csv.py`
+- 结构化表与导入脚本：`services/agent/scripts/load_all_csv.py`
 - 统一 DDL：`database/core_schema.sql`
-- 融合处理：`fusiondata/src/`
+- 融合处理：`services/fusiondata/src/`
 
 涉及表结构或字段语义变更时，应优先更新本文件。

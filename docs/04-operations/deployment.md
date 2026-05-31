@@ -12,7 +12,7 @@
 ## 启动前置条件
 
 - 仓库根目录已创建并安装 `.venv/`；`deploy/` 下的 Python 脚本默认直接调用 `.venv/bin/python`。
-- 如需启动 `webapp/`，宿主机需已安装 `pnpm`。
+- 如需启动 `services/webapp/`，宿主机需已安装 `pnpm`。
 
 ## deploy 启动链路
 
@@ -33,14 +33,14 @@ docker compose -f docker/docker-compose.yml up -d postgres etcd minio milvus neo
 按 OpenSandbox 官方 Docker 示例，当前仓库统一使用 `docker/docker-compose.yml` 管理 OpenSandbox：
 
 ```bash
-backend/scripts/pull_opensandbox_images.sh
+services/backend/scripts/pull_opensandbox_images.sh
 docker compose -f docker/docker-compose.yml up -d opensandbox
 ```
 
 首次启动后，可用最小联调脚本验证：
 
 ```bash
-.venv/bin/python backend/scripts/opensandbox_smoke_test.py
+.venv/bin/python services/backend/scripts/opensandbox_smoke_test.py
 ```
 
 默认配置说明：
@@ -49,7 +49,7 @@ docker compose -f docker/docker-compose.yml up -d opensandbox
 - OpenSandbox Server 配置文件位于 `conf/opensandbox.toml`
 - 默认地址是 `127.0.0.1:8080`
 - 默认模板镜像是 `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.2`
-- `backend/scripts/start_opensandbox.sh` 是对 `docker compose -f docker/docker-compose.yml up -d opensandbox` 的封装
+- `services/backend/scripts/start_opensandbox.sh` 是对 `docker compose -f docker/docker-compose.yml up -d opensandbox` 的封装
 
 ### 3. 导入 16 张核心表
 
@@ -92,7 +92,7 @@ python -m agent.scripts.build_nl2sql_indexes
 ### 构建文档向量索引
 
 ```bash
-python agent/knowledge_ingest.py --root . --path agent/knowledge --reset
+python services/agent/knowledge_ingest.py --root . --path services/agent/knowledge --reset
 ```
 
 ### 构建 Neo4j 图谱
@@ -110,7 +110,7 @@ python -m agent.scripts.neo4j_graph_loader --batch-size 1000
 ### AS 疆域分析
 
 ```bash
-python agent/tools/as_territory_tools.py --config conf/config.docker.yaml --root .
+python services/agent/tools/as_territory_tools.py --config conf/config.docker.yaml --root .
 ```
 
 ## 关键端口

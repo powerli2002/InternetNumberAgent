@@ -1,19 +1,24 @@
 # fusionprocessing - Agent 入口规范
 
 ## 角色定位
-- 本仓库当前目标是构建“互联网号码资源问答系统”MVP：以 `fusiondata/` 为融合处理层，将 RIR/WHOIS/RDAP、BGP、DNS/网站等多源数据清洗对齐后写入 PostgreSQL 16 张核心表，并由 `FusionAgent` 统一调度 NL2SQL、RAG 与图查询，生成带证据的回答。
+- 本仓库当前目标是构建“互联网号码资源问答系统”MVP：以 `services/fusiondata/` 为融合处理层，将 RIR/WHOIS/RDAP、BGP、DNS/网站等多源数据清洗对齐后写入 PostgreSQL 16 张核心表，并由 `FusionAgent` 统一调度 NL2SQL、RAG 与图查询，生成带证据的回答。
 - PostgreSQL 是事实源，Milvus 与 Neo4j 属于可重建的派生索引；回答必须能回溯到 SQL 结果、文档片段或图谱关系。
 
 ## 当前代码结构
-- `fusiondata/src/`：数据清洗、实体化、格式化流水线。
-- `fusiondata/setup.py`：融合处理入口。
-- `agent/runtime/`：FusionAgent、LangGraph 主编排、上下文构建。
-- `agent/services/http/`：HTTP API 服务。
-- `agent/services/mcp/`：FastMCP 工具服务与客户端。
-- `agent/tools/`：NL2SQL、RAG、Neo4j、Note、Todo 等底层工具。
-- `agent/scripts/`：导入、建索引、评测、排障脚本。
+- 四个产品服务统一收纳在 `services/` 下；三个 Python 包仍以顶层包名 `agent`、`fusiondata`、`backend` 导入，靠把 `services/` 加入 `PYTHONPATH`（`deploy/` 脚本已自动设置，手动执行 `python -m agent.*` 前先 `export PYTHONPATH=services`）。
+- `services/fusiondata/src/`：数据清洗、实体化、格式化流水线。
+- `services/fusiondata/setup.py`：融合处理入口。
+- `services/agent/runtime/`：FusionAgent、LangGraph 主编排、上下文构建。
+- `services/agent/services/http/`：HTTP API 服务。
+- `services/agent/services/mcp/`：FastMCP 工具服务与客户端。
+- `services/agent/tools/`：NL2SQL、RAG、Neo4j、Note、Todo 等底层工具。
+- `services/agent/scripts/`：导入、建索引、评测、排障脚本。
+- `services/backend/`：认证、线程、过程事件、artifact、OpenSandbox 接入。
+- `services/webapp/`：正式产品前端。
 - `conf/`：配置与 `.env`。
+- `database/`：核心表 DDL 与注释。
 - `docs/`：当前权威文档与 AI 指南。
+- `scratch/`：技能卡片与个人笔记等非运行必需内容。
 
 ## 硬约束
 - 默认落库目标只有 16 张核心实体表；不要引入 `*_audit`、原始镜像表或额外中间表，除非用户明确要求。

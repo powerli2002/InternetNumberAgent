@@ -4,7 +4,7 @@
 
 评测链路用于批量生成问题、调用 `FusionAgent` 回答、抓取 LangSmith trace，并基于评分规则输出结构化评分结果。
 
-当前实现位于 `agent/evaluate/`，默认流程包括：
+当前实现位于 `services/agent/evaluate/`，默认流程包括：
 - 生成问题集
 - 生成回答与证据
 - 构建评分 rubric
@@ -12,9 +12,9 @@
 - 将结果写回 LangSmith 或输出本地文件
 
 ## 目录结构
-- `agent/evaluate/core/`：数据契约、配置、题库与评分提示模板
-- `agent/evaluate/pipelines/`：四阶段流水线与总控入口
-- `agent/evaluate/integrations/`：LangSmith 集成
+- `services/agent/evaluate/core/`：数据契约、配置、题库与评分提示模板
+- `services/agent/evaluate/pipelines/`：四阶段流水线与总控入口
+- `services/agent/evaluate/integrations/`：LangSmith 集成
 
 ## 前置条件
 - 安装仓库依赖：`pip install -r requirements.txt`
@@ -27,16 +27,16 @@
 ## 一键执行
 
 ```bash
-.venv/bin/python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir agent/evaluate/data --push-langsmith --langsmith-mode writeback
+.venv/bin/python -m agent.evaluate.pipelines.run_pipeline --count 30 --workdir services/agent/evaluate/data --push-langsmith --langsmith-mode writeback
 ```
 
 ## 分步执行
 
 ```bash
-.venv/bin/python -m agent.evaluate.pipelines.generate_queries --count 30 --out agent/evaluate/data/queries.jsonl
-.venv/bin/python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json
-.venv/bin/python -m agent.evaluate.pipelines.fill_answers --in agent/evaluate/data/queries.jsonl --out agent/evaluate/data/answers.jsonl
-.venv/bin/python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
+.venv/bin/python -m agent.evaluate.pipelines.generate_queries --count 30 --out services/agent/evaluate/data/queries.jsonl
+.venv/bin/python -m agent.evaluate.pipelines.build_graders --out services/agent/evaluate/data/rubrics.json
+.venv/bin/python -m agent.evaluate.pipelines.fill_answers --in services/agent/evaluate/data/queries.jsonl --out services/agent/evaluate/data/answers.jsonl
+.venv/bin/python -m agent.evaluate.pipelines.score_pipeline --in services/agent/evaluate/data/answers.jsonl --rubrics services/agent/evaluate/data/rubrics.json --out services/agent/evaluate/data/scored.jsonl --summary-out services/agent/evaluate/data/score_summary.json --manual-review-out services/agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
 ```
 
 ## 主要产物
@@ -88,4 +88,4 @@ tool_use_accuracy = 0.4*tool_selection_accuracy + 0.3*tool_argument_quality + 0.
 - `fill_answers` 和 `run_pipeline` 会自动打开 LangSmith tracing。
 - `run_pipeline`、`build_graders`、`score_pipeline` 会在入口阶段自动读取 `conf/.env`；`fill_answers` 也会在运行时通过配置加载读取相同文件。
 - `answers.jsonl` 会保留证据摘要和工具执行记录，方便后续评分与人工复核。
-- 若只需要模块说明，请看 `agent/evaluate/README.md`；实际命令入口以根 `README.md` 和本页为准。
+- 若只需要模块说明，请看 `services/agent/evaluate/README.md`；实际命令入口以根 `README.md` 和本页为准。
