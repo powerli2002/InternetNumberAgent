@@ -24,12 +24,12 @@
 - 改文档组织、AI 规范：看本目录下其他文档
 
 ## 按代码目录找位置
-- `fusiondata/src/`：离线融合逻辑
-- `agent/runtime/`：主编排与上下文构建
-- `agent/services/http/`：API
-- `agent/services/mcp/`：工具服务与客户端
-- `agent/tools/`：NL2SQL / RAG / Neo4j / Note / Todo
-- `agent/scripts/`：导入、建索引、排障脚本
+- `services/fusiondata/src/`：离线融合逻辑
+- `services/agent/runtime/`：主编排与上下文构建
+- `services/agent/services/http/`：API
+- `services/agent/services/mcp/`：工具服务与客户端
+- `services/agent/tools/`：NL2SQL / RAG / Neo4j / Note / Todo
+- `services/agent/scripts/`：导入、建索引、排障脚本
 
 ## 工作规则
 - 先看权威文档，再改代码，不要根据归档文档做判断。

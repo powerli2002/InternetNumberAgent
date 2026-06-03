@@ -2,7 +2,7 @@
 
 ## 定位
 
-Text2SQL 只面向 PostgreSQL 的 16 张核心实体表，职责是把自然语言问题转换为只读 SQL，并在安全边界内执行查询。当前实现位于 `agent/tools/nl2sql_tool.py`。
+Text2SQL 只面向 PostgreSQL 的 16 张核心实体表，职责是把自然语言问题转换为只读 SQL，并在安全边界内执行查询。当前实现位于 `services/agent/tools/nl2sql_tool.py`。
 
 ## 核心约束
 - 只允许查询 16 张核心表。
@@ -18,10 +18,10 @@ Text2SQL 只面向 PostgreSQL 的 16 张核心实体表，职责是把自然语�
 5. 执行 SQL，返回结构化结果。
 
 ## 相关代码
-- `agent/tools/nl2sql_tool.py`：NL2SQL 主实现。
-- `agent/core/schema.py`：表结构与字段上下文提示。
-- `agent/core/prompts.py`：Text2SQL 提示词。
-- `agent/scripts/build_nl2sql_indexes.py`：预构建表/列索引。
+- `services/agent/tools/nl2sql_tool.py`：NL2SQL 主实现。
+- `services/agent/core/schema.py`：表结构与字段上下文提示。
+- `services/agent/core/prompts.py`：Text2SQL 提示词。
+- `services/agent/scripts/build_nl2sql_indexes.py`：预构建表/列索引。
 
 ## 关键配置
 - `ALLOWED_TABLES`：NL2SQL 白名单。

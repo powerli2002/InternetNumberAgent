@@ -13,6 +13,9 @@ fi
 mkdir -p "$LOG_DIR"
 cd "$ROOT_DIR"
 
+# services/ 下的 agent、fusiondata 以顶层包名导入，需将其加入模块搜索路径
+export PYTHONPATH="$ROOT_DIR/services${PYTHONPATH:+:$PYTHONPATH}"
+
 start_python_process() {
   local name="$1"
   local pattern="$2"

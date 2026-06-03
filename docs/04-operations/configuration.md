@@ -26,7 +26,7 @@
 - 主要变量：`LOCAL_LLM_API_KEY`、`LOCAL_LLM_BASE_URL`、`LOCAL_LLM_MODEL`
 
 ## 本地 vLLM 说明
-- 启动命令：`python agent/model/start_vllm.py`
+- 启动命令：`python services/agent/model/start_vllm.py`
 - 若有旧进程占用 `2222`，可先清理：
 
 ```bash
@@ -70,7 +70,7 @@ pkill -f "VLLM::EngineCore"
 - `NOTES_DIR`：笔记目录
 - `NL2SQL_INDEX_CACHE_DIR`：NL2SQL 索引缓存目录
 
-默认约定是所有本地状态都收敛到 `agent/store/`，不要把状态文件散落到各业务目录。
+默认约定是所有本地状态都收敛到 `services/agent/store/`，不要把状态文件散落到各业务目录。
 
 ## 运行与调试相关配置
 - `MCP_SERVER_URL`：MCP 服务地址

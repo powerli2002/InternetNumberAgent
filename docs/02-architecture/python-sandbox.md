@@ -25,7 +25,7 @@
 当前链路涉及四个层次：
 
 ### 1. LangGraph 编排层
-- 文件：`agent/runtime/langgraph_orchestrator.py`
+- 文件：`services/agent/runtime/langgraph_orchestrator.py`
 - 职责：
   - 判断当前步骤是否需要 Python
   - 从依赖步骤结果中抽取轻量上下文与真实表格
@@ -34,23 +34,23 @@
   - 把产物信息转成证据和最终回答中的图片引用
 
 ### 2. Python 工具层
-- 文件：`agent/tools/python_sandbox_tool.py`
+- 文件：`services/agent/tools/python_sandbox_tool.py`
 - 职责：
   - 根据 task/context 生成 Python 代码
   - 对生成代码做约束校验
   - 调用产品后端 `/internal/sandbox/python`
 
 ### 3. MCP 工具层
-- 文件：`agent/services/mcp/server.py`
+- 文件：`services/agent/services/mcp/server.py`
 - 职责：
   - 暴露 `python_sandbox_execute`
   - 把 LangGraph 的调用转换成 Python 工具对象调用
 
 ### 4. 产品后端与 OpenSandbox 层
 - 文件：
-  - `backend/main.py`
-  - `backend/sandbox/opensandbox_provider.py`
-  - `backend/store.py`
+  - `services/backend/main.py`
+  - `services/backend/sandbox/opensandbox_provider.py`
+  - `services/backend/store.py`
 - 职责：
   - 创建沙箱运行记录
   - 把代码、输入元数据和真实文件写入沙箱文件系统
@@ -170,7 +170,7 @@ flowchart TD
 
 ## Python 工具如何生成代码
 
-入口在 `agent/tools/python_sandbox_tool.py`。
+入口在 `services/agent/tools/python_sandbox_tool.py`。
 
 ### 系统约束
 
@@ -217,7 +217,7 @@ flowchart TD
 
 ## OpenSandbox 执行原理
 
-真正与 OpenSandbox SDK 交互的是 `backend/sandbox/opensandbox_provider.py`。
+真正与 OpenSandbox SDK 交互的是 `services/backend/sandbox/opensandbox_provider.py`。
 
 执行流程如下：
 
@@ -254,7 +254,7 @@ Agent 与沙箱之间并不存在共享宿主磁盘。当前方案完全依赖 O
 
 ## 后端如何处理产物
 
-入口在 `backend/main.py`。
+入口在 `services/backend/main.py`。
 
 ### 运行记录
 
@@ -271,7 +271,7 @@ Agent 与沙箱之间并不存在共享宿主磁盘。当前方案完全依赖 O
 
 每个回收回来的 artifact 会被写入本地存储：
 
-- 目录：`backend/store/artifacts/{thread_id}/{sandbox_run_id}/`
+- 目录：`services/backend/store/artifacts/{thread_id}/{sandbox_run_id}/`
 - 文件名：随机 UUID + 原扩展名
 
 这里的磁盘文件名不是用户最终看到的名字。它只承担存储职责。
@@ -344,37 +344,37 @@ Agent 与沙箱之间并不存在共享宿主磁盘。当前方案完全依赖 O
 
 如果 Python 沙箱链路异常，建议按下面顺序检查：
 
-1. `agent/runtime/langgraph_orchestrator.py`
+1. `services/agent/runtime/langgraph_orchestrator.py`
    - 是否正确构造了 `input_data`
    - 是否正确生成了 `input_files`
 
-2. `agent/tools/python_sandbox_tool.py`
+2. `services/agent/tools/python_sandbox_tool.py`
    - 是否走到了标准库 SVG 分支
    - 是否误判为数据为空
 
-3. `backend/sandbox/opensandbox_provider.py`
+3. `services/backend/sandbox/opensandbox_provider.py`
    - 是否成功写入 `/workspace/input`
    - 是否成功执行 `python3 /workspace/main.py`
    - 是否能从 `/workspace/artifacts` 读回文件
 
-4. `backend/main.py`
+4. `services/backend/main.py`
    - 是否成功创建 artifact
    - 是否标题被语义化改写
    - 是否下载接口返回正确 `filename`
 
-5. `webapp/`
+5. `services/webapp/`
    - Markdown 是否包含 `artifact://...`
    - 前端同源代理 `/api/artifacts/{id}/content` 是否返回 200
 
 ## 代码入口索引
 
-- LangGraph 编排：`agent/runtime/langgraph_orchestrator.py`
-- Python 工具：`agent/tools/python_sandbox_tool.py`
-- MCP 暴露：`agent/services/mcp/server.py`
-- 后端入口：`backend/main.py`
-- OpenSandbox 适配器：`backend/sandbox/opensandbox_provider.py`
-- 前端图片代理：`webapp/app/api/artifacts/[artifactId]/content/route.ts`
-- 前端 Markdown 渲染：`webapp/app/components/markdown-content.tsx`
+- LangGraph 编排：`services/agent/runtime/langgraph_orchestrator.py`
+- Python 工具：`services/agent/tools/python_sandbox_tool.py`
+- MCP 暴露：`services/agent/services/mcp/server.py`
+- 后端入口：`services/backend/main.py`
+- OpenSandbox 适配器：`services/backend/sandbox/opensandbox_provider.py`
+- 前端图片代理：`services/webapp/app/api/artifacts/[artifactId]/content/route.ts`
+- 前端 Markdown 渲染：`services/webapp/app/components/markdown-content.tsx`
 
 ## 继续阅读
 

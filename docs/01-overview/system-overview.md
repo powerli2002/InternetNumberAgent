@@ -29,13 +29,13 @@
 - 文档中的 `docs/90-archive/` 内容不应作为当前开发依据。
 
 ## 核心组件
-- `fusiondata/`：多源数据融合、格式化、导出 CSV。
-- `agent/scripts/load_all_csv.py`：把 CSV 导入 PostgreSQL，并可触发 Neo4j 导入。
-- `agent/runtime/fusion_agent.py`：FusionAgent 入口。
-- `agent/runtime/langgraph_orchestrator.py`：LangGraph 主编排。
-- `agent/services/mcp/server.py`：FastMCP 服务。
-- `agent/services/http/server.py`：HTTP API。
-- `agent/tools/*.py`：NL2SQL、RAG、Neo4j、Note、Todo 等工具实现。
+- `services/fusiondata/`：多源数据融合、格式化、导出 CSV。
+- `services/agent/scripts/load_all_csv.py`：把 CSV 导入 PostgreSQL，并可触发 Neo4j 导入。
+- `services/agent/runtime/fusion_agent.py`：FusionAgent 入口。
+- `services/agent/runtime/langgraph_orchestrator.py`：LangGraph 主编排。
+- `services/agent/services/mcp/server.py`：FastMCP 服务。
+- `services/agent/services/http/server.py`：HTTP API。
+- `services/agent/tools/*.py`：NL2SQL、RAG、Neo4j、Note、Todo 等工具实现。
 
 ## 推荐阅读路径
 1. 架构总览：`../02-architecture/overall-architecture.md`

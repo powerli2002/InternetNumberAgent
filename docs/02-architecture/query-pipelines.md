@@ -27,20 +27,20 @@
 8. 若本轮存在图片 artifact，回答阶段会把图片以 `![标题](artifact://artifact_id)` 的 Markdown 引用附加到最终消息中；前端负责把该引用解析成当前线程中的真实产物预览。
 
 ## NL2SQL 链路
-- 入口：`agent/tools/nl2sql_tool.py`
+- 入口：`services/agent/tools/nl2sql_tool.py`
 - 作用：面向 16 张核心表生成只读 SQL，并执行受控查询。
 - 适合：计数、分组、排序、前 N 样本、字段过滤。
 - 约束：只读、白名单、强制 LIMIT、超时控制。
 
 ## RAG 链路
-- 入口：`agent/tools/rag_tool.py`
-- 入库：`agent/knowledge_ingest.py`、`agent/tools/rag_ingest_pipeline.py`
+- 入口：`services/agent/tools/rag_tool.py`
+- 入库：`services/agent/knowledge_ingest.py`、`services/agent/tools/rag_ingest_pipeline.py`
 - 作用：从项目文档、知识库、笔记中召回相关片段。
 - 适合：概念说明、流程解释、运维知识、非结构化背景资料。
 
 ## Python 沙箱链路
-- 入口：`agent/tools/python_sandbox_tool.py`
-- 执行：`backend/main.py`、`backend/sandbox/opensandbox_provider.py`
+- 入口：`services/agent/tools/python_sandbox_tool.py`
+- 执行：`services/backend/main.py`、`services/backend/sandbox/opensandbox_provider.py`
 - 作用：基于上游工具的结构化结果做绘图、表格整理、文件生成。
 - 数据传递：
   - Agent 会把依赖步骤结果整理成轻量 `input_data` 元数据。
@@ -51,8 +51,8 @@
 - 详细原理、数据契约与命名规则见 `python-sandbox.md`。
 
 ## Neo4j 链路
-- 入口：`agent/tools/neo4j_llamaindex_tool.py`
-- 导入：`agent/scripts/neo4j_graph_loader.py`
+- 入口：`services/agent/tools/neo4j_llamaindex_tool.py`
+- 导入：`services/agent/scripts/neo4j_graph_loader.py`
 - 作用：基于图谱关系查询 Prefix、AS、Org、Country 等实体之间的关联。
 - 适合：上下游、Peer、组织到前缀、国家到 AS 等关系问题。
 

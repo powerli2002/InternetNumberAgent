@@ -4,12 +4,12 @@
 
 系统分为离线数据处理、Agent 引擎与产品服务三条链路：
 
-1. `fusiondata/` 将 RIR/WHOIS/RDAP、BGP、DNS/网站等数据清洗为标准化 CSV。
-2. `agent/scripts/load_all_csv.py` 将 CSV 导入 PostgreSQL 16 张核心表，并按需写入 Neo4j。
-3. `agent/knowledge_ingest.py` 与 `agent/tools/rag_ingest_pipeline.py` 将文档写入 Milvus。
+1. `services/fusiondata/` 将 RIR/WHOIS/RDAP、BGP、DNS/网站等数据清洗为标准化 CSV。
+2. `services/agent/scripts/load_all_csv.py` 将 CSV 导入 PostgreSQL 16 张核心表，并按需写入 Neo4j。
+3. `services/agent/knowledge_ingest.py` 与 `services/agent/tools/rag_ingest_pipeline.py` 将文档写入 Milvus。
 4. `FusionAgent` 基于 LangGraph 编排 NL2SQL、RAG、Neo4j 与 Python 沙箱能力，组织证据后生成回答。
-5. `backend/` 提供多用户认证、线程、过程事件、artifact 与 OpenSandbox 编排。
-6. `webapp/` 提供正式产品前端，展示答案、工具调用、步骤摘要与图片侧栏。
+5. `services/backend/` 提供多用户认证、线程、过程事件、artifact 与 OpenSandbox 编排。
+6. `services/webapp/` 提供正式产品前端，展示答案、工具调用、步骤摘要与图片侧栏。
 
 ```mermaid
 flowchart LR
@@ -29,17 +29,17 @@ flowchart LR
 ## 在线主链路
 
 当前在线链路拆成两层：
-- `agent/`：只负责智能体规划、工具调度、推理摘要与流式消息。
-- `backend/`：只负责用户、会话、权限、过程事件、artifact 与 OpenSandbox。
+- `services/agent/`：只负责智能体规划、工具调度、推理摘要与流式消息。
+- `services/backend/`：只负责用户、会话、权限、过程事件、artifact 与 OpenSandbox。
 
 当前主干实现采用 **LangGraph + FastMCP + Product Backend**：
-- `agent/runtime/fusion_agent.py`：对外暴露统一问答入口。
-- `agent/runtime/langgraph_orchestrator.py`：计划、调度、执行、重规划、回答生成。
-- `agent/runtime/context_builder.py`：汇总结构化结果、文档证据和上下文。
-- `agent/services/mcp/client.py`：统一调用 FastMCP 工具。
-- `agent/services/mcp/server.py`：暴露 `nl2sql_query`、`rag_search`、`neo4j_llamaindex_query`、`python_sandbox_execute`、`note_search`、`todo_*` 等工具。
-- `agent/services/http/server.py`：保留 Agent 调试/兼容 API。
-- `backend/main.py`：正式产品 API。
+- `services/agent/runtime/fusion_agent.py`：对外暴露统一问答入口。
+- `services/agent/runtime/langgraph_orchestrator.py`：计划、调度、执行、重规划、回答生成。
+- `services/agent/runtime/context_builder.py`：汇总结构化结果、文档证据和上下文。
+- `services/agent/services/mcp/client.py`：统一调用 FastMCP 工具。
+- `services/agent/services/mcp/server.py`：暴露 `nl2sql_query`、`rag_search`、`neo4j_llamaindex_query`、`python_sandbox_execute`、`note_search`、`todo_*` 等工具。
+- `services/agent/services/http/server.py`：保留 Agent 调试/兼容 API。
+- `services/backend/main.py`：正式产品 API。
 
 当前 Python 沙箱的数据进入方式采用“元数据与真实数据分离”：
 - 回答生成只消费结构化摘要与少量预览行，避免大表直接进入最终回答上下文。
@@ -47,16 +47,16 @@ flowchart LR
 - Python 沙箱的具体数据契约、执行流程、artifact 回收与命名规则见 `python-sandbox.md`。
 
 ## 当前目录职责
-- `agent/core/`：配置、提示词、模型、追踪、Schema。
-- `agent/runtime/`：主编排、状态模型、上下文构建。
-- `agent/services/http/`：FastAPI 调试/兼容服务。
-- `agent/services/mcp/`：FastMCP 服务端与客户端。
-- `agent/tools/`：底层工具实现。
-- `backend/`：产品后端服务。
+- `services/agent/core/`：配置、提示词、模型、追踪、Schema。
+- `services/agent/runtime/`：主编排、状态模型、上下文构建。
+- `services/agent/services/http/`：FastAPI 调试/兼容服务。
+- `services/agent/services/mcp/`：FastMCP 服务端与客户端。
+- `services/agent/tools/`：底层工具实现。
+- `services/backend/`：产品后端服务。
 - `deploy/`：本地启动脚本入口。
-- `webapp/`：正式产品前端。
-- `agent/scripts/`：导入、建索引、评测、排障脚本。
-- `fusiondata/src/`：离线融合处理逻辑。
+- `services/webapp/`：正式产品前端。
+- `services/agent/scripts/`：导入、建索引、评测、排障脚本。
+- `services/fusiondata/src/`：离线融合处理逻辑。
 
 ## 关键设计决策
 - PostgreSQL 是事实源，保证可审计与结构化查询稳定性。

@@ -15,23 +15,31 @@
 - AI 协作规则：`docs/05-ai/repo-guide.md`
 
 ## 目录
-- `fusiondata/`：离线融合处理流水线。
-- `agent/runtime/`：FusionAgent、LangGraph 编排、上下文构建。
-- `agent/services/http/`：Agent 调试/兼容 HTTP API。
-- `agent/services/mcp/`：FastMCP 服务与客户端。
-- `agent/tools/`：NL2SQL、RAG、Neo4j、Note、Todo 等工具。
-- `backend/`：认证、线程、过程事件、artifact、OpenSandbox 接入。
-- `deploy/`：本地启动脚本入口，统一管理 MCP、后端、前端、LangGraph 调试与评测命令。
-- `webapp/`：正式产品前端。
-- `agent/scripts/`：导入、建索引、评测与排障脚本。
+- `services/`：四个产品服务的统一根目录。
+  - `services/fusiondata/`：离线融合处理流水线。
+  - `services/agent/`：FusionAgent 运行时与工具集。
+    - `services/agent/runtime/`：FusionAgent、LangGraph 编排、上下文构建。
+    - `services/agent/services/http/`：Agent 调试/兼容 HTTP API。
+    - `services/agent/services/mcp/`：FastMCP 服务与客户端。
+    - `services/agent/tools/`：NL2SQL、RAG、Neo4j、Note、Todo 等工具。
+    - `services/agent/scripts/`：导入、建索引、评测与排障脚本。
+  - `services/backend/`：认证、线程、过程事件、artifact、OpenSandbox 接入。
+  - `services/webapp/`：正式产品前端。
 - `conf/`：配置与 `.env`。
+- `database/`：核心表 DDL 与注释。
+- `deploy/`：本地启动脚本入口，统一管理 MCP、后端、前端、LangGraph 调试与评测命令。
 - `docs/`：当前权威文档与历史归档。
+- `scratch/`：技能卡片与个人笔记等非运行必需内容。
+
+> 三个 Python 包仍以顶层包名 `agent`、`fusiondata`、`backend` 导入。`deploy/` 脚本已自动把 `services/` 加入 `PYTHONPATH`；在仓库根目录手动执行 `python -m agent.*` 命令前，请先 `export PYTHONPATH=services`。
 
 ## 常用命令
 
 执行 `deploy/` 下脚本前，请先满足两个前置条件：
 - 仓库根目录已创建并安装 `.venv/`。
 - 前端相关脚本所在环境已安装 `pnpm`。
+
+`deploy/` 脚本会自动把 `services/` 加入 `PYTHONPATH`。若在仓库根目录手动执行下文的 `python -m agent.*` 命令，请先 `export PYTHONPATH=services`。
 
 当前 `deploy/` 只保留三条启动链路：
 - `./deploy/start_dev_chain.sh`：启动开发链路（MCP + LangGraph 调试）。
@@ -48,10 +56,10 @@ python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . -
 ./deploy/start_ui_chain.sh
 
 # 启动 OpenSandbox
-./backend/scripts/start_opensandbox.sh
+./services/backend/scripts/start_opensandbox.sh
 
 # 构建文档向量索引
-python agent/knowledge_ingest.py --root . --path agent/knowledge --reset
+python services/agent/knowledge_ingest.py --root . --path services/agent/knowledge --reset
 
 # 构建 Neo4j 图谱
 python -m agent.scripts.neo4j_graph_loader --batch-size 1000
@@ -61,13 +69,13 @@ python -m agent.scripts.neo4j_graph_loader --batch-size 1000
 
 ```bash
 # 启动 CLI
-python agent/cli/main.py
+python services/agent/cli/main.py
 
 # 启动开发链路
 ./deploy/start_dev_chain.sh
 
 # OpenSandbox 最小联调
-.venv/bin/python backend/scripts/opensandbox_smoke_test.py
+.venv/bin/python services/backend/scripts/opensandbox_smoke_test.py
 ```
 
 OpenSandbox 由 `docker/docker-compose.yml` 管理，服务端配置固定放在 `conf/opensandbox.toml`。
@@ -80,7 +88,7 @@ kill $(lsof -ti tcp:2222)
 pkill -f "VLLM::EngineCore"
 
 # 启动本地 vLLM
-python agent/model/start_vllm.py
+python services/agent/model/start_vllm.py
 ```
 
 ### 评测
@@ -92,16 +100,16 @@ python agent/model/start_vllm.py
 ./deploy/start_evaluation.sh
 
 # 分步生成题目
-.venv/bin/python -m agent.evaluate.pipelines.generate_queries --count 30 --out agent/evaluate/data/queries.jsonl
+.venv/bin/python -m agent.evaluate.pipelines.generate_queries --count 30 --out services/agent/evaluate/data/queries.jsonl
 
 # 构建评分 rubric
-.venv/bin/python -m agent.evaluate.pipelines.build_graders --out agent/evaluate/data/rubrics.json
+.venv/bin/python -m agent.evaluate.pipelines.build_graders --out services/agent/evaluate/data/rubrics.json
 
 # 生成 answers
-.venv/bin/python -m agent.evaluate.pipelines.fill_answers --in agent/evaluate/data/queries.jsonl --out agent/evaluate/data/answers.jsonl
+.venv/bin/python -m agent.evaluate.pipelines.fill_answers --in services/agent/evaluate/data/queries.jsonl --out services/agent/evaluate/data/answers.jsonl
 
 # 执行评分
-.venv/bin/python -m agent.evaluate.pipelines.score_pipeline --in agent/evaluate/data/answers.jsonl --rubrics agent/evaluate/data/rubrics.json --out agent/evaluate/data/scored.jsonl --summary-out agent/evaluate/data/score_summary.json --manual-review-out agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
+.venv/bin/python -m agent.evaluate.pipelines.score_pipeline --in services/agent/evaluate/data/answers.jsonl --rubrics services/agent/evaluate/data/rubrics.json --out services/agent/evaluate/data/scored.jsonl --summary-out services/agent/evaluate/data/score_summary.json --manual-review-out services/agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
 ```
 
 ### 绘图模型评测
