@@ -39,8 +39,11 @@ mount/
 conf/.env
 agent/store/memory/*.sqlite
 webapp/node_modules
+services/webapp/node_modules
 webapp/.next
+services/webapp/.next
 backend/store/artifacts
+services/backend/store/artifacts
 
 .pytest_cache
 __pycache__
