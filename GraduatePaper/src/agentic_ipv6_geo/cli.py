@@ -10,6 +10,7 @@ from agentic_ipv6_geo.common.config import load_runtime_config, runtime_warnings
 from agentic_ipv6_geo.common.logger import JsonlLogger
 from agentic_ipv6_geo.common.models import Location, Target
 from agentic_ipv6_geo.data.repository import DataRepository, write_jsonl
+from agentic_ipv6_geo.data.p0_builder import P0Builder
 from agentic_ipv6_geo.data.trustgeo_adapter import TrustGeoAdapter
 from agentic_ipv6_geo.data.validator import DataValidator, write_validation_report
 from agentic_ipv6_geo.evaluation import Evaluator
@@ -128,6 +129,18 @@ def collect_rdns_main() -> None:
         append=args.append,
         resume=args.resume,
     )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def build_p0_main() -> None:
+    parser = argparse.ArgumentParser(description="构建无泄漏、可回放的 GeoAgent P0 训练环境")
+    parser.add_argument("--config", default="configs/trustgeo.json")
+    parser.add_argument("--output-dir", default="outputs/p0")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    repo = DataRepository(config.get("data_dir", "data/trustgeo_processed"))
+    summary = P0Builder(repo, config, args.output_dir).run()
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

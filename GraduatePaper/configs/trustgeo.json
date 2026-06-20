@@ -145,5 +145,12 @@
       "coverage_reward": 50.0,
       "invalid_action_penalty": 1000.0
     }
+  },
+  "p0": {
+    "seed": 42,
+    "split_prefix_length": 48,
+    "max_steps": 4,
+    "max_probe_count": 12,
+    "oracle_min_improvement_rate": 0.1
   }
 }

@@ -2,6 +2,7 @@ services:
   postgres:
     image: postgres:15
     container_name: fusion-postgres
+    restart: always
     environment:
       POSTGRES_DB: fusionprocessing
       POSTGRES_USER: admin

@@ -317,8 +317,7 @@ class Evaluator:
                     ],
                     "target_ip": target_ip,
                     "chosen_action": action,
-                    "chosen_reward": reward,
-                    "candidate_rewards": {candidate_action: candidate_reward for candidate_action, _candidate_row, candidate_reward in candidates},
+                    "teacher": "offline_oracle",
                 }
                 fh.write(json.dumps(sample, ensure_ascii=False, default=str) + "\n")
 
@@ -326,8 +325,6 @@ class Evaluator:
         result = row["result"]
         return {
             "target_ip": row["target_ip"],
-            "truth_region": row["truth"].region,
-            "truth_city": row["truth"].city,
             "available_actions": ["stop", "rdns", "active", "passive", "all"],
             "candidate_status": {action: candidate_row["result"]["status"] for action, candidate_row, _reward in candidates},
             "candidate_cost": {action: candidate_row["result"].get("cost", {}) for action, candidate_row, _reward in candidates},
@@ -340,8 +337,6 @@ class Evaluator:
         return {
             "state": {
                 "target_ip": row["target_ip"],
-                "truth_region": row["truth"].region,
-                "truth_city": row["truth"].city,
                 "experiment": row["experiment"],
             },
             "available_tools": ["modugeo", "rdns", "active_triangulation", "passive_ipdb", "whois", "fusion", "stop"],

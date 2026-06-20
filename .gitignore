@@ -66,3 +66,8 @@ ref
 # IDE / 会话产物
 .cursor/
 nohup.out
+
+# Local geolocation datasets and dumps
+collected_data.dump
+data/geoip/
+*.mmdb

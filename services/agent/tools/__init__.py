@@ -5,6 +5,8 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any, Dict, Tuple
 
+# BaseTool / ToolResult 是轻量基类，无重依赖，直接导入
+from agent.tools.base import BaseTool, ToolResult
 
 _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "NL2SQLTool": ("agent.tools.nl2sql_tool", "NL2SQLTool"),
@@ -17,9 +19,11 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "PythonSandboxTool": ("agent.tools.python_sandbox_tool", "PythonSandboxTool"),
     "Neo4jQueryTool": ("agent.tools.neo4j_query_tool", "Neo4jQueryTool"),
     "Neo4jLlamaIndexTool": ("agent.tools.neo4j_llamaindex_tool", "Neo4jLlamaIndexTool"),
+    "DNSLookupTool": ("agent.tools.dns_lookup_tool", "DNSLookupTool"),
+    "GeoIPLookupTool": ("agent.tools.geoip_lookup_tool", "GeoIPLookupTool"),
 }
 
-__all__ = list(_LAZY_EXPORTS.keys())
+__all__ = ["BaseTool", "ToolResult"] + list(_LAZY_EXPORTS.keys())
 
 
 def __getattr__(name: str) -> Any:

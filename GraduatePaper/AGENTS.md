@@ -16,12 +16,14 @@
 | E02 | rDNS 覆盖率提升 | 📋 规划中 |
 | E03 | CBG 探针扩充 | 📋 规划中（高优先级） |
 | E04 | 被动 IPDB 接入 | 📋 规划中 |
+| E05 | P0 Agent 训练环境建设 | ✅ 完成 |
 
 ## 必读文件
 
 1. `GraduatePaper/DASHBOARD.md` — 进度总控
 2. `GraduatePaper/Agentic_IPv6_Geolocation_Plan.md` — 技术设计方案
 3. `GraduatePaper/experiments/E01_baseline_trustgeo/results.md` — 基线数据
+4. `GraduatePaper/experiments/E05_p0_environment/results.md` — P0 建设结论
 
 ## 当前运行入口
 
@@ -43,6 +45,11 @@ UV_CACHE_DIR=.uv-cache uv run ipv6geo-collect-rdns \
 
 # 测试
 UV_CACHE_DIR=.uv-cache uv run python -m unittest discover -s tests -v
+
+# P0 无泄漏可回放训练环境
+UV_CACHE_DIR=.uv-cache uv run ipv6geo-build-p0 \
+  --config configs/trustgeo.json \
+  --output-dir outputs/p0
 ```
 
 关键代码路径：
@@ -52,6 +59,8 @@ UV_CACHE_DIR=.uv-cache uv run python -m unittest discover -s tests -v
 | CBG 修改入口（E03） | `src/agentic_ipv6_geo/tools/active_triangulation.py` |
 | rDNS 采集（E02） | `src/agentic_ipv6_geo/providers/zdns.py` |
 | 数据适配 | `src/agentic_ipv6_geo/data/trustgeo_adapter.py` |
+| P0 数据与 Oracle 审计 | `src/agentic_ipv6_geo/data/p0_builder.py` |
+| 多轮回放环境 | `src/agentic_ipv6_geo/environment/` |
 
 ## 强约束
 

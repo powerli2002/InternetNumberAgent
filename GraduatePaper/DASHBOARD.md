@@ -1,8 +1,8 @@
 # 毕业论文进度看板
 
 > 题目：基于 Agent 调度的 IPv6 地理位置推断系统  
-> 最后更新：2026-05-31  
-> 当前阶段：**实验阶段 · 数据缺口待突破**  
+> 最后更新：2026-06-08
+> 当前阶段：**P0 Agent 训练环境已建成 · 工具互补收益不足**
 > 论文撰写：暂缓，当前专注实验
 
 ---
@@ -10,9 +10,9 @@
 ## 一、总体进度
 
 ```
-系统实现  [████████████████████] 100%  代码完整，评测可跑通
-数据准备  [████████████░░░░░░░░]  60%  TrustGeo 已适配；rDNS/被动IPDB 缺失
-实验评测  [████████████░░░░░░░░]  55%  E01基线完成；E02/E03/E04 待做
+系统实现  [████████████████████] 100%  基础评测与 P0 多轮回放环境可运行
+数据准备  [████████████████░░░░]  80%  P0 数据已构建；正式 SFT 数据仍需平衡扩充
+实验评测  [██████████████░░░░░░]  70%  E01 与 E05 完成；工具适配实验待做
 ```
 
 ---
@@ -25,6 +25,7 @@
 | E02 | rDNS 覆盖率提升 | 📋 规划中 | — | — | 换 resolver，分析词典质量 |
 | E03 | CBG 探针扩充 | 📋 规划中 | — | — | 用 landmarks 扩充约束源 |
 | E04 | 被动 IPDB 接入 | 📋 规划中 | — | — | 需要 GeoCN.mmdb |
+| E05 | P0 Agent 训练环境建设 | ✅ 完成 | Oracle 30.0 km | 100% | 环境通过；定位纠错型 GRPO 门禁未通过 |
 
 ### E01 核心数据（325 测试 IP）
 
@@ -47,6 +48,8 @@
 | 被动 IPDB 本地无 GeoCN.mmdb | 中 | E04：评估开源替代方案（ip2location-lite） |
 | CBG 精度 678 km（probe 仅 3 个） | 高 | E03：用 2290 个 landmarks 扩充约束圆来源 |
 | RIPE Atlas API 401 | 低 | 更换有效 API Key 或放弃此路线 |
+| 非 ModuGeo 工具仅改善 48/929（5.17%） | 高 | 先做工具适配与适用性/风险控制 SFT，不直接做定位纠错型 GRPO |
+| SFT 种子中非 ModuGeo 调用仅 35 个训练任务 | 高 | 增加失败识别、质量判断、冲突和拒答轨迹，平衡动作分布 |
 
 ---
 
@@ -54,13 +57,14 @@
 
 ### 本周
 
-- [ ] **T1** E03：修改 `ActiveTriangulationTool` 支持 landmarks 作为约束源，重跑评测
-- [ ] **T2** E02：换 Google/114 DNS 重跑 rDNS 采集，分析现有 212 条 PTR 的词典命中率
+- [ ] **T1** 基于 P0 回放构造平衡的工具适用性与风险控制 SFT 数据
+- [ ] **T2** E03：验证 landmarks 是否能产生可靠主动约束并重跑 Oracle 审计
+- [ ] **T3** E02：分析现有 PTR 的词典命中与有效定位比例
 
 ### 近期
 
-- [ ] **T3** E04：评估 GeoCN.mmdb 或 ip2location-lite IPv6 可用性
-- [ ] **T4** 图表制作：误差 CDF、成本-精度前沿、调度策略对比
+- [ ] **T4** E04：评估 GeoCN.mmdb 或 ip2location-lite IPv6 可用性
+- [ ] **T5** 实现正式多轮 SFT 数据构建与训练入口
 
 ---
 
@@ -87,7 +91,8 @@ GraduatePaper/
 │   ├── E01_baseline_trustgeo/ ✅ results.md（已完成）
 │   ├── E02_rdns_enhancement/  📋 plan.md（规划中）
 │   ├── E03_cbg_probe_expansion/ 📋 plan.md（规划中）
-│   └── E04_passive_ipdb/      📋 plan.md（规划中）
+│   ├── E04_passive_ipdb/      📋 plan.md（规划中）
+│   └── E05_p0_environment/    ✅ results.md（P0 建设完成）
 │
 ├── notes/                     ← 研究笔记
 │   └── research_gaps.md       实验发现与负面结果整理
@@ -131,6 +136,21 @@ GraduatePaper/
 | 探针 | `data/trustgeo_processed/probes.csv` | 3 |
 | Landmarks | `data/trustgeo_processed/landmarks.csv` | 2290 |
 | rDNS（当前空） | `data/trustgeo_processed/rdns.csv` | 0 |
+
+### P0 建设结果
+
+| 项目 | 结果 |
+|------|-----:|
+| P0 目标 | 929 |
+| `/48` 隔离划分 | Train 650 / Validation 93 / Test 93 / Prefix-OOD 93 |
+| 工具回放记录 | 4,645 |
+| SFT 种子轨迹 | 650 |
+| GRPO prompts | 650 |
+| 模型可见数据泄漏 | 0 |
+| 确定性重放 | 通过 |
+| 非 ModuGeo Oracle 改善 | 48/929（5.17%） |
+| Oracle Median | 30.02 km |
+| 定位纠错型 GRPO 门禁 | 未通过 |
 
 ---
 

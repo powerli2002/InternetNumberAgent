@@ -78,3 +78,30 @@
 - 对应主题的 `docs/04-operations/*.md`
 
 根目录 `summary.md` 仅保留兼容性入口，当前数据模型权威内容以 `docs/03-data/core-schema.md` 为准。
+
+## Weights & Biases 配置
+
+**API Key**：存储于 `~/.netrc` 或本机环境变量 `WANDB_API_KEY`，勿提交到公开仓库。
+
+**登录命令**：
+```bash
+/opt/conda3/envs/netloc/bin/wandb login "$WANDB_API_KEY"
+```
+
+Project 信息：
+- Team：powerli_team（提交时务必确认）
+- Project：GraduateProject
+- 项目地址：https://wandb.ai/powerli_team/GraduateProject
+
+W&B Skills 安装：
+
+```bash
+# 仅当前项目
+npx skills add wandb/skills --skill '*' --yes
+
+# 全局（所有项目）
+npx skills add wandb/skills --skill '*' --yes --global
+
+# 绑定到指定 Agent（如 Claude Code）
+npx skills add wandb/skills --agent claude-code --skill '*' --yes --global
+```

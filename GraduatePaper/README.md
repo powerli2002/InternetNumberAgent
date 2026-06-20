@@ -4,12 +4,39 @@
 
 ## 快速运行
 
+本项目使用 `uv 0.11.19` 管理 Python 3.12 环境。标准虚拟环境位于 `.venv`，首次运行或依赖变化后执行：
+
 ```bash
 UV_CACHE_DIR=.uv-cache uv sync
 UV_CACHE_DIR=.uv-cache uv run python -m unittest discover -s tests -v
 UV_CACHE_DIR=.uv-cache uv run ipv6geo-eval --config configs/default.json --output-dir outputs
 UV_CACHE_DIR=.uv-cache uv run ipv6geo-run --config configs/default.json --targets data/processed/targets.csv --output outputs/predictions/batch_predictions.jsonl
 ```
+
+当前机器原有的 root 所有环境不可由普通用户使用，已保留为 `.venv-root-broken-20260608`，不作为运行环境。不要直接调用该目录中的解释器。
+
+## P0 Agent 训练环境
+
+P0 建设会按 `/48` 隔离划分目标，离线回放定位工具，将模型可见任务与私有真值分离，生成 SFT 种子轨迹、GRPO prompts，并执行真值泄漏、确定性回放和 Oracle 工具效用审计：
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run ipv6geo-build-p0 \
+  --config configs/trustgeo.json \
+  --output-dir outputs/p0
+```
+
+核心产物：
+
+- `outputs/p0/dataset/tasks.jsonl`：模型可见任务。
+- `outputs/p0/dataset/private_truth.jsonl`：仅供奖励与评测使用的私有真值。
+- `outputs/p0/dataset/tool_replay.jsonl`：确定性工具回放数据。
+- `outputs/p0/dataset/sft_seed.jsonl`：无泄漏 SFT 种子轨迹。
+- `outputs/p0/dataset/grpo_prompts.jsonl`：无泄漏 GRPO 任务。
+- `outputs/p0/audit/oracle_audit.json`：工具理论效用上界。
+- `outputs/p0/build_manifest.json`：输入文件哈希、配置哈希与构建摘要。
+- `outputs/p0/p0_summary.json`：P0 门禁与结论。
+
+当前 P0 建设结论见 `experiments/E05_p0_environment/results.md`。P0 基础环境建成不代表已经满足定位纠错型 GRPO 门禁；是否进入该训练阶段以 Oracle 审计为准。
 
 ## 使用 TrustGeo 数据
 
@@ -86,6 +113,8 @@ API key 不写入可提交的 `configs/*.json`。RIPE Atlas 实现规范见 `ski
 - `src/agentic_ipv6_geo/fusion/`：置信度加权融合与冲突惩罚。
 - `src/agentic_ipv6_geo/scheduler/`：规则式调度、Contextual Bandit、Qwen3.5 baseline、离线奖励 policy。
 - `src/agentic_ipv6_geo/evaluation/`：单工具、融合方案、调度策略评测与 RL trajectory 输出。
+- `src/agentic_ipv6_geo/environment/`：P0 Schema、真值泄漏扫描、磁盘回放加载与多轮 Agent 环境。
+- `src/agentic_ipv6_geo/data/p0_builder.py`：P0 数据划分、工具回放、SFT/GRPO 种子数据与 Oracle 审计构建器。
 - `src/agentic_ipv6_geo/mcp_server.py`：FastMCP 工具服务入口，供 Agent 按 MCP 协议调用定位工具。
 - `ipgeotools/`：外部工具与论文原型快照，包括 `Modugeo`、`cbgtool`、`scampertrace`、`IPDB/GeoCN` 和 `IPDB/ip-database`。
 - `worklog.md`：研究笔记、临时分析和非默认方案记录，不作为运行入口。

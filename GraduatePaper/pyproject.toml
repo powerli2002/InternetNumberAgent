@@ -29,6 +29,7 @@ ipv6geo-validate = "agentic_ipv6_geo.cli:validate_main"
 ipv6geo-dashboard = "agentic_ipv6_geo.cli:dashboard_main"
 ipv6geo-mcp = "agentic_ipv6_geo.mcp_server:main"
 ipv6geo-collect-rdns = "agentic_ipv6_geo.cli:collect_rdns_main"
+ipv6geo-build-p0 = "agentic_ipv6_geo.cli:build_p0_main"
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]
