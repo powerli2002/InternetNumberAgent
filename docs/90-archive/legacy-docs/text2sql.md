@@ -41,8 +41,8 @@ python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . -
 ### 2.2 环境变量（conf/.env）
 
 ```dotenv
-POSTGRES_URL=postgresql+psycopg2://user:pwd@host:5432/fusionprocessing
-DASHSCOPE_API_KEY=sk-xxxx
+POSTGRES_URL=postgresql+psycopg2://<user>:<password>@host:5432/fusionprocessing
+DASHSCOPE_API_KEY=<dashscope-api-key>
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_MODEL=qwen3-max-preview
 
