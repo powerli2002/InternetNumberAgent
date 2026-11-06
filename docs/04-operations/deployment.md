@@ -14,6 +14,16 @@
 - 仓库根目录已创建并安装 `.venv/`；`deploy/` 下的 Python 脚本默认直接调用 `.venv/bin/python`。
 - 如需启动 `services/webapp/`，宿主机需已安装 `pnpm`。
 
+迁移后若缺少环境或前端依赖，在仓库根目录重建：
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+pnpm --dir services/webapp install --frozen-lockfile
+```
+
+清理前的实际 Python 包版本记录在 `python_environments_20261106.json`。前端的 `.next/` 和 `tsconfig.tsbuildinfo` 是构建缓存，不随 Git 保存；生产部署时重新运行 `pnpm --dir services/webapp build`。
+
 ## deploy 启动链路
 
 - `./deploy/start_dev_chain.sh`：启动开发链路（MCP + LangGraph 调试）。
@@ -54,10 +64,10 @@ docker compose -f docker/docker-compose.yml up -d opensandbox
 ### 3. 导入 16 张核心表
 
 ```bash
-python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --ensure-core
+PYTHONPATH=services .venv/bin/python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --date 2024-08-12 --ensure-core
 ```
 
-如需指定日期：
+本机保留的最新完整实体快照为 `2024-08-12`。如需导入旧日期，先从 `DATA_CATALOG.md` 登记的归档恢复对应文件，再显式指定日期：
 
 ```bash
 python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --date 2024-08-12 --ensure-core

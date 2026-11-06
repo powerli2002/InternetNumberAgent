@@ -23,6 +23,7 @@
 
 ### `03-data/`
 - `core-schema.md`：16 张核心表、字段约束、导入规则、运行时表边界。
+- 本机文件位置及历史快照恢复见根目录 `DATA_CATALOG.md`。
 
 ### `04-operations/`
 - `deployment.md`：部署、启动、导入、索引构建、常用命令。

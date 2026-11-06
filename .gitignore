@@ -71,3 +71,17 @@ nohup.out
 collected_data.dump
 data/geoip/
 *.mmdb
+
+# 可重建缓存与私有历史数据归档
+.ruff_cache/
+.uv-cache/
+.pnpm-store/
+.venv-*/
+*.tsbuildinfo
+/data/archives/
+
+# 重建前端与核对清理结果所需的小文件
+!/services/webapp/package.json
+!/services/webapp/tsconfig.json
+!/docs/04-operations/cleanup_manifest_20261106.json
+!/docs/04-operations/python_environments_20261106.json

@@ -11,6 +11,7 @@
 - 数据模型：`docs/03-data/core-schema.md`
 - 部署与运行：`docs/04-operations/deployment.md`
 - 配置说明：`docs/04-operations/configuration.md`
+- 本地数据与历史快照恢复：`DATA_CATALOG.md`
 - 评测流水线：`docs/04-operations/evaluation.md`
 - AI 协作规则：`docs/05-ai/repo-guide.md`
 
@@ -39,6 +40,8 @@
 - 仓库根目录已创建并安装 `.venv/`。
 - 前端相关脚本所在环境已安装 `pnpm`。
 
+环境重建步骤见 [部署与运行](docs/04-operations/deployment.md)。前端依赖声明、锁文件和 TypeScript 配置随仓库保存，构建缓存不提交。
+
 `deploy/` 脚本会自动把 `services/` 加入 `PYTHONPATH`。若在仓库根目录手动执行下文的 `python -m agent.*` 命令，请先 `export PYTHONPATH=services`。
 
 当前 `deploy/` 只保留三条启动链路：
@@ -50,7 +53,7 @@
 
 ```bash
 # 导入 16 张核心表
-python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --ensure-core
+python -m agent.scripts.load_all_csv --config conf/config.docker.yaml --root . --date 2024-08-12 --ensure-core
 
 # 启动用户界面链路
 ./deploy/start_ui_chain.sh
@@ -111,77 +114,6 @@ python services/agent/model/start_vllm.py
 # 执行评分
 .venv/bin/python -m agent.evaluate.pipelines.score_pipeline --in services/agent/evaluate/data/answers.jsonl --rubrics services/agent/evaluate/data/rubrics.json --out services/agent/evaluate/data/scored.jsonl --summary-out services/agent/evaluate/data/score_summary.json --manual-review-out services/agent/evaluate/data/manual_review.csv --push-langsmith --langsmith-mode writeback
 ```
-
-### 绘图模型评测
-
-```bash
-cd /home/lzj/fusionprocessing/TrainModel/VisCoder/eval/PandasPlotBench && \
-PLOT_BENCH_CODEBERT_DEVICE=cuda:2 \
-/home/lzj/fusionprocessing/.venv/bin/python run_eval_and_upload_langsmith.py \
-  --full \
-  --cuda=1 \
-  --mode=generate \
-  --dataset-name=qwen3.5-plot-baseline \
-  --experiment-name=qwen3.5-plot-baseline \
-  --config=configs/config_normal_baseline.yaml \
-  --model=openai/QuantTrio/Qwen3.5-4B-AWQ
-
-# 自动选择最新 LoRA checkpoint，合并后在 cuda:2 部署，并在 cuda:3 执行评测
-cd /home/lzj/fusionprocessing/TrainModel/VisCoder/eval/PandasPlotBench && \
-bash run_latest_checkpoint_eval.sh --full
-
-# 自动选择最新 LoRA checkpoint，先 merge，再使用 llmcompressor 导出 AWQ 模型
-bash /home/lzj/fusionprocessing/TrainModel/VisCoder/train/export_latest_checkpoint_awq.sh
-
-# 如需覆盖上下文/显存/输出 token，可显式指定；2080 Ti 11GB 单卡默认建议 2048 context + 0.85 utilization + 1024 output tokens
-cd /home/lzj/fusionprocessing/TrainModel/VisCoder/eval/PandasPlotBench && \
-MAX_MODEL_LEN=2048 GPU_MEMORY_UTILIZATION=0.85 PLOT_BENCH_MAX_TOKENS=1024 bash run_latest_checkpoint_eval.sh --full
-
-# --skip-eval 只评测+上传
-PLOT_BENCH_CODEBERT_DEVICE=cuda:2 \
-/home/lzj/fusionprocessing/.venv/bin/python run_eval_and_upload_langsmith.py \
-  --full \
-  --skip-eval \
-  --cuda=2 \
-  --mode=generate \
-  --dataset-name=qwen3.5-plot-baseline \
-  --experiment-name=qwen3.5-plot-baseline \
-  --config=configs/config_normal_baseline.yaml \
-  --model=openai/QuantTrio/Qwen3.5-4B-AWQ
-```
-
-### 绘图模型 LoRA 训练
-
-```bash
-CUDA_VISIBLE_DEVICES=1 /home/lzj/fusionprocessing/TrainModel/VisCoder/.venv-lora-uv/bin/python \
-  /home/lzj/fusionprocessing/TrainModel/VisCoder/train/qwen35_lora_sft.py \
-  --sample_size 200000 \
-  --run_name qwen35-lora-100 \
-  --wandb_mode offline
-
-
-# 离线
-CUDA_VISIBLE_DEVICES=1 /home/lzj/fusionprocessing/TrainModel/VisCoder/.venv-lora-uv/bin/python \
-  /home/lzj/fusionprocessing/TrainModel/VisCoder/train/qwen35_lora_sft.py \
-  --sample_size 200000 \
-  --run_name qwen35-lora-100 \
-  --wandb_mode offline
-
-
-```
-
-断点续训：
-
-```bash
-LATEST_CKPT=$(ls -dt /home/lzj/fusionprocessing/TrainModel/VisCoder/train/output/qwen35_lora_run/checkpoint-* | head -n 1)
-CUDA_VISIBLE_DEVICES=1 /home/lzj/fusionprocessing/TrainModel/VisCoder/.venv-lora-uv/bin/python \
-  /home/lzj/fusionprocessing/TrainModel/VisCoder/train/qwen35_lora_sft.py \
-  --resume_from_checkpoint "$LATEST_CKPT" \
-  --run_name qwen35-lora-resume \
-  --wandb_mode offline
-```
-
-
 
 ## 核心原则
 - PostgreSQL 是事实源，Milvus 与 Neo4j 可从结构化数据重建。
